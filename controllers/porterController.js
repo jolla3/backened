@@ -33,4 +33,37 @@ const createPorter = async (req, res) => {
   }
 };
 
-module.exports = { getPerformance, createPorter };
+const getPorter = async (req, res) => {
+  try {
+    const porter = await porterService.getPorter(req.params.id);
+    res.json(porter);
+  } catch (error) {
+    res.status(400).json({ error: error.message });
+  }
+};
+
+const updatePorter = async (req, res) => {
+  try {
+    const porter = await porterService.updatePorter(req.params.id, req.body);
+    res.json(porter);
+  } catch (error) {
+    res.status(400).json({ error: error.message });
+  }
+};
+
+const deletePorter = async (req, res) => {
+  try {
+    const result = await porterService.deletePorter(req.params.id);
+    res.json(result);
+  } catch (error) {
+    res.status(400).json({ error: error.message });
+  }
+};
+
+module.exports = {
+  getPerformance,
+  createPorter,
+  getPorter,
+  updatePorter,
+  deletePorter
+};

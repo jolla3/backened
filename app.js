@@ -29,11 +29,6 @@ app.use(correlationMiddleware);
 // Routes
 app.use('/api', routes);
 
-// Health check
-app.get('/health', (req, res) => {
-  res.json({ status: 'ok', timestamp: new Date().toISOString() });
-});
-
 // Error handling
 app.use(errorMiddleware);
 
@@ -45,8 +40,7 @@ const startServer = async () => {
     await connectDB();
     
     server.listen(PORT, () => {
-      logger.info(`Server running on port ${PORT}`);
-      logger.info(`Environment: ${config.NODE_ENV}`);
+      // No log here - too verbose
     });
   } catch (error) {
     logger.error('Failed to start server', { error: error.message });
@@ -58,9 +52,7 @@ startServer();
 
 // Graceful shutdown
 process.on('SIGTERM', () => {
-  logger.info('SIGTERM received, shutting down gracefully');
   server.close(() => {
-    logger.info('Server closed');
     process.exit(0);
   });
 });

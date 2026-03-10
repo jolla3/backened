@@ -9,10 +9,37 @@ const createFarmer = async (req, res) => {
   }
 };
 
+const getFarmer = async (req, res) => {
+  try {
+    const farmer = await farmerService.getFarmer(req.params.id);
+    res.json(farmer);
+  } catch (error) {
+    res.status(400).json({ error: error.message });
+  }
+};
+
 const getBalance = async (req, res) => {
   try {
-    const history = await farmerService.getBalanceHistory(req.params.id);
-    res.json(history);
+    const farmer = await farmerService.getBalance(req.params.id);
+    res.json(farmer);
+  } catch (error) {
+    res.status(400).json({ error: error.message });
+  }
+};
+
+const updateFarmer = async (req, res) => {
+  try {
+    const farmer = await farmerService.updateFarmer(req.params.id, req.body);
+    res.json(farmer);
+  } catch (error) {
+    res.status(400).json({ error: error.message });
+  }
+};
+
+const deleteFarmer = async (req, res) => {
+  try {
+    const result = await farmerService.deleteFarmer(req.params.id);
+    res.json(result);
   } catch (error) {
     res.status(400).json({ error: error.message });
   }
@@ -21,22 +48,28 @@ const getBalance = async (req, res) => {
 const updateBalance = async (req, res) => {
   try {
     const { amount } = req.body;
-    const session = await require('mongoose').startSession();
-    session.startTransaction();
-    
-    try {
-      const farmer = await farmerService.updateBalance(req.params.id, amount, session);
-      await session.commitTransaction();
-      res.json(farmer);
-    } catch (error) {
-      await session.abortTransaction();
-      throw error;
-    } finally {
-      session.endSession();
-    }
+    const farmer = await farmerService.updateBalance(req.params.id, amount);
+    res.json(farmer);
   } catch (error) {
     res.status(400).json({ error: error.message });
   }
 };
 
-module.exports = { createFarmer, getBalance, updateBalance };
+const getBalanceHistory = async (req, res) => {
+  try {
+    const history = await farmerService.getBalanceHistory(req.params.id);
+    res.json(history);
+  } catch (error) {
+    res.status(400).json({ error: error.message });
+  }
+};
+
+module.exports = {
+  createFarmer,
+  getFarmer,
+  getBalance,
+  updateFarmer,
+  deleteFarmer,
+  updateBalance,
+  getBalanceHistory
+};

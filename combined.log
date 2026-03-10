@@ -70,3 +70,59 @@
 {"level":"info","message":"Environment: development","timestamp":"2026-03-04T16:42:01.530Z"}
 {"level":"info","message":"Server running on port 3000","timestamp":"2026-03-04T16:42:27.518Z"}
 {"level":"info","message":"Environment: development","timestamp":"2026-03-04T16:42:27.522Z"}
+{"level":"info","message":"Server running on port 3000","timestamp":"2026-03-05T17:12:19.608Z"}
+{"level":"info","message":"Environment: development","timestamp":"2026-03-05T17:12:19.612Z"}
+{"level":"info","message":"Server running on port 3000","timestamp":"2026-03-05T17:15:35.035Z"}
+{"level":"info","message":"Environment: development","timestamp":"2026-03-05T17:15:35.042Z"}
+{"level":"info","message":"Server running on port 3000","timestamp":"2026-03-05T17:16:00.575Z"}
+{"level":"info","message":"Environment: development","timestamp":"2026-03-05T17:16:00.579Z"}
+{"level":"info","message":"Server running on port 3000","timestamp":"2026-03-05T17:16:49.449Z"}
+{"level":"info","message":"Environment: development","timestamp":"2026-03-05T17:16:49.453Z"}
+{"level":"info","message":"Server running on port 3000","timestamp":"2026-03-05T17:17:02.097Z"}
+{"level":"info","message":"Environment: development","timestamp":"2026-03-05T17:17:02.103Z"}
+{"level":"info","message":"Server running on port 3000","timestamp":"2026-03-05T17:17:43.248Z"}
+{"level":"info","message":"Environment: development","timestamp":"2026-03-05T17:17:43.254Z"}
+{"level":"info","message":"Server running on port 3000","timestamp":"2026-03-05T17:18:13.393Z"}
+{"level":"info","message":"Environment: development","timestamp":"2026-03-05T17:18:13.397Z"}
+{"level":"info","message":"Server running on port 3000","timestamp":"2026-03-05T17:18:56.149Z"}
+{"level":"info","message":"Environment: development","timestamp":"2026-03-05T17:18:56.154Z"}
+{"correlationId":"9e0fb060-f504-49a4-aadf-0e6385356a8d","level":"info","message":"Request started","method":"POST","timestamp":"2026-03-05T17:31:14.785Z","url":"/api/auth/login"}
+{"correlationId":"9e0fb060-f504-49a4-aadf-0e6385356a8d","level":"info","message":"Login successful","role":"admin","timestamp":"2026-03-05T17:31:17.314Z","userId":"69a9b8041906e5cc2b40db84"}
+{"level":"info","message":"Server running on port 3000","timestamp":"2026-03-05T17:33:44.552Z"}
+{"level":"info","message":"Environment: development","timestamp":"2026-03-05T17:33:44.557Z"}
+{"level":"info","message":"Server running on port 3000","timestamp":"2026-03-05T17:40:39.720Z"}
+{"level":"info","message":"Environment: development","timestamp":"2026-03-05T17:40:39.725Z"}
+{"correlationId":"7f7a1119-3dcf-47dd-b045-455cd3b732ab","level":"info","message":"Request started","method":"POST","timestamp":"2026-03-05T17:40:40.067Z","url":"/api/auth/login"}
+{"correlationId":"7f7a1119-3dcf-47dd-b045-455cd3b732ab","level":"info","message":"Login successful","role":"admin","timestamp":"2026-03-05T17:40:43.366Z","userId":"69a9b8041906e5cc2b40db84"}
+{"correlationId":"90968e8b-e5ee-471f-9f3e-b75e195be03d","level":"info","message":"Request started","method":"GET","timestamp":"2026-03-05T17:47:18.053Z","url":"/api/dashboard/overview"}
+{"correlationId":"da472e56-3504-4354-8f7c-ef55a04ca7aa","level":"info","message":"Request started","method":"GET","timestamp":"2026-03-05T17:47:53.418Z","url":"/api/dashboard/overview"}
+{"correlationId":"dfe1b6f2-856a-43e4-81f9-3d90c45d062c","level":"info","message":"Request started","method":"GET","timestamp":"2026-03-05T17:58:58.510Z","url":"/api/farmers"}
+{"correlationId":"c75a6cfd-5355-4ae8-bb6a-d919a33762db","level":"info","message":"Request started","method":"POST","timestamp":"2026-03-05T17:59:08.140Z","url":"/api/farmers"}
+{"correlationId":"368f184e-76a4-4cd3-8ec1-26a422d4e1bb","level":"info","message":"Request started","method":"POST","timestamp":"2026-03-05T17:59:38.951Z","url":"/api/farmers"}
+{"correlationId":"0efd8c35-b47c-445d-b559-3726bb6c097c","level":"info","message":"Request started","method":"POST","timestamp":"2026-03-05T17:59:53.473Z","url":"/api/farmers"}
+{"correlationId":"174c0cc3-a1f5-4176-a19d-9a4029557c6c","level":"info","message":"Request started","method":"POST","timestamp":"2026-03-05T18:00:13.612Z","url":"/api/farmers"}
+{"correlationId":"e07e2708-e19f-4c4c-8db5-9451dc2a97d9","level":"info","message":"Request started","method":"POST","timestamp":"2026-03-05T18:00:17.745Z","url":"/api/farmers"}
+{"level":"info","message":"Server running on port 3000","timestamp":"2026-03-05T18:05:15.337Z"}
+{"level":"info","message":"Environment: development","timestamp":"2026-03-05T18:05:15.343Z"}
+{"level":"info","message":"Server running on port 3000","timestamp":"2026-03-05T18:05:34.088Z"}
+{"level":"info","message":"Environment: development","timestamp":"2026-03-05T18:05:34.094Z"}
+{"level":"info","message":"Server running on port 3000","timestamp":"2026-03-05T18:09:57.195Z"}
+{"level":"info","message":"Environment: development","timestamp":"2026-03-05T18:09:57.200Z"}
+{"level":"info","message":"Server running on port 3000","timestamp":"2026-03-05T18:14:00.326Z"}
+{"level":"info","message":"Environment: development","timestamp":"2026-03-05T18:14:00.334Z"}
+{"level":"info","message":"Server running on port 3000","timestamp":"2026-03-05T18:14:20.903Z"}
+{"level":"info","message":"Environment: development","timestamp":"2026-03-05T18:14:20.925Z"}
+{"level":"info","message":"Server running on port 3000","timestamp":"2026-03-05T18:22:57.995Z"}
+{"level":"info","message":"Environment: development","timestamp":"2026-03-05T18:22:57.999Z"}
+{"level":"info","message":"Server running on port 3000","timestamp":"2026-03-05T18:23:12.518Z"}
+{"level":"info","message":"Environment: development","timestamp":"2026-03-05T18:23:12.536Z"}
+{"level":"info","message":"Server running on port 3000","timestamp":"2026-03-05T18:23:31.072Z"}
+{"level":"info","message":"Environment: development","timestamp":"2026-03-05T18:23:31.076Z"}
+{"level":"info","message":"Server running on port 3000","timestamp":"2026-03-05T18:39:46.843Z"}
+{"level":"info","message":"Environment: development","timestamp":"2026-03-05T18:39:46.848Z"}
+{"level":"info","message":"Server running on port 3000","timestamp":"2026-03-05T18:40:03.705Z"}
+{"level":"info","message":"Environment: development","timestamp":"2026-03-05T18:40:03.709Z"}
+{"level":"info","message":"Server running on port 3000","timestamp":"2026-03-05T18:40:26.313Z"}
+{"level":"info","message":"Environment: development","timestamp":"2026-03-05T18:40:26.318Z"}
+{"level":"info","message":"Server running on port 3000","timestamp":"2026-03-05T18:40:44.510Z"}
+{"level":"info","message":"Environment: development","timestamp":"2026-03-05T18:40:44.532Z"}

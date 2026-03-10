@@ -13,9 +13,9 @@ const comparePassword = async (password, hashedPassword) => {
   return await bcrypt.compare(password, hashedPassword);
 };
 
-const generateJWT = (userId, role) => {
+const generateJWT = (userId, role, email) => {
   return jwt.sign(
-    { id: userId, role },
+    { id: userId, role, email },
     config.JWT_SECRET,
     { expiresIn: '8h' }
   );
@@ -46,7 +46,6 @@ const login = async (email, password) => {
     throw new Error('Invalid credentials');
   }
 
-  // Update last login
   user.lastLogin = new Date();
   await user.save();
 

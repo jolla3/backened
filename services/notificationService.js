@@ -1,31 +1,20 @@
-// backend/src/services/notificationService.js
-const { Queue } = require('bullmq');
-const redis = require('../config/redis');
 const logger = require('../utils/logger');
-
-let notificationQueue;
-
-if (redis) {
-  notificationQueue = new Queue('notifications', { connection: redis });
-} else {
-  console.warn('⚠️ Redis not available, SMS queue disabled');
-}
+const smsClient = require('../config/sms');
 
 const queueSMS = async (phone, message) => {
-  if (!notificationQueue) {
-    console.log(`📱 [SMS] Would send to ${phone}: ${message}`);
-    return { success: true };
+  try {
+    // Direct SMS send (no queue)
+    const result = await smsClient.send(phone, message);
+    logger.info('SMS sent', { phone, success: true });
+    return { success: true, messageId: result.messageId };
+  } catch (error) {
+    logger.error('SMS failed', { phone, error: error.message });
+    return { success: false, error: error.message };
   }
-  
-  await notificationQueue.add('send-sms', { phone, message }, {
-    attempts: 3,
-    backoff: { type: 'exponential', delay: 1000 }
-  });
-  logger.info('SMS queued', { phone });
 };
 
 const processSMS = async (job) => {
-  const { phone, message } = job.data;
+  // Not used without BullMQ
   return { success: true };
 };
 

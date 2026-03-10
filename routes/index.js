@@ -14,7 +14,7 @@ const reportRoutes = require('./reportRoutes');
 const notificationRoutes = require('./notificationRoutes');
 const deviceRoutes = require('./deviceRoutes');
 const dashboardRoutes = require('./dashboardRoutes');
-
+const posRoutes = require('./posRoutes')
 const { authMiddleware, roleCheck } = require('../middlewares/authMiddleware');
 
 // Public routes
@@ -29,6 +29,7 @@ router.use('/pricing', authMiddleware, roleCheck('admin'), pricingRoutes);
 router.use('/feed', authMiddleware, feedPurchaseRoutes);
 router.use('/sync', syncRoutes);
 router.use('/qr', qrRoutes);
+router.use('/pos', posRoutes);
 router.use('/reports', authMiddleware, roleCheck('admin'), reportRoutes);
 router.use('/notifications', authMiddleware, notificationRoutes);
 router.use('/devices', authMiddleware, roleCheck('admin'), deviceRoutes);

@@ -1,14 +1,25 @@
 const Inventory = require('../models/inventory');
 const logger = require('../utils/logger');
 
-const deductStock = async (productId, quantity, session) => {
-  const product = await Inventory.findById(productId).session(session);
-  if (!product) throw new Error('Product not found');
-  if (product.stock < quantity) throw new Error('Insufficient stock');
+const deductStock = async (productId, quantity) => {
+  const session = await Inventory.startSession();
+  session.startTransaction();
+  try {
+    const product = await Inventory.findById(productId).session(session);
+    if (!product) throw new Error('Product not found');
+    if (product.stock < quantity) throw new Error('Insufficient stock');
 
-  product.stock -= quantity;
-  await product.save({ session });
-  return product;
+    product.stock -= quantity;
+    await product.save({ session });
+    
+    await session.commitTransaction();
+    return product;
+  } catch (error) {
+    await session.abortTransaction();
+    throw error;
+  } finally {
+    session.endSession();
+  }
 };
 
 const getAlerts = async () => {

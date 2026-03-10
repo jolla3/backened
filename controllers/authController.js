@@ -11,6 +11,7 @@ const login = async (req, res) => {
 
     const result = await authService.login(email, password);
     
+    // Log only on success
     logger.info('Login successful', { 
       userId: result.user.id, 
       role: result.user.role,
@@ -19,6 +20,7 @@ const login = async (req, res) => {
 
     res.json(result);
   } catch (error) {
+    // Log only on failure
     logger.error('Login failed', { 
       error: error.message,
       correlationId: req.correlationId 

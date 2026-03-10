@@ -18,22 +18,12 @@ const createProduct = async (req, res) => {
   }
 };
 
+// Remove session logic from controller - service handles it
 const deductStock = async (req, res) => {
   try {
     const { quantity } = req.body;
-    const session = await require('mongoose').startSession();
-    session.startTransaction();
-    
-    try {
-      const product = await inventoryService.deductStock(req.params.id, quantity, session);
-      await session.commitTransaction();
-      res.json(product);
-    } catch (error) {
-      await session.abortTransaction();
-      throw error;
-    } finally {
-      session.endSession();
-    }
+    const product = await inventoryService.deductStock(req.params.id, quantity);
+    res.json(product);
   } catch (error) {
     res.status(400).json({ error: error.message });
   }
