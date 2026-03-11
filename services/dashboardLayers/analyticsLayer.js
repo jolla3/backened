@@ -1,19 +1,23 @@
 const Transaction = require('../../models/transaction');
 const Porter = require('../../models/porter');
 const Farmer = require('../../models/farmer');
+const Cooperative = require('../../models/cooperative');
 const graphReadyDataModule = require('../../analytics/graphReady');
 const logger = require('../../utils/logger');
 
-const getAnalytics = async (period = 'daily') => {
+const getAnalytics = async (period = 'daily', adminId) => {
   try {
+    const cooperative = await Cooperative.findById(adminId);
+    if (!cooperative) throw new Error('Cooperative not found');
+
     const [milkTrends, porterPerformance, zoneProduction, topFarmer, lowestProducer, milkPrediction, graphReady] = await Promise.all([
-      getMilkTrends(period),
-      getPorterPerformance(),
-      getZoneProduction(),
-      getTopFarmer(),
-      getLowestProducer(),
-      getMilkPrediction(),
-      graphReadyDataModule.getGraphReadyData(period)
+      getMilkTrends(period, adminId),
+      getPorterPerformance(adminId),
+      getZoneProduction(adminId),
+      getTopFarmer(adminId),
+      getLowestProducer(adminId),
+      getMilkPrediction(adminId),
+      graphReadyDataModule.getGraphReadyData(period, adminId)
     ]);
 
     return {
@@ -31,7 +35,8 @@ const getAnalytics = async (period = 'daily') => {
   }
 };
 
-const getMilkTrends = async (period) => {
+const getMilkTrends = async (period, adminId) => {
+  const cooperative = await Cooperative.findById(adminId);
   const now = new Date();
   let startDate;
   
@@ -40,7 +45,7 @@ const getMilkTrends = async (period) => {
   else if (period === 'monthly') startDate = new Date(now.setMonth(now.getMonth() - 1));
 
   const trends = await Transaction.aggregate([
-    { $match: { type: 'milk', timestamp_server: { $gte: startDate } } },
+    { $match: { type: 'milk', cooperativeId: cooperative._id, timestamp_server: { $gte: startDate } } },
     { $group: {
       _id: { $dateToString: { format: '%Y-%m-%d', date: '$timestamp_server' } },
       totalLitres: { $sum: '$litres' }
@@ -54,13 +59,14 @@ const getMilkTrends = async (period) => {
   }));
 };
 
-const getPorterPerformance = async () => {
-  const porters = await Porter.find({});
+const getPorterPerformance = async (adminId) => {
+  const cooperative = await Cooperative.findById(adminId);
+  const porters = await Porter.find({ cooperativeId: cooperative._id });
   const performance = [];
 
   for (const porter of porters) {
     const stats = await Transaction.aggregate([
-      { $match: { device_id: porter._id, type: 'milk' } },
+      { $match: { porter_id: porter._id, cooperativeId: cooperative._id, type: 'milk' } },
       { $group: { _id: null, totalLitres: { $sum: '$litres' }, transactionCount: { $sum: 1 } } }
     ]);
 
@@ -75,9 +81,10 @@ const getPorterPerformance = async () => {
   return performance.sort((a, b) => b.totalLitres - a.totalLitres);
 };
 
-const getZoneProduction = async () => {
+const getZoneProduction = async (adminId) => {
+  const cooperative = await Cooperative.findById(adminId);
   const zoneProduction = await Transaction.aggregate([
-    { $match: { type: 'milk' } },
+    { $match: { type: 'milk', cooperativeId: cooperative._id } },
     { $lookup: {
       from: 'farmers',
       localField: 'farmer_id',
@@ -100,9 +107,10 @@ const getZoneProduction = async () => {
   }));
 };
 
-const getTopFarmer = async () => {
+const getTopFarmer = async (adminId) => {
+  const cooperative = await Cooperative.findById(adminId);
   const topFarmer = await Transaction.aggregate([
-    { $match: { type: 'milk' } },
+    { $match: { type: 'milk', cooperativeId: cooperative._id } },
     { $lookup: {
       from: 'farmers',
       localField: 'farmer_id',
@@ -127,9 +135,10 @@ const getTopFarmer = async () => {
   } : null;
 };
 
-const getLowestProducer = async () => {
+const getLowestProducer = async (adminId) => {
+  const cooperative = await Cooperative.findById(adminId);
   const lowestProducer = await Transaction.aggregate([
-    { $match: { type: 'milk' } },
+    { $match: { type: 'milk', cooperativeId: cooperative._id } },
     { $lookup: {
       from: 'farmers',
       localField: 'farmer_id',
@@ -152,14 +161,15 @@ const getLowestProducer = async () => {
   } : null;
 };
 
-const getMilkPrediction = async () => {
+const getMilkPrediction = async (adminId) => {
+  const cooperative = await Cooperative.findById(adminId);
   const now = new Date();
   const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
   const last7Days = new Date(today);
   last7Days.setDate(last7Days.getDate() - 7);
 
   const last7Milk = await Transaction.aggregate([
-    { $match: { type: 'milk', timestamp_server: { $gte: last7Days, $lt: today } } },
+    { $match: { type: 'milk', cooperativeId: cooperative._id, timestamp_server: { $gte: last7Days, $lt: today } } },
     { $group: { _id: null, totalLitres: { $sum: '$litres' } } }
   ]);
 

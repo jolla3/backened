@@ -5,7 +5,7 @@ const userSchema = new mongoose.Schema({
   email: {
     type: String,
     required: true,
-    unique: true,  // This creates the index automatically
+    unique: true,
     lowercase: true,
     trim: true
   },
@@ -24,9 +24,18 @@ const userSchema = new mongoose.Schema({
     required: true,
     trim: true
   },
+  cooperativeId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'Cooperative',
+    default: null  // ✅ Make it optional for existing users
+  },
   isActive: {
     type: Boolean,
     default: true
+  },
+  lastLogin: {
+    type: Date,
+    default: null
   },
   createdAt: {
     type: Date,
@@ -39,7 +48,7 @@ userSchema.methods.comparePassword = async function(candidatePassword) {
   return await bcrypt.compare(candidatePassword, this.password);
 };
 
-// Only index role (email index is already created by unique: true)
-userSchema.index({ role: 1 });
+// Index for role and cooperative scoping
+userSchema.index({ role: 1, cooperativeId: 1 });
 
 module.exports = mongoose.model('User', userSchema);

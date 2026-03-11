@@ -9,6 +9,8 @@ const taskSchema = new mongoose.Schema({
   status: { type: String, enum: ['pending', 'in_progress', 'completed', 'escalated'], default: 'pending' },
   category: { type: String, enum: ['device', 'farmer', 'porter', 'financial', 'inventory'], required: true },
   dueDate: { type: Date },
+  cooperativeId: { type: mongoose.Schema.Types.ObjectId, ref: 'Cooperative', required: true, index: true },
+  created_by: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
   createdAt: { type: Date, default: Date.now },
   updatedAt: { type: Date, default: Date.now },
   escalated: { type: Boolean, default: false },

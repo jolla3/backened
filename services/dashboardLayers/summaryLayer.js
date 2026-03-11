@@ -2,10 +2,14 @@ const Transaction = require('../../models/transaction');
 const Farmer = require('../../models/farmer');
 const Porter = require('../../models/porter');
 const Device = require('../../models/device');
+const Cooperative = require('../../models/cooperative');
 const logger = require('../../utils/logger');
 
-const getSummary = async () => {
+const getSummary = async (adminId) => {
   try {
+    const cooperative = await Cooperative.findById(adminId);
+    if (!cooperative) throw new Error('Cooperative not found');
+
     const now = new Date();
     const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
     const yesterday = new Date(today);
@@ -15,22 +19,21 @@ const getSummary = async () => {
     const lastMonth = new Date(today);
     lastMonth.setMonth(lastMonth.getMonth() - 1);
 
-    // ✅ FIXED: Most important metric - Daily Milk Trend
     const [todayMilk, yesterdayMilk, weekMilk, monthMilk] = await Promise.all([
       Transaction.aggregate([
-        { $match: { type: 'milk', timestamp_server: { $gte: today } } },
+        { $match: { type: 'milk', cooperativeId: cooperative._id, timestamp_server: { $gte: today } } },
         { $group: { _id: null, totalLitres: { $sum: '$litres' } } }
       ]),
       Transaction.aggregate([
-        { $match: { type: 'milk', timestamp_server: { $gte: yesterday, $lt: today } } },
+        { $match: { type: 'milk', cooperativeId: cooperative._id, timestamp_server: { $gte: yesterday, $lt: today } } },
         { $group: { _id: null, totalLitres: { $sum: '$litres' } } }
       ]),
       Transaction.aggregate([
-        { $match: { type: 'milk', timestamp_server: { $gte: lastWeek, $lt: today } } },
+        { $match: { type: 'milk', cooperativeId: cooperative._id, timestamp_server: { $gte: lastWeek, $lt: today } } },
         { $group: { _id: null, totalLitres: { $sum: '$litres' } } }
       ]),
       Transaction.aggregate([
-        { $match: { type: 'milk', timestamp_server: { $gte: lastMonth, $lt: today } } },
+        { $match: { type: 'milk', cooperativeId: cooperative._id, timestamp_server: { $gte: lastMonth, $lt: today } } },
         { $group: { _id: null, totalLitres: { $sum: '$litres' } } }
       ])
     ]);
@@ -42,24 +45,20 @@ const getSummary = async () => {
 
     const milkChange = yesterdayLitres > 0 ? ((todayLitres - yesterdayLitres) / yesterdayLitres) * 100 : 0;
 
-    // ✅ FIXED: Single source of truth - no duplicates
     const [totalFarmers, totalPorters, totalDevices, farmersToday, transactionsToday] = await Promise.all([
-      Farmer.countDocuments(),
-      Porter.countDocuments(),
-      Device.countDocuments(),
-      Farmer.countDocuments({ createdAt: { $gte: today } }),
-      Transaction.countDocuments({ timestamp_server: { $gte: today } })
+      Farmer.countDocuments({ cooperativeId: cooperative._id }),
+      Porter.countDocuments({ cooperativeId: cooperative._id }),
+      Device.countDocuments({ cooperativeId: cooperative._id }),
+      Farmer.countDocuments({ cooperativeId: cooperative._id, createdAt: { $gte: today } }),
+      Transaction.countDocuments({ cooperativeId: cooperative._id, timestamp_server: { $gte: today } })
     ]);
 
     return {
-      // ✅ FIXED: Most important metric first
       milkToday: todayLitres,
       milkYesterday: yesterdayLitres,
       milkThisWeek: weekLitres,
       milkThisMonth: monthLitres,
       milkChange: milkChange,
-      
-      // ✅ FIXED: Single source of truth
       farmersToday,
       transactionsToday,
       totalFarmers,

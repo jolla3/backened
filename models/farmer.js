@@ -4,9 +4,8 @@ const farmerSchema = new mongoose.Schema({
   farmer_code: {
     type: String,
     required: true,
-    unique: true,
-    trim: true,
-    // ✅ REMOVED: index: true (duplicate with schema.index())
+    unique: true,  // ✅ This creates the unique index
+    trim: true
   },
   name: {
     type: String,
@@ -23,6 +22,12 @@ const farmerSchema = new mongoose.Schema({
     required: true,
     trim: true
   },
+  cooperativeId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'Cooperative',
+    required: true,
+    index: true  // ✅ This creates the index
+  },
   balance: {
     type: Number,
     default: 0
@@ -37,7 +42,7 @@ const farmerSchema = new mongoose.Schema({
   }
 });
 
-// ✅ Keep this index definition only
-farmerSchema.index({ farmer_code: 1 }, { unique: true });
+// ✅ Only add indexes that are NOT already created by field definitions
+farmerSchema.index({ cooperativeId: 1, farmer_code: 1 });
 
 module.exports = mongoose.model('Farmer', farmerSchema);

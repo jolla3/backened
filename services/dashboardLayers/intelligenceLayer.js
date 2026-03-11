@@ -3,9 +3,13 @@ const alertsAndRecommendations = require('../../analytics/alertsAndRecommendatio
 const predictiveAnalytics = require('../../analytics/predictiveAnalytics');
 const smsAnalyticsModule = require('../../analytics/smsAnalytics');
 const aiAdvisoryModule = require('../../analytics/aiAdvisory');
+const Cooperative = require('../../models/cooperative');
 const logger = require('../../utils/logger');
 
-const getIntelligenceLayer = async () => {
+const getIntelligenceLayer = async (adminId) => {
+  const cooperative = await Cooperative.findById(adminId);
+  if (!cooperative) throw new Error('Cooperative not found');
+
   const intelligence = {
     financialIntelligence: getDefaultFinancialIntelligence(),
     alerts: [],
@@ -15,45 +19,44 @@ const getIntelligenceLayer = async () => {
     aiAdvisory: []
   };
 
-  // ✅ FIXED: Each module has its own try/catch - partial failure OK
   try {
-    intelligence.financialIntelligence = await financialAnalytics.getFinancialIntelligence();
+    intelligence.financialIntelligence = await financialAnalytics.getFinancialIntelligence(adminId);
   } catch (error) {
     logger.warn('Financial intelligence failed', { error: error.message });
   }
 
   try {
-    intelligence.alerts = await alertsAndRecommendations.getSmartAlerts();
+    intelligence.alerts = await alertsAndRecommendations.getSmartAlerts(adminId);
   } catch (error) {
     logger.warn('Smart alerts failed', { error: error.message });
   }
 
   try {
-    intelligence.recommendations = await alertsAndRecommendations.getRecommendations();
+    intelligence.recommendations = await alertsAndRecommendations.getRecommendations(adminId);
   } catch (error) {
     logger.warn('Recommendations failed', { error: error.message });
   }
 
   try {
-    intelligence.predictions.stockout = await predictiveAnalytics.predictStockout();
+    intelligence.predictions.stockout = await predictiveAnalytics.predictStockout(adminId);
   } catch (error) {
     logger.warn('Stockout predictions failed', { error: error.message });
   }
 
   try {
-    intelligence.predictions.farmerDropout = await predictiveAnalytics.predictFarmerDropout();
+    intelligence.predictions.farmerDropout = await predictiveAnalytics.predictFarmerDropout(adminId);
   } catch (error) {
     logger.warn('Farmer dropout predictions failed', { error: error.message });
   }
 
   try {
-    intelligence.sms = await smsAnalyticsModule.getSmsAnalytics();
+    intelligence.sms = await smsAnalyticsModule.getSmsAnalytics(adminId);
   } catch (error) {
     logger.warn('SMS analytics failed', { error: error.message });
   }
 
   try {
-    intelligence.aiAdvisory = await aiAdvisoryModule.getAiAdvisory();
+    intelligence.aiAdvisory = await aiAdvisoryModule.getAiAdvisory(adminId);
   } catch (error) {
     logger.warn('AI advisory failed', { error: error.message });
   }

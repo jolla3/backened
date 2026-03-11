@@ -1,33 +1,33 @@
-# backend/docker-compose.yml
-version: '3.8'
-services:
-  app:
-    build: .
-    ports:
-      - "3000:3000"
-    environment:
-      - NODE_ENV=production
-      - DB_URL=mongodb://mongo:27017/dairy_coop
-      - REDIS_URL=redis://redis:6379
-      - JWT_SECRET=${JWT_SECRET}
-      - HMAC_SECRET=${HMAC_SECRET}
-    depends_on:
-      - mongo
-      - redis
-    volumes:
-      - ./logs:/app/logs
+# # backend/docker-compose.yml
+# version: '3.8'
+# services:
+#   app:
+#     build: .
+#     ports:
+#       - "3000:3000"
+#     environment:
+#       - NODE_ENV=production
+#       - DB_URL=mongodb://mongo:27017/dairy_coop
+#       - REDIS_URL=redis://redis:6379
+#       - JWT_SECRET=${JWT_SECRET}
+#       - HMAC_SECRET=${HMAC_SECRET}
+#     depends_on:
+#       - mongo
+#       - redis
+#     volumes:
+#       - ./logs:/app/logs
 
-  mongo:
-    image: mongo:6.0
-    ports:
-      - "27017:27017"
-    volumes:
-      - mongo_data:/data/db
+#   mongo:
+#     image: mongo:6.0
+#     ports:
+#       - "27017:27017"
+#     volumes:
+#       - mongo_data:/data/db
 
-  redis:
-    image: redis:7-alpine  # ✅ Changed from default to 7
-    ports:
-      - "6379:6379"
+#   redis:
+#     image: redis:7-alpine  # ✅ Changed from default to 7
+#     ports:
+#       - "6379:6379"
 
-volumes:
-  mongo_data:
+# volumes:
+#   mongo_data:

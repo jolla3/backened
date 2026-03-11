@@ -1,9 +1,13 @@
-// Placeholder for Twilio/AfricasTalking client
-// In production, initialize the actual client here
-const sendSMS = async (phone, message) => {
-  // Logic to call SMS provider
-  console.log(`[SMS] Sending to ${phone}: ${message}`);
-  return { success: true };
-};
+// config/smsConfig.js
+module.exports = {
+  // Africa's Talking Credentials (from environment)
+  username: process.env.AT_USERNAME,
+  apiKey: process.env.AT_API_KEY,
+  baseUrl: 'https://api.africastalking.com/v1',
 
-module.exports = { sendSMS };
+  // Default sender name fallback
+  defaultSender: 'AgriWallet',
+
+  // API timeout in milliseconds
+  timeout: 10000
+};

@@ -2,9 +2,13 @@ const Transaction = require('../models/transaction');
 const Farmer = require('../models/farmer');
 const Inventory = require('../models/inventory');
 const RateVersion = require('../models/rateVersion');
+const Cooperative = require('../models/cooperative');
 const logger = require('../utils/logger');
 
-const reconcileDeltas = async (batch, session) => {
+const reconcileDeltas = async (batch, adminId, session) => {
+  const cooperative = await Cooperative.findById(adminId);
+  if (!cooperative) throw new Error('Cooperative not found');
+
   const results = [];
   const conflicts = [];
 
@@ -23,16 +27,27 @@ const reconcileDeltas = async (batch, session) => {
         continue;
       }
 
+      // Verify cooperative scoping
+      if (delta.cooperativeId && delta.cooperativeId.toString() !== cooperative._id.toString()) {
+        conflicts.push({ idempotency_key: delta.idempotency_key, reason: 'cooperative_mismatch' });
+        continue;
+      }
+
       // Get current rate
-      const rate = await RateVersion.findOne({ type: delta.type }).sort({ effective_date: -1 });
-      if (!rate) throw new Error('No rate found');
+      const rate = await RateVersion.findOne({ 
+        type: delta.type,
+        cooperativeId: cooperative._id 
+      }).sort({ effective_date: -1 });
+      
+      if (!rate) throw new Error('No rate found for cooperative');
 
       // Create transaction
       const tx = await Transaction.create([{
         ...delta,
         rate_version_id: rate._id,
         status: 'completed',
-        timestamp_server: new Date()
+        timestamp_server: new Date(),
+        cooperativeId: cooperative._id
       }], { session });
 
       // Update farmer balance
@@ -40,7 +55,6 @@ const reconcileDeltas = async (batch, session) => {
         const farmer = await Farmer.findById(delta.farmer_id).session(session);
         if (farmer) {
           farmer.balance += delta.payout;
-          farmer.history.push(tx[0]._id);
           await farmer.save({ session });
         }
       }
@@ -59,6 +73,12 @@ const reconcileDeltas = async (batch, session) => {
       conflicts.push({ idempotency_key: delta.idempotency_key, reason: error.message });
     }
   }
+
+  logger.info('Reconciliation completed', { 
+    success: results.length, 
+    conflicts: conflicts.length,
+    cooperativeId: cooperative._id 
+  });
 
   return { results, conflicts };
 };

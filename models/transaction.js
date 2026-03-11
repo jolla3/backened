@@ -31,8 +31,7 @@ const transactionSchema = new mongoose.Schema({
   },
   server_seq_num: {
     type: String,
-    required: true,
-    // ✅ REMOVED: index: true (duplicate with schema.index())
+    required: true
   },
   timestamp_local: {
     type: Date,
@@ -108,6 +107,12 @@ const transactionSchema = new mongoose.Schema({
     required: true,
     index: true
   },
+  cooperativeId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'Cooperative',
+    required: true,
+    index: true
+  },
   createdAt: {
     type: Date,
     default: Date.now
@@ -126,7 +131,7 @@ transactionSchema.index({ porter_id: 1, timestamp_server: -1 });
 transactionSchema.index({ zone: 1, timestamp_server: -1 });
 transactionSchema.index({ branch_id: 1, timestamp_server: -1 });
 transactionSchema.index({ device_id: 1, device_seq_num: 1 }, { unique: true });
-// ✅ Keep this index definition only
 transactionSchema.index({ server_seq_num: 1 });
+transactionSchema.index({ cooperativeId: 1, timestamp_server: -1 });
 
 module.exports = mongoose.model('Transaction', transactionSchema);

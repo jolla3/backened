@@ -1,7 +1,11 @@
 const Transaction = require('../models/transaction');
+const Cooperative = require('../models/cooperative');
 const logger = require('../utils/logger');
 
-const getDailyTotal = async (date) => {
+const getDailyTotal = async (date, adminId) => {
+  const cooperative = await Cooperative.findById(adminId);
+  if (!cooperative) throw new Error('Cooperative not found');
+
   const startOfDay = new Date(date);
   startOfDay.setHours(0, 0, 0, 0);
   const endOfDay = new Date(startOfDay);
@@ -10,6 +14,7 @@ const getDailyTotal = async (date) => {
   const result = await Transaction.aggregate([
     { $match: {
       type: 'milk',
+      cooperativeId: cooperative._id,
       timestamp_server: { $gte: startOfDay, $lte: endOfDay }
     }},
     { $group: {
@@ -20,16 +25,21 @@ const getDailyTotal = async (date) => {
     }}
   ]);
 
+  logger.info('Daily total retrieved', { date, cooperativeId: cooperative._id });
   return result[0] || { totalLitres: 0, totalPayout: 0, transactionCount: 0 };
 };
 
-const getMonthlySummary = async (year, month) => {
+const getMonthlySummary = async (year, month, adminId) => {
+  const cooperative = await Cooperative.findById(adminId);
+  if (!cooperative) throw new Error('Cooperative not found');
+
   const startOfMonth = new Date(year, month - 1, 1);
   const endOfMonth = new Date(year, month, 0, 23, 59, 59, 999);
 
   const result = await Transaction.aggregate([
     { $match: {
       type: 'milk',
+      cooperativeId: cooperative._id,
       timestamp_server: { $gte: startOfMonth, $lte: endOfMonth }
     }},
     { $group: {
@@ -40,6 +50,7 @@ const getMonthlySummary = async (year, month) => {
     { $sort: { _id: 1 } }
   ]);
 
+  logger.info('Monthly summary retrieved', { year, month, cooperativeId: cooperative._id });
   return result;
 };
 

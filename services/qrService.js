@@ -1,5 +1,8 @@
 const crypto = require('crypto');
 const config = require('../config');
+const Transaction = require('../models/transaction');
+const Cooperative = require('../models/cooperative');
+const logger = require('../utils/logger');
 
 // Generate HMAC signature
 const generateHMAC = (data) => {
@@ -26,19 +29,20 @@ const generateQRUrl = (receiptNum) => {
   return `coop.com/verify/${receiptNum}`;
 };
 
-// Verify QR transaction
-const verifyQRTransaction = async (receiptNum) => {
-  const Transaction = require('../models/transaction');
-  
-  const transaction = await Transaction.findOne({ receipt_num: receiptNum })
-    .populate('farmer_id', 'name farmer_code')
-    .populate('porter_id', 'name')
-    .populate('rate_version_id', 'rate');
+// Verify QR transaction with Cooperative Scoping
+const verifyQRTransaction = async (receiptNum, adminId) => {
+  const transaction = await Transaction.findOne({ receipt_num: receiptNum });
   
   if (!transaction) {
     return { valid: false, error: 'Transaction not found' };
   }
-  
+
+  // Verify transaction belongs to admin's cooperative
+  const cooperative = await Cooperative.findById(adminId);
+  if (!cooperative || transaction.cooperativeId.toString() !== cooperative._id.toString()) {
+    return { valid: false, error: 'Unauthorized: Transaction does not belong to your cooperative' };
+  }
+
   // Verify signature
   const signatureData = {
     receiptNum: transaction.receipt_num,
@@ -51,6 +55,8 @@ const verifyQRTransaction = async (receiptNum) => {
   const expectedSignature = generateHMAC(signatureData);
   const isValid = verifyHMAC(signatureData, transaction.qr_hash);
   
+  logger.info('QR verification', { receiptNum, isValid, cooperativeId: cooperative._id });
+  
   return {
     valid: isValid,
     transaction: {
@@ -61,7 +67,6 @@ const verifyQRTransaction = async (receiptNum) => {
       },
       milk: {
         litres: transaction.litres,
-        rate: transaction.rate_version_id.rate,
         payout: transaction.payout
       },
       timestamp: transaction.timestamp_server,

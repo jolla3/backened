@@ -15,10 +15,12 @@ const notificationRoutes = require('./notificationRoutes');
 const deviceRoutes = require('./deviceRoutes');
 const dashboardRoutes = require('./dashboardRoutes');
 const posRoutes = require('./posRoutes')
+const cooperativeRoutes = require('./cooperativeRoutes')
 const { authMiddleware, roleCheck } = require('../middlewares/authMiddleware');
 
 // Public routes
 router.use('/auth', authRoutes);
+router.use('/coop', authMiddleware, roleCheck('admin'), cooperativeRoutes)
 
 // Protected routes
 router.use('/farmers', authMiddleware, farmerRoutes);

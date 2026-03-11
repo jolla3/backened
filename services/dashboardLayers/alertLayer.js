@@ -3,16 +3,20 @@ const Transaction = require('../../models/transaction');
 const Porter = require('../../models/porter');
 const Device = require('../../models/device');
 const Farmer = require('../../models/farmer');
+const Cooperative = require('../../models/cooperative');
 const taskService = require('../../services/taskService');
 const logger = require('../../utils/logger');
 
-const getAlerts = async () => {
+const getAlerts = async (adminId) => {
   try {
-    const alerts = [];
-    const tasks = await taskService.getTasks('pending');
+    const cooperative = await Cooperative.findById(adminId);
+    if (!cooperative) throw new Error('Cooperative not found');
 
-    // ✅ FIXED: Real alerts based on actual data
-    const summary = await summaryLayer.getSummary();
+    const alerts = [];
+    const tasks = await taskService.getTasks('pending', adminId);
+
+    // ✅ FIXED: Real alerts based on actual data (scoped to cooperative)
+    const summary = await summaryLayer.getSummary(adminId);
 
     // 1. Production Drop Alert
     if (summary.milkChange < -20) {
@@ -25,7 +29,7 @@ const getAlerts = async () => {
 
     // 2. Stock Risk
     const lowStock = await Inventory.aggregate([
-      { $match: { $expr: { $lte: ['$stock', '$threshold'] } } },
+      { $match: { cooperativeId: cooperative._id, $expr: { $lte: ['$stock', '$threshold'] } } },
       { $count: 'count' }
     ]);
     if (lowStock[0]?.count > 0) {
@@ -33,7 +37,7 @@ const getAlerts = async () => {
     }
 
     // 3. Device Offline
-    const devices = await Device.find({ approved: true, revoked: false });
+    const devices = await Device.find({ approved: true, revoked: false, cooperativeId: cooperative._id });
     for (const device of devices) {
       const lastTx = await Transaction.findOne({ device_id: device.uuid }).sort({ timestamp_server: -1 });
       if (lastTx) {
@@ -45,7 +49,7 @@ const getAlerts = async () => {
     }
 
     // 4. Farmer Inactivity
-    const farmers = await Farmer.find({});
+    const farmers = await Farmer.find({ cooperativeId: cooperative._id });
     for (const farmer of farmers) {
       const lastTx = await Transaction.findOne({ farmer_id: farmer._id, type: 'milk' }).sort({ timestamp_server: -1 });
       if (lastTx) {
@@ -57,7 +61,7 @@ const getAlerts = async () => {
     }
 
     // 5. High Debt
-    const highDebtFarmers = await Farmer.find({ balance: { $lt: -5000 } });
+    const highDebtFarmers = await Farmer.find({ cooperativeId: cooperative._id, balance: { $lt: -5000 } });
     if (highDebtFarmers.length > 0) {
       alerts.push({ type: 'high_debt', severity: 'high', message: `${highDebtFarmers.length} farmers with debt > KES 5,000` });
     }

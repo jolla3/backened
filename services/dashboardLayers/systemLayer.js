@@ -4,10 +4,14 @@ const Porter = require('../../models/porter');
 const Inventory = require('../../models/inventory');
 const Device = require('../../models/device');
 const RateVersion = require('../../models/rateVersion');
+const Cooperative = require('../../models/cooperative');
 const logger = require('../../utils/logger');
 
-const getSystemOverview = async () => {
+const getSystemOverview = async (adminId) => {
   try {
+    const cooperative = await Cooperative.findById(adminId);
+    if (!cooperative) throw new Error('Cooperative not found');
+
     const [
       totalFarmers,
       totalPorters,
@@ -17,16 +21,16 @@ const getSystemOverview = async () => {
       lowStockAlerts,
       todayMetrics
     ] = await Promise.all([
-      Farmer.countDocuments(),
-      Porter.countDocuments(),
-      Inventory.countDocuments(),
-      RateVersion.countDocuments(),
-      Device.countDocuments(),
+      Farmer.countDocuments({ cooperativeId: cooperative._id }),
+      Porter.countDocuments({ cooperativeId: cooperative._id }),
+      Inventory.countDocuments({ cooperativeId: cooperative._id }),
+      RateVersion.countDocuments({ cooperativeId: cooperative._id }),
+      Device.countDocuments({ cooperativeId: cooperative._id }),
       Inventory.aggregate([
-        { $match: { $expr: { $lte: ['$stock', '$threshold'] } } },
+        { $match: { cooperativeId: cooperative._id, $expr: { $lte: ['$stock', '$threshold'] } } },
         { $count: 'count' }
       ]),
-      getTodayMetrics()
+      getTodayMetrics(adminId)
     ]);
 
     return {
@@ -50,7 +54,7 @@ const getSystemOverview = async () => {
         portersToday: todayMetrics.portersToday,
         devicesToday: todayMetrics.devicesToday
       },
-      totals: { // ✅ FIXED: Renamed from systemOverview to totals
+      totals: {
         totalFarmers,
         totalPorters,
         totalProducts,
@@ -65,7 +69,8 @@ const getSystemOverview = async () => {
   }
 };
 
-const getTodayMetrics = async () => {
+const getTodayMetrics = async (adminId) => {
+  const cooperative = await Cooperative.findById(adminId);
   const today = new Date();
   today.setHours(0, 0, 0, 0);
 
@@ -77,18 +82,18 @@ const getTodayMetrics = async () => {
     portersToday,
     devicesToday
   ] = await Promise.all([
-    Transaction.countDocuments({ timestamp_server: { $gte: today } }),
+    Transaction.countDocuments({ cooperativeId: cooperative._id, timestamp_server: { $gte: today } }),
     Transaction.aggregate([
-      { $match: { type: 'milk', timestamp_server: { $gte: today } } },
+      { $match: { type: 'milk', cooperativeId: cooperative._id, timestamp_server: { $gte: today } } },
       { $group: { _id: null, totalLitres: { $sum: '$litres' }, totalPayout: { $sum: '$payout' } } }
     ]),
     Transaction.aggregate([
-      { $match: { type: 'feed', timestamp_server: { $gte: today } } },
+      { $match: { type: 'feed', cooperativeId: cooperative._id, timestamp_server: { $gte: today } } },
       { $group: { _id: null, totalQuantity: { $sum: '$quantity' }, totalCost: { $sum: '$cost' } } }
     ]),
-    Farmer.countDocuments({ createdAt: { $gte: today } }),
-    Porter.countDocuments({ createdAt: { $gte: today } }),
-    Device.countDocuments({ last_seen: { $gte: today } })
+    Farmer.countDocuments({ cooperativeId: cooperative._id, createdAt: { $gte: today } }),
+    Porter.countDocuments({ cooperativeId: cooperative._id, createdAt: { $gte: today } }),
+    Device.countDocuments({ cooperativeId: cooperative._id, last_seen: { $gte: today } })
   ]);
 
   return {

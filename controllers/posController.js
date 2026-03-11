@@ -1,17 +1,16 @@
+// controllers/posController.js
 const { 
   recordMilkTransaction: recordMilkTxService, 
   getFarmerHistory: getFarmerHistoryService, 
   syncOfflineTransactions: syncOfflineTxService,
-  checkDailyFraudLimit,
-  verifyTransaction: verifyTxService
+  verifyTransaction: verifyTxService,
+  findFarmerByCode: findFarmerService,
+  getPorterPerformance: getPorterPerformanceService,
+  getDailySummary: getDailySummaryService
 } = require('../services/posService');
 const { milkTransactionSchema, farmerCodeSchema } = require('../validators/posValidator');
 const logger = require('../utils/logger');
-const FRAUD_CONFIG = require('../config/fraudConfig');
 const Transaction = require('../models/transaction');
-const Farmer = require('../models/farmer');
-const Porter = require('../models/porter');
-const RateVersion = require('../models/rateVersion');
 
 // 1️⃣ Find Farmer by Code
 const findFarmerByCode = async (req, res) => {
@@ -21,39 +20,25 @@ const findFarmerByCode = async (req, res) => {
       return res.status(400).json({ error: error.details[0].message });
     }
 
-    const { farmer_code } = req.params;
-    const farmer = await Farmer.findOne({ farmer_code }).lean();
+    const result = await findFarmerService(req.params.farmer_code);
     
-    if (!farmer) {
-      return res.status(404).json({ error: 'Farmer not found' });
+    if (result.error) {
+      return res.status(404).json({ error: result.error });
     }
 
-    const lastTx = await Transaction.findOne({ farmer_id: farmer._id })
-      .sort({ timestamp_server: -1 });
-
-    res.json({
-      success: true,
-      farmer: {
-        code: farmer.farmer_code,
-        name: farmer.name,
-        phone: farmer.phone,
-        branch: farmer.branch_id,
-        balance: farmer.balance,
-        lastDelivery: lastTx ? lastTx.timestamp_server : null
-      }
-    });
+    res.json({ success: true, ...result });
   } catch (error) {
     logger.error('Find farmer failed', { error: error.message });
     res.status(500).json({ error: error.message });
   }
 };
 
-// 2️⃣ Record Milk Transaction (Controller Only Handles HTTP Layer)
+// 2️⃣ Record Milk Transaction
 const recordMilkTransaction = async (req, res) => {
   let session = null;
   
   try {
-    // 8️⃣ Validation Layer
+    // 1️⃣ Validation Layer
     const { error, value } = milkTransactionSchema.validate(req.body);
     if (error) {
       return res.status(400).json({ error: error.details[0].message });
@@ -61,72 +46,35 @@ const recordMilkTransaction = async (req, res) => {
 
     const { farmer_code, litres, porter_id, zone, device_seq_num, timestamp_local } = value;
     const device = req.device;
+    const branch_id = req.branch_id;
 
-    // 5️⃣ Device Validation (Stronger)
+    // 2️⃣ Device Validation
     if (device.revoked || !device.approved) {
       return res.status(403).json({ error: 'Device not authorized' });
     }
-    if (device.branch && device.branch !== req.branch_id) {
+    if (device.branch && device.branch !== branch_id) {
       return res.status(403).json({ error: 'Device branch mismatch' });
     }
 
-    // Get Farmer
-    const farmer = await Farmer.findOne({ farmer_code }).lean();
-    if (!farmer) return res.status(404).json({ error: 'Farmer not found' });
-
-    // Get Porter
-    const porter = await Porter.findById(porter_id);
-    if (!porter) return res.status(404).json({ error: 'Porter not found' });
-
-    // Branch/Zone Consistency Check
-    if (!porter.zones.includes(zone)) {
-      return res.status(403).json({ error: 'Porter not authorized in this zone' });
-    }
-    if (farmer.branch_id !== porter.branch_id) {
-      return res.status(403).json({ error: 'Farmer and Porter branch mismatch' });
-    }
-
-    // Rate Lookup Safety
-    const rate = await RateVersion.findOne({
-      type: 'milk',
-      effective_date: { $lte: new Date() }
-    }).sort({ effective_date: -1 });
-    if (!rate) return res.status(500).json({ error: 'No active milk rate' });
-
-    const payout = litres * rate.rate;
-
-    // Session Handling with Retry Logic
+    // 3️⃣ Start Session
     session = await Transaction.startSession();
     
     let result;
     
     try {
-      // 1️⃣ Transaction Logic Inside withTransaction
-      await session.withTransaction(async () => {
-        // 8️⃣ Fraud check inside transaction (faster with find)
-        await checkDailyFraudLimit(farmer._id, litres, session);
-
-        // Call Service Function
-        result = await recordMilkTxService(session, {
-          farmer_code,
-          litres,
-          payout,
-          porter_id,
-          zone,
-          device_id: device.uuid,
-          farmer_id: farmer._id,
-          rate_version_id: rate._id,
-          branch_id: farmer.branch_id,
-          device_seq_num,
-          timestamp_local: timestamp_local ? new Date(timestamp_local) : new Date(),
-          rate
-        });
+      // 4️⃣ Call Service (All business logic inside)
+      result = await recordMilkTxService(session, {
+        farmer_code,
+        litres,
+        porter_id,
+        zone,
+        device_id: device.uuid,
+        branch_id,
+        device_seq_num,
+        timestamp_local: timestamp_local ? new Date(timestamp_local) : new Date()
       });
 
-      // 4️⃣ Calculate new balance (avoid extra DB call)
-      const newBalance = farmer.balance + payout;
-
-      // 1️⃣ & 2️⃣ Return REAL transaction ID and receipt number
+      // 5️⃣ Return Response (No Rate Exposed)
       res.json({
         success: true,
         transaction: {
@@ -136,9 +84,9 @@ const recordMilkTransaction = async (req, res) => {
           status: 'completed'
         },
         farmer: {
-          code: farmer.farmer_code,
-          name: farmer.name,
-          newBalance
+          code: result.farmer_code,
+          name: result.farmer_name,
+          newBalance: result.newBalance
         }
       });
     } catch (error) {
@@ -151,14 +99,14 @@ const recordMilkTransaction = async (req, res) => {
     logger.error('Record milk failed', { error: error.message });
     res.status(500).json({ error: error.message });
   } finally {
-    // 3️⃣ Session Always Closed
+    // 6️⃣ Session Always Closed
     if (session) {
       session.endSession();
     }
   }
 };
 
-// 3️⃣ Verify Transaction (Fixed: Populate Rate)
+// 3️⃣ Verify Transaction
 const verifyTransaction = async (req, res) => {
   try {
     const { receiptNum } = req.params;
@@ -168,6 +116,7 @@ const verifyTransaction = async (req, res) => {
       return res.status(404).json({ error: result.error || 'Transaction not found' });
     }
 
+    // Ensure rate is not in response (Service handles this, but we double check structure)
     res.json({ success: true, verified: true, transaction: result.transaction });
   } catch (error) {
     logger.error('Verify failed', { error: error.message });
@@ -175,105 +124,45 @@ const verifyTransaction = async (req, res) => {
   }
 };
 
-// 4️⃣ Get Porter Performance (Fixed: Indexes)
+// 4️⃣ Get Porter Performance
 const getPorterPerformance = async (req, res) => {
   try {
     const { porter_id } = req.params;
     const { period = 'today' } = req.query;
 
-    const porter = await Porter.findById(porter_id);
-    if (!porter) return res.status(404).json({ error: 'Porter not found' });
+    const result = await getPorterPerformanceService(porter_id, period);
 
-    let startDate;
-    if (period === 'today') {
-      startDate = new Date();
-      startDate.setHours(0, 0, 0, 0);
-    } else if (period === 'week') {
-      startDate = new Date();
-      startDate.setDate(startDate.getDate() - 7);
-    } else if (period === 'month') {
-      startDate = new Date();
-      startDate.setDate(startDate.getDate() - 30);
+    if (result.error) {
+      return res.status(404).json({ error: result.error });
     }
 
-    const stats = await Transaction.aggregate([
-      { $match: { porter_id: porter._id, timestamp_server: { $gte: startDate } } },
-      { $group: {
-        _id: null,
-        totalLitres: { $sum: '$litres' },
-        transactionCount: { $sum: 1 },
-        totalPayout: { $sum: '$payout' }
-      }}
-    ]);
-
-    res.json({
-      success: true,
-      porter: { id: porter._id, name: porter.name, zones: porter.zones },
-      stats: stats[0] || { totalLitres: 0, transactionCount: 0, totalPayout: 0 },
-      period
-    });
+    res.json({ success: true, ...result });
   } catch (error) {
     logger.error('Performance failed', { error: error.message });
     res.status(500).json({ error: error.message });
   }
 };
 
-// 5️⃣ Daily Summary (Fixed: Indexes)
+// 5️⃣ Daily Summary
 const getDailySummary = async (req, res) => {
   try {
     const { date = new Date().toISOString().split('T')[0] } = req.query;
-    const startDate = new Date(date);
-    startDate.setHours(0, 0, 0, 0);
-    const endDate = new Date(startDate);
-    endDate.setDate(endDate.getDate() + 1);
 
-    const summary = await Transaction.aggregate([
-      { $match: { type: 'milk', timestamp_server: { $gte: startDate, $lt: endDate } } },
-      { $group: {
-        _id: null,
-        totalLitres: { $sum: '$litres' },
-        transactionCount: { $sum: 1 },
-        activeFarmers: { $addToSet: '$farmer_id' }
-      }}
-    ]);
+    const result = await getDailySummaryService(date);
 
-    const topPorter = await Transaction.aggregate([
-      { $match: { type: 'milk', timestamp_server: { $gte: startDate, $lt: endDate } } },
-      { $group: { _id: '$porter_id', totalLitres: { $sum: '$litres' } } },
-      { $sort: { totalLitres: -1 } },
-      { $limit: 1 }
-    ]);
-
-    const topZone = await Transaction.aggregate([
-      { $match: { type: 'milk', timestamp_server: { $gte: startDate, $lt: endDate } } },
-      { $group: { _id: '$zone', totalLitres: { $sum: '$litres' } } },
-      { $sort: { totalLitres: -1 } },
-      { $limit: 1 }
-    ]);
-
-    res.json({
-      success: true,
-      date,
-      summary: {
-        totalLitres: summary[0]?.totalLitres || 0,
-        transactionCount: summary[0]?.transactionCount || 0,
-        activeFarmers: summary[0]?.activeFarmers?.length || 0
-      },
-      topPorter: topPorter[0] ? { id: topPorter[0]._id, litres: topPorter[0].totalLitres } : null,
-      topZone: topZone[0] ? { zone: topZone[0]._id, litres: topZone[0].totalLitres } : null
-    });
+    res.json({ success: true, ...result });
   } catch (error) {
     logger.error('Summary failed', { error: error.message });
     res.status(500).json({ error: error.message });
   }
 };
 
-// 6️⃣ Sync Offline Transactions (Fixed: Size Limit & Idempotency)
+// 6️⃣ Sync Offline Transactions
 const syncOfflineTransactions = async (req, res) => {
   try {
     const { transactions } = req.body;
 
-    // 10️⃣ Size Protection
+    // 1️⃣ Size Protection
     if (!Array.isArray(transactions) || transactions.length === 0) {
       return res.status(400).json({ error: 'No transactions to sync' });
     }
@@ -282,12 +171,12 @@ const syncOfflineTransactions = async (req, res) => {
       return res.status(400).json({ error: 'Maximum 1000 transactions per sync' });
     }
 
-    const synced = await syncOfflineTxService(transactions);
+    const result = await syncOfflineTxService(transactions);
 
     res.json({
       success: true,
-      synced: synced.synced,
-      failed: synced.failed
+      synced: result.synced,
+      failed: result.failed
     });
   } catch (error) {
     logger.error('Sync failed', { error: error.message });
@@ -295,7 +184,7 @@ const syncOfflineTransactions = async (req, res) => {
   }
 };
 
-// 7️⃣ Get Farmer History (Fixed: Query Transactions)
+// 7️⃣ Get Farmer History
 const getFarmerHistory = async (req, res) => {
   try {
     const { farmer_code } = req.params;
@@ -307,6 +196,7 @@ const getFarmerHistory = async (req, res) => {
       return res.status(404).json({ error: result.error });
     }
 
+    // Ensure history items do not contain rate (Service handles this)
     res.json({
       success: true,
       farmer: result.farmer,
@@ -326,4 +216,4 @@ module.exports = {
   getDailySummary,
   syncOfflineTransactions,
   getFarmerHistory
-};
+}

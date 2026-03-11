@@ -3,11 +3,12 @@ const Farmer = require('../models/farmer');
 const Porter = require('../models/porter');
 const RateVersion = require('../models/rateVersion');
 const Counter = require('../models/counter');
-const { generateHMAC, verifyHMAC, generateQRUrl } = require('./qrService');
+const Cooperative = require('../models/cooperative');
+const { generateHMAC, generateQRUrl } = require('./qrService');
 const logger = require('../utils/logger');
 const FRAUD_CONFIG = require('../config/fraudConfig');
 
-// 1️⃣ Generate Sequential Receipt Number (Reset Per Day)
+// Generate Sequential Receipt Number (Reset Per Day)
 const generateReceiptNum = async (session) => {
   const date = new Date();
   const year = date.getFullYear();
@@ -28,7 +29,7 @@ const generateReceiptNum = async (session) => {
   return `REC-${year}${month}${day}-${seqStr}`;
 };
 
-// 2️⃣ Generate Server Sequence Number (Branch + Daily Pattern)
+// Generate Server Sequence Number (Branch + Daily Pattern)
 const generateServerSeqNum = async (session, branch_id) => {
   const date = new Date();
   const year = date.getFullYear();
@@ -47,27 +48,54 @@ const generateServerSeqNum = async (session, branch_id) => {
   return `${branch_id}-${year}${month}${day}-${seqStr}`;
 };
 
-// 3️⃣ Record milk transaction with all fixes
+// Check Daily Fraud Limit
+const checkDailyFraudLimit = async (farmer_id, litres, session) => {
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  const tomorrow = new Date(today);
+  tomorrow.setDate(tomorrow.getDate() + 1);
+
+  const transactions = await Transaction.find({
+    farmer_id,
+    timestamp_server: { $gte: today, $lt: tomorrow },
+    type: 'milk'
+  })
+  .select('litres')
+  .session(session);
+
+  const currentDailyTotal = transactions.reduce((sum, tx) => sum + tx.litres, 0);
+  
+  if (currentDailyTotal + litres > FRAUD_CONFIG.MAX_MILK_PER_DAY) {
+    throw new Error('Daily milk limit exceeded');
+  }
+  
+  return currentDailyTotal;
+};
+
+// Record Milk Transaction with Cooperative Scoping
 const recordMilkTransaction = async (session, data) => {
   try {
-    const { farmer_code, litres, payout, porter_id, zone, device_id, farmer_id, rate_version_id, branch_id, device_seq_num, timestamp_local, rate } = data;
+    const { farmer_code, litres, payout, porter_id, zone, device_id, farmer_id, rate_version_id, branch_id, device_seq_num, timestamp_local, rate, cooperativeId } = data;
 
     // Fraud detection
     if (litres < FRAUD_CONFIG.MIN_MILK_THRESHOLD || litres > FRAUD_CONFIG.MAX_MILK_PER_TRANSACTION) {
       throw new Error('Milk amount exceeds limits');
     }
 
+    // Check daily fraud limit
+    await checkDailyFraudLimit(farmer_id, litres, session);
+
     // Generate transaction data
     const receiptNum = await generateReceiptNum(session);
     const serverSeqNum = await generateServerSeqNum(session, branch_id);
     
-    // 6️⃣ Idempotency with date
+    // Idempotency with date
     const idempotencyKey = `${device_id}-${device_seq_num}-${new Date().toISOString().split('T')[0]}`;
     
-    // 7️⃣ QR hash with more entropy
+    // QR hash with more entropy
     const qrHash = generateHMAC(`${receiptNum}${serverSeqNum}`);
     
-    // 10️⃣ Include rate in signature
+    // Signature Data
     const signatureData = {
       farmer_code,
       litres,
@@ -85,7 +113,7 @@ const recordMilkTransaction = async (session, data) => {
     
     const digitalSignature = generateHMAC(signatureData);
 
-    // Create transaction
+    // Create transaction with cooperativeId
     const transaction = await Transaction.create(
       [{
         device_id,
@@ -108,7 +136,8 @@ const recordMilkTransaction = async (session, data) => {
         rate_version_id,
         porter_id,
         zone,
-        branch_id
+        branch_id,
+        cooperativeId
       }],
       { session }
     );
@@ -132,6 +161,12 @@ const recordMilkTransaction = async (session, data) => {
       { session }
     );
 
+    logger.info('Transaction recorded', { 
+      transactionId: transaction[0]._id, 
+      receiptNum,
+      cooperativeId 
+    });
+
     return {
       transaction: transaction[0],
       receiptNum,
@@ -145,18 +180,29 @@ const recordMilkTransaction = async (session, data) => {
   }
 };
 
-// 4️⃣ Sync offline transactions with bulkWrite (Idempotent)
-const syncOfflineTransactions = async (transactions) => {
+// Sync Offline Transactions with Cooperative Scoping
+const syncOfflineTransactions = async (transactions, adminId) => {
   try {
+    // Validate cooperative exists
+    const cooperative = await Cooperative.findById(adminId);
+    if (!cooperative) {
+      throw new Error('Cooperative not found');
+    }
+
     const operations = transactions.map(tx => ({
       updateOne: {
         filter: { idempotency_key: tx.idempotency_key },
-        update: { $setOnInsert: tx },
+        update: { $setOnInsert: { ...tx, cooperativeId: cooperative._id } },
         upsert: true
       }
     }));
 
     const results = await Transaction.bulkWrite(operations, { ordered: false });
+    
+    logger.info('Offline transactions synced', { 
+      synced: results.upsertedCount, 
+      cooperativeId: cooperative._id 
+    });
     
     return {
       success: true,
@@ -174,18 +220,27 @@ const syncOfflineTransactions = async (transactions) => {
   }
 };
 
-// 5️⃣ Get farmer history (query from transactions, not stored in farmer)
-const getFarmerHistory = async (farmer_code, limit = 50) => {
-  const farmer = await Farmer.findOne({ farmer_code }).lean();
+// Get Farmer History with Cooperative Scoping
+const getFarmerHistory = async (farmer_code, limit = 50, adminId) => {
+  const farmer = await Farmer.findOne({ farmer_code });
   if (!farmer) {
     return { error: 'Farmer not found' };
   }
 
-  const history = await Transaction.find({ farmer_id: farmer._id })
-    .sort({ timestamp_server: -1 })
-    .limit(limit)
-    .populate('rate_version_id', 'rate')
-    .lean();
+  // Verify farmer belongs to admin's cooperative
+  const cooperative = await Cooperative.findById(adminId);
+  if (!cooperative || farmer.cooperativeId.toString() !== cooperative._id.toString()) {
+    throw new Error('Unauthorized: Farmer does not belong to your cooperative');
+  }
+
+  const history = await Transaction.find({ 
+    farmer_id: farmer._id,
+    cooperativeId: cooperative._id 
+  })
+  .sort({ timestamp_server: -1 })
+  .limit(limit)
+  .populate('rate_version_id', 'rate')
+  .lean();
 
   return {
     farmer: {
@@ -197,8 +252,194 @@ const getFarmerHistory = async (farmer_code, limit = 50) => {
   };
 };
 
+// Get All Transactions for Admin's Cooperative
+const getAllTransactions = async (adminId, filters = {}) => {
+  const cooperative = await Cooperative.findById(adminId);
+  if (!cooperative) {
+    throw new Error('Cooperative not found for this admin');
+  }
+
+  const query = { cooperativeId: cooperative._id };
+  
+  // Apply filters
+  if (filters.farmerId) query.farmer_id = filters.farmerId;
+  if (filters.porterId) query.porter_id = filters.porterId;
+  if (filters.type) query.type = filters.type;
+  if (filters.startDate) query.timestamp_server = { ...query.timestamp_server, $gte: filters.startDate };
+  if (filters.endDate) query.timestamp_server = { ...query.timestamp_server, $lte: filters.endDate };
+
+  const transactions = await Transaction.find(query)
+    .sort({ timestamp_server: -1 });
+
+  logger.info('Transactions retrieved', { count: transactions.length, cooperativeId: cooperative._id });
+  return transactions;
+};
+
+// Get Transaction by ID with Cooperative Scoping
+const getTransaction = async (transactionId, adminId) => {
+  const transaction = await Transaction.findById(transactionId);
+  
+  if (!transaction) {
+    throw new Error('Transaction not found');
+  }
+
+  // Verify transaction belongs to admin's cooperative
+  const cooperative = await Cooperative.findById(adminId);
+  if (!cooperative || transaction.cooperativeId.toString() !== cooperative._id.toString()) {
+    throw new Error('Unauthorized: Transaction does not belong to your cooperative');
+  }
+
+  return transaction;
+};
+
+// Get Transaction Summary for Admin's Cooperative
+const getTransactionSummary = async (adminId, period = 'month') => {
+  const cooperative = await Cooperative.findById(adminId);
+  if (!cooperative) {
+    throw new Error('Cooperative not found for this admin');
+  }
+
+  let startDate;
+  const now = new Date();
+
+  if (period === 'today') {
+    startDate = new Date();
+    startDate.setHours(0, 0, 0, 0);
+  } else if (period === 'week') {
+    startDate = new Date();
+    startDate.setDate(startDate.getDate() - 7);
+  } else if (period === 'month') {
+    startDate = new Date();
+    startDate.setDate(1);
+    startDate.setHours(0, 0, 0, 0);
+  } else {
+    startDate = new Date();
+    startDate.setHours(0, 0, 0, 0);
+  }
+
+  const summary = await Transaction.aggregate([
+    { $match: { cooperativeId: cooperative._id, timestamp_server: { $gte: startDate } } },
+    { $group: {
+      _id: null,
+      totalLitres: { $sum: '$litres' },
+      totalPayout: { $sum: '$payout' },
+      transactionCount: { $sum: 1 },
+      totalCost: { $sum: '$cost' }
+    }}
+  ]);
+
+  return {
+    period,
+    summary: summary[0] || { totalLitres: 0, totalPayout: 0, transactionCount: 0, totalCost: 0 },
+    cooperativeId: cooperative._id
+  };
+};
+
+// Get Transactions by Farmer (Scoped to Cooperative)
+const getTransactionsByFarmer = async (farmerId, adminId) => {
+  const farmer = await Farmer.findById(farmerId);
+  
+  if (!farmer) {
+    throw new Error('Farmer not found');
+  }
+
+  // Verify farmer belongs to admin's cooperative
+  const cooperative = await Cooperative.findById(adminId);
+  if (!cooperative || farmer.cooperativeId.toString() !== cooperative._id.toString()) {
+    throw new Error('Unauthorized: Farmer does not belong to your cooperative');
+  }
+
+  const transactions = await Transaction.find({ 
+    farmer_id: farmerId,
+    cooperativeId: cooperative._id 
+  })
+  .sort({ timestamp_server: -1 });
+
+  return transactions;
+};
+
+// Get Transactions by Porter (Scoped to Cooperative)
+const getTransactionsByPorter = async (porterId, adminId) => {
+  const porter = await Porter.findById(porterId);
+  
+  if (!porter) {
+    throw new Error('Porter not found');
+  }
+
+  // Verify porter belongs to admin's cooperative
+  const cooperative = await Cooperative.findById(adminId);
+  if (!cooperative || porter.cooperativeId.toString() !== cooperative._id.toString()) {
+    throw new Error('Unauthorized: Porter does not belong to your cooperative');
+  }
+
+  const transactions = await Transaction.find({ 
+    porter_id: porterId,
+    cooperativeId: cooperative._id 
+  })
+  .sort({ timestamp_server: -1 });
+
+  return transactions;
+};
+
+// Get Daily Summary for Admin's Cooperative
+const getDailySummary = async (adminId, date = new Date().toISOString().split('T')[0]) => {
+  const cooperative = await Cooperative.findById(adminId);
+  if (!cooperative) {
+    throw new Error('Cooperative not found for this admin');
+  }
+
+  const startDate = new Date(date);
+  startDate.setHours(0, 0, 0, 0);
+  const endDate = new Date(startDate);
+  endDate.setDate(endDate.getDate() + 1);
+
+  const summary = await Transaction.aggregate([
+    { $match: { cooperativeId: cooperative._id, type: 'milk', timestamp_server: { $gte: startDate, $lt: endDate } } },
+    { $group: {
+      _id: null,
+      totalLitres: { $sum: '$litres' },
+      transactionCount: { $sum: 1 },
+      activeFarmers: { $addToSet: '$farmer_id' }
+    }}
+  ]);
+
+  const topPorter = await Transaction.aggregate([
+    { $match: { cooperativeId: cooperative._id, type: 'milk', timestamp_server: { $gte: startDate, $lt: endDate } } },
+    { $group: { _id: '$porter_id', totalLitres: { $sum: '$litres' } } },
+    { $sort: { totalLitres: -1 } },
+    { $limit: 1 }
+  ]);
+
+  const topZone = await Transaction.aggregate([
+    { $match: { cooperativeId: cooperative._id, type: 'milk', timestamp_server: { $gte: startDate, $lt: endDate } } },
+    { $group: { _id: '$zone', totalLitres: { $sum: '$litres' } } },
+    { $sort: { totalLitres: -1 } },
+    { $limit: 1 }
+  ]);
+
+  return {
+    date,
+    summary: {
+      totalLitres: summary[0]?.totalLitres || 0,
+      transactionCount: summary[0]?.transactionCount || 0,
+      activeFarmers: summary[0]?.activeFarmers?.length || 0
+    },
+    topPorter: topPorter[0] ? { id: topPorter[0]._id, litres: topPorter[0].totalLitres } : null,
+    topZone: topZone[0] ? { zone: topZone[0]._id, litres: topZone[0].totalLitres } : null
+  };
+};
+
 module.exports = {
   recordMilkTransaction,
   syncOfflineTransactions,
-  getFarmerHistory
+  getFarmerHistory,
+  getAllTransactions,
+  getTransaction,
+  getTransactionSummary,
+  getTransactionsByFarmer,
+  getTransactionsByPorter,
+  getDailySummary,
+  generateReceiptNum,
+  generateServerSeqNum,
+  checkDailyFraudLimit
 };

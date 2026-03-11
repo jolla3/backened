@@ -1,14 +1,17 @@
 const express = require('express');
 const router = express.Router();
 const {
-  getPerformance,
   createPorter,
   getPorter,
+  getAllPorters,
   updatePorter,
-  deletePorter
+  deletePorter,
+  getPerformance
 } = require('../controllers/porterController');
 
+// All routes require authentication
 router.post('/', createPorter);
+router.get('/', getAllPorters);
 router.get('/:id', getPorter);
 router.get('/:id/performance', getPerformance);
 router.put('/:id', updatePorter);

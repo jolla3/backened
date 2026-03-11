@@ -12,7 +12,7 @@ const correlationMiddleware = require('./middlewares/correlationMiddleware');
 const logger = require('./utils/logger');
 const config = require('./config');
 
-const app = express();
+const app = express()
 const server = http.createServer(app);
 
 // Initialize WebSocket

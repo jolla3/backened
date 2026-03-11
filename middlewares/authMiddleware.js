@@ -1,3 +1,4 @@
+// middlewares/authMiddleware.js
 const jwt = require('jsonwebtoken');
 const config = require('../config');
 const logger = require('../utils/logger');
@@ -13,10 +14,14 @@ const authMiddleware = async (req, res, next) => {
 
   try {
     const decoded = jwt.verify(token, config.JWT_SECRET);
+    
+    // Attach user info including cooperativeId
     req.user = {
       id: decoded.id,
-      role: decoded.role
+      role: decoded.role,
+      cooperativeId: decoded.cooperativeId
     };
+    
     next();
   } catch (error) {
     logger.error('Auth failed', { 
