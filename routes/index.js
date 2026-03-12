@@ -20,7 +20,7 @@ const { authMiddleware, roleCheck } = require('../middlewares/authMiddleware');
 
 // Public routes
 router.use('/auth', authRoutes);
-router.use('/coop', authMiddleware, roleCheck('admin'), cooperativeRoutes)
+router.use('/coop',  cooperativeRoutes)
 
 // Protected routes
 router.use('/farmers', authMiddleware, farmerRoutes);

@@ -18,13 +18,15 @@ const getCooperative = async (req, res) => {
 
 const setupCooperative = async (req, res) => {
   try {
-    const { name, registrationNumber, location, contact } = req.body;
+    const { name, registrationNumber, location, contact , adminId} = req.body;
 
     const coop = await cooperativeService.setupCooperative({
       name,
       registrationNumber,
       location,
-      contact
+      contact,
+      adminId
+
     });
 
     res.status(201).json({ success: true, cooperative: coop });
