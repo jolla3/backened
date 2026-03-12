@@ -7,7 +7,7 @@ const getCooperative = async () => {
   return coops;
 };
 
-// Setup cooperative details (NO AUTH REQUIRED - First Time Setup)
+// Setup cooperative details (NO adminId required - First Time Setup)
 const setupCooperative = async (data) => {
   // Check if cooperative already exists
   const existing = await Cooperative.findOne();
