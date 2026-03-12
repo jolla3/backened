@@ -36,7 +36,6 @@ const getPorter = async (porterId, adminId) => {
   }
 
   // Verify porter belongs to admin's cooperative
-  // FIX: Use findOne with adminId instead of findById
   const cooperative = await Cooperative.findOne({ adminId: adminId });
   if (!cooperative || porter.cooperativeId.toString() !== cooperative._id.toString()) {
     throw new Error('Unauthorized: Porter does not belong to your cooperative');
@@ -47,7 +46,6 @@ const getPorter = async (porterId, adminId) => {
 
 // Get All Porters for Admin's Cooperative
 const getAllPorters = async (adminId) => {
-  // FIX: Use findOne with adminId instead of findById
   const cooperative = await Cooperative.findOne({ adminId: adminId });
   if (!cooperative) {
     throw new Error('Cooperative not found for this admin');
@@ -74,10 +72,15 @@ const updatePorter = async (porterId, data, adminId) => {
     throw new Error('Unauthorized: Cannot modify porters from other cooperatives');
   }
 
+  // FIX: Use returnDocument instead of new option
   const updatedPorter = await Porter.findByIdAndUpdate(
     porterId,
     { $set: data },
-    { new: true, runValidators: true }
+    { 
+      new: true, // Keep for backward compatibility, but returnDocument is preferred
+      returnDocument: 'after', // NEW: Returns the updated document
+      runValidators: true 
+    }
   );
 
   logger.info('Porter updated', { porterId, adminId });

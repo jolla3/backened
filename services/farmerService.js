@@ -36,7 +36,6 @@ const getFarmer = async (farmerId, adminId) => {
   }
 
   // Verify farmer belongs to admin's cooperative
-  // FIX: Use findOne with adminId instead of findById
   const cooperative = await Cooperative.findOne({ adminId: adminId });
   if (!cooperative || farmer.cooperativeId.toString() !== cooperative._id.toString()) {
     throw new Error('Unauthorized: Farmer does not belong to your cooperative');
@@ -76,10 +75,15 @@ const updateFarmer = async (farmerId, data, adminId) => {
     throw new Error('Unauthorized: Cannot modify farmers from other cooperatives');
   }
 
+  // FIX: Use returnDocument instead of new option
   const updatedFarmer = await Farmer.findByIdAndUpdate(
     farmerId,
     { $set: data },
-    { new: true, runValidators: true }
+    { 
+      new: true, // Keep for backward compatibility, but returnDocument is preferred
+      returnDocument: 'after', // NEW: Returns the updated document
+      runValidators: true 
+    }
   );
 
   logger.info('Farmer updated', { farmerId, adminId });
@@ -108,7 +112,6 @@ const deleteFarmer = async (farmerId, adminId) => {
 
 // Get All Farmers for Admin's Cooperative
 const getAllFarmers = async (adminId) => {
-  // FIX: Use findOne with adminId instead of findById
   const cooperative = await Cooperative.findOne({ adminId: adminId });
   if (!cooperative) {
     throw new Error('Cooperative not found for this admin');
