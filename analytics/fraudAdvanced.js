@@ -1,22 +1,25 @@
 const Transaction = require('../models/transaction');
 const Porter = require('../models/porter');
 
-const getAdvancedFraudSignals = async () => {
+const getAdvancedFraudSignals = async (adminId) => {
+  const cooperative = await require('../models/cooperative').findById(adminId);
+  if (!cooperative) throw new Error('Cooperative not found');
+
   const signals = [];
   const now = new Date();
   const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
 
   // 1. Porter vs Zone Average
-  const porters = await Porter.find({});
+  const porters = await Porter.find({ cooperativeId: cooperative._id });
   const zoneAvg = await Transaction.aggregate([
-    { $match: { type: 'milk' } },
+    { $match: { type: 'milk', cooperativeId: cooperative._id } },
     { $group: { _id: null, avgLitres: { $avg: '$litres' } } }
   ]);
   const globalAvg = zoneAvg[0]?.avgLitres || 0;
 
   for (const porter of porters) {
     const porterStats = await Transaction.aggregate([
-      { $match: { device_id: porter._id, type: 'milk' } },
+      { $match: { device_id: porter._id, type: 'milk', cooperativeId: cooperative._id } },
       { $group: { _id: null, avgLitres: { $avg: '$litres' } } }
     ]);
 
@@ -34,6 +37,7 @@ const getAdvancedFraudSignals = async () => {
   const nightTx = await Transaction.aggregate([
     { $match: {
       type: 'milk',
+      cooperativeId: cooperative._id,
       timestamp_server: {
         $gte: new Date(new Date().setHours(22, 0, 0, 0)),
         $lt: new Date(new Date().setHours(4, 0, 0, 0))
@@ -53,7 +57,7 @@ const getAdvancedFraudSignals = async () => {
 
   // 3. Large Deliveries (>100L)
   const largeDeliveries = await Transaction.aggregate([
-    { $match: { type: 'milk', litres: { $gt: 100 } } },
+    { $match: { type: 'milk', cooperativeId: cooperative._id, litres: { $gt: 100 } } },
     { $group: { _id: '$device_id', count: { $sum: 1 } } },
     { $match: { count: { $gt: 0 } } }
   ]);
@@ -68,6 +72,7 @@ const getAdvancedFraudSignals = async () => {
 
   // 4. Duplicate Receipt Numbers
   const duplicateReceipts = await Transaction.aggregate([
+    { $match: { cooperativeId: cooperative._id } },
     { $group: { _id: '$receipt_num', count: { $sum: 1 } } },
     { $match: { count: { $gt: 1 } } }
   ]);

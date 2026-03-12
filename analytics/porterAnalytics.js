@@ -3,8 +3,10 @@ const Porter = require('../models/porter');
 const Device = require('../models/device');
 const logger = require('../utils/logger');
 
-// Top Porters by Milk Collected
-const getTopPorters = async (limit = 10, period = 'weekly') => {
+const getTopPorters = async (limit = 10, period = 'weekly', adminId) => {
+  const cooperative = await require('../models/cooperative').findById(adminId);
+  if (!cooperative) throw new Error('Cooperative not found');
+
   const now = new Date();
   let startDate;
   
@@ -17,7 +19,7 @@ const getTopPorters = async (limit = 10, period = 'weekly') => {
   }
 
   const topPorters = await Transaction.aggregate([
-    { $match: { type: 'milk', timestamp_server: { $gte: startDate } } },
+    { $match: { type: 'milk', cooperativeId: cooperative._id, timestamp_server: { $gte: startDate } } },
     { $group: {
       _id: '$device_id',
       totalLitres: { $sum: '$litres' },
@@ -48,15 +50,17 @@ const getTopPorters = async (limit = 10, period = 'weekly') => {
   return topPorters;
 };
 
-// Porter Performance Summary
-const getPorterPerformanceSummary = async () => {
-  const porters = await Porter.find({});
+const getPorterPerformanceSummary = async (adminId) => {
+  const cooperative = await require('../models/cooperative').findById(adminId);
+  if (!cooperative) throw new Error('Cooperative not found');
+
+  const porters = await Porter.find({ cooperativeId: cooperative._id });
   
   const summary = [];
   
   for (const porter of porters) {
     const stats = await Transaction.aggregate([
-      { $match: { device_id: porter._id } },
+      { $match: { device_id: porter._id, cooperativeId: cooperative._id } },
       { $group: {
         _id: null,
         totalLitres: { $sum: '$litres' },
@@ -80,18 +84,20 @@ const getPorterPerformanceSummary = async () => {
   return summary.sort((a, b) => b.totalLitres - a.totalLitres);
 };
 
-// Porter Fraud Risk Score
-const getPorterFraudRiskScore = async () => {
-  const porters = await Porter.find({});
+const getPorterFraudRiskScore = async (adminId) => {
+  const cooperative = await require('../models/cooperative').findById(adminId);
+  if (!cooperative) throw new Error('Cooperative not found');
+
+  const porters = await Porter.find({ cooperativeId: cooperative._id });
   const riskScores = [];
   
   for (const porter of porters) {
     let riskScore = 0;
     const indicators = [];
 
-    // Check for midnight transactions
     const midnightCount = await Transaction.countDocuments({
       device_id: porter._id,
+      cooperativeId: cooperative._id,
       type: 'milk',
       timestamp_server: {
         $gte: new Date(new Date().setHours(22, 0, 0, 0)),
@@ -104,9 +110,9 @@ const getPorterFraudRiskScore = async () => {
       indicators.push('midnight_transactions');
     }
 
-    // Check for large deliveries
     const largeDeliveryCount = await Transaction.countDocuments({
       device_id: porter._id,
+      cooperativeId: cooperative._id,
       type: 'milk',
       litres: { $gt: 100 }
     });

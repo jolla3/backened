@@ -1,7 +1,10 @@
 const Transaction = require('../models/transaction');
 const Farmer = require('../models/farmer');
 
-const getOperationalKPIs = async () => {
+const getOperationalKPIs = async (adminId) => {
+  const cooperative = await require('../models/cooperative').findById(adminId);
+  if (!cooperative) throw new Error('Cooperative not found');
+
   const now = new Date();
   const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
   const yesterday = new Date(today);
@@ -10,24 +13,24 @@ const getOperationalKPIs = async () => {
   lastWeek.setDate(lastWeek.getDate() - 7);
 
   const todayMilk = await Transaction.aggregate([
-    { $match: { type: 'milk', timestamp_server: { $gte: today } } },
+    { $match: { type: 'milk', cooperativeId: cooperative._id, timestamp_server: { $gte: today } } },
     { $group: { _id: null, totalLitres: { $sum: '$litres' }, farmerCount: { $addToSet: '$farmer_id' } } }
   ]);
 
   const yesterdayMilk = await Transaction.aggregate([
-    { $match: { type: 'milk', timestamp_server: { $gte: yesterday, $lt: today } } },
+    { $match: { type: 'milk', cooperativeId: cooperative._id, timestamp_server: { $gte: yesterday, $lt: today } } },
     { $group: { _id: null, totalLitres: { $sum: '$litres' } } }
   ]);
 
   const lastWeekMilk = await Transaction.aggregate([
-    { $match: { type: 'milk', timestamp_server: { $gte: lastWeek, $lt: today } } },
+    { $match: { type: 'milk', cooperativeId: cooperative._id, timestamp_server: { $gte: lastWeek, $lt: today } } },
     { $group: { _id: null, totalLitres: { $sum: '$litres' } } }
   ]);
 
-  const activeFarmers = await Farmer.countDocuments();
+  const activeFarmers = await Farmer.countDocuments({ cooperativeId: cooperative._id });
 
   const peakHour = await Transaction.aggregate([
-    { $match: { type: 'milk', timestamp_server: { $gte: today } } },
+    { $match: { type: 'milk', cooperativeId: cooperative._id, timestamp_server: { $gte: today } } },
     { $group: { _id: { $hour: '$timestamp_server' }, count: { $sum: 1 } } },
     { $sort: { count: -1 } },
     { $limit: 1 }
@@ -43,8 +46,8 @@ const getOperationalKPIs = async () => {
 
   return {
     avgMilkPerFarmer: activeFarmerCount > 0 ? (todayLitres / activeFarmerCount) : 0,
-    growthVsYesterday: growthVsYesterday, // ✅ FIXED: Return number, not string
-    growthVsLastWeek: growthVsLastWeek, // ✅ FIXED: Return number, not string
+    growthVsYesterday: growthVsYesterday,
+    growthVsLastWeek: growthVsLastWeek,
     peakCollectionHour: peakHour[0] ? `${peakHour[0]._id}:00 - ${peakHour[0]._id + 1}:00` : null,
     totalLitresToday: todayLitres,
     activeFarmersToday: activeFarmerCount

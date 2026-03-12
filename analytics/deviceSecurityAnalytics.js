@@ -1,8 +1,11 @@
 const Device = require('../models/device');
 const Transaction = require('../models/transaction');
 
-const getDeviceIntelligence = async () => {
-  const devices = await Device.find({ approved: true, revoked: false });
+const getDeviceIntelligence = async (adminId) => {
+  const cooperative = await require('../models/cooperative').findById(adminId);
+  if (!cooperative) throw new Error('Cooperative not found');
+
+  const devices = await Device.find({ approved: true, revoked: false, cooperativeId: cooperative._id });
   const intelligence = [];
 
   for (const device of devices) {
@@ -12,7 +15,6 @@ const getDeviceIntelligence = async () => {
     const hoursSinceSync = lastTx ? (Date.now() - new Date(lastTx.timestamp_server)) / 36e5 : 999;
     const risk = hoursSinceSync > 24 ? 'HIGH' : 'LOW';
 
-    // Check for unusual transaction volume
     const today = new Date();
     today.setHours(0, 0, 0, 0);
     const todayTx = await Transaction.countDocuments({

@@ -2,12 +2,15 @@ const Transaction = require('../models/transaction');
 const Porter = require('../models/porter');
 const logger = require('../utils/logger');
 
-const detectAnomalies = async () => {
+const detectAnomalies = async (adminId) => {
+  const cooperative = await require('../models/cooperative').findById(adminId);
+  if (!cooperative) throw new Error('Cooperative not found');
+
   const anomalies = [];
 
   // 1. Large deliveries
   const largeDeliveries = await Transaction.aggregate([
-    { $match: { type: 'milk', litres: { $gt: 100 } } },
+    { $match: { type: 'milk', cooperativeId: cooperative._id, litres: { $gt: 100 } } },
     { $group: { _id: null, count: { $sum: 1 }, maxLitres: { $max: '$litres' } } }
   ]);
 
@@ -17,7 +20,7 @@ const detectAnomalies = async () => {
 
   // 2. Midnight transactions
   const midnightTransactions = await Transaction.aggregate([
-    { $match: { type: 'milk', timestamp_server: { $gte: new Date(new Date().setHours(22, 0, 0, 0)) } } },
+    { $match: { type: 'milk', cooperativeId: cooperative._id, timestamp_server: { $gte: new Date(new Date().setHours(22, 0, 0, 0)) } } },
     { $group: { _id: null, count: { $sum: 1 } } }
   ]);
 
@@ -27,6 +30,7 @@ const detectAnomalies = async () => {
 
   // 3. Duplicate receipts
   const duplicateReceipts = await Transaction.aggregate([
+    { $match: { cooperativeId: cooperative._id } },
     { $group: { _id: '$receipt_num', count: { $sum: 1 } } },
     { $match: { count: { $gt: 1 } } }
   ]);
@@ -41,8 +45,11 @@ const detectAnomalies = async () => {
   });
 };
 
-const getPorterFraudRiskScore = async () => {
-  const porters = await Porter.find({});
+const getPorterFraudRiskScore = async (adminId) => {
+  const cooperative = await require('../models/cooperative').findById(adminId);
+  if (!cooperative) throw new Error('Cooperative not found');
+
+  const porters = await Porter.find({ cooperativeId: cooperative._id });
   const riskScores = [];
 
   for (const porter of porters) {
@@ -51,6 +58,7 @@ const getPorterFraudRiskScore = async () => {
 
     const midnightCount = await Transaction.countDocuments({
       device_id: porter._id,
+      cooperativeId: cooperative._id,
       type: 'milk',
       timestamp_server: { $gte: new Date(new Date().setHours(22, 0, 0, 0)) }
     });
@@ -59,6 +67,7 @@ const getPorterFraudRiskScore = async () => {
 
     const largeDeliveryCount = await Transaction.countDocuments({
       device_id: porter._id,
+      cooperativeId: cooperative._id,
       type: 'milk',
       litres: { $gt: 100 }
     });

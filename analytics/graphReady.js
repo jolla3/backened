@@ -2,7 +2,10 @@ const Transaction = require('../models/transaction');
 const Porter = require('../models/porter');
 const Farmer = require('../models/farmer');
 
-const getGraphReadyData = async (period = 'daily') => {
+const getGraphReadyData = async (period = 'daily', adminId) => {
+  const cooperative = await require('../models/cooperative').findById(adminId);
+  if (!cooperative) throw new Error('Cooperative not found');
+
   const now = new Date();
   let startDate;
   
@@ -12,7 +15,7 @@ const getGraphReadyData = async (period = 'daily') => {
 
   // Milk Trend
   const milkTrend = await Transaction.aggregate([
-    { $match: { type: 'milk', timestamp_server: { $gte: startDate } } },
+    { $match: { type: 'milk', cooperativeId: cooperative._id, timestamp_server: { $gte: startDate } } },
     { $group: {
       _id: { $dateToString: { format: '%Y-%m-%d', date: '$timestamp_server' } },
       totalLitres: { $sum: '$litres' }
@@ -22,7 +25,7 @@ const getGraphReadyData = async (period = 'daily') => {
 
   // Feed Trend
   const feedTrend = await Transaction.aggregate([
-    { $match: { type: 'feed', timestamp_server: { $gte: startDate } } },
+    { $match: { type: 'feed', cooperativeId: cooperative._id, timestamp_server: { $gte: startDate } } },
     { $group: {
       _id: { $dateToString: { format: '%Y-%m-%d', date: '$timestamp_server' } },
       totalQty: { $sum: '$quantity' }
@@ -32,7 +35,7 @@ const getGraphReadyData = async (period = 'daily') => {
 
   // Porter Performance Trend
   const porterTrend = await Transaction.aggregate([
-    { $match: { type: 'milk', timestamp_server: { $gte: startDate } } },
+    { $match: { type: 'milk', cooperativeId: cooperative._id, timestamp_server: { $gte: startDate } } },
     { $group: {
       _id: { $dateToString: { format: '%Y-%m-%d', date: '$timestamp_server' } },
       totalLitres: { $sum: '$litres' },
@@ -42,12 +45,12 @@ const getGraphReadyData = async (period = 'daily') => {
   ]);
 
   // Farmer Growth Trend
-  const farmersThisMonth = await Farmer.countDocuments({ createdAt: { $gte: startDate } });
-  const farmersLastMonth = await Farmer.countDocuments({ createdAt: { $gte: new Date(startDate.getTime() - 30*24*60*60*1000), $lt: startDate } });
+  const farmersThisMonth = await Farmer.countDocuments({ cooperativeId: cooperative._id, createdAt: { $gte: startDate } });
+  const farmersLastMonth = await Farmer.countDocuments({ cooperativeId: cooperative._id, createdAt: { $gte: new Date(startDate.getTime() - 30*24*60*60*1000), $lt: startDate } });
 
   // Zone Production Trend
   const zoneTrend = await Transaction.aggregate([
-    { $match: { type: 'milk', timestamp_server: { $gte: startDate } } },
+    { $match: { type: 'milk', cooperativeId: cooperative._id, timestamp_server: { $gte: startDate } } },
     { $lookup: {
       from: 'farmers',
       localField: 'farmer_id',
@@ -65,7 +68,7 @@ const getGraphReadyData = async (period = 'daily') => {
 
   // Peak Collection Hours
   const peakHours = await Transaction.aggregate([
-    { $match: { type: 'milk', timestamp_server: { $gte: startDate } } },
+    { $match: { type: 'milk', cooperativeId: cooperative._id, timestamp_server: { $gte: startDate } } },
     { $group: {
       _id: { $hour: '$timestamp_server' },
       count: { $sum: 1 }
@@ -74,8 +77,6 @@ const getGraphReadyData = async (period = 'daily') => {
     { $limit: 5 }
   ]);
 
-  // ✅ FIXED: Return clean object without undefined keys
-  // Build object explicitly to avoid undefined keys
   return {
     milkTrendGraph: {
       labels: milkTrend.map(t => t._id),

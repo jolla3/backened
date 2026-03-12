@@ -1,7 +1,10 @@
 const Transaction = require('../models/transaction');
 const AuditLog = require('../models/auditLog');
 
-const getSmsAnalytics = async () => {
+const getSmsAnalytics = async (adminId) => {
+  const cooperative = await require('../models/cooperative').findById(adminId);
+  if (!cooperative) throw new Error('Cooperative not found');
+
   const today = new Date();
   today.setHours(0, 0, 0, 0);
 
@@ -16,6 +19,7 @@ const getSmsAnalytics = async () => {
     }),
     Transaction.countDocuments({
       type: 'milk',
+      cooperativeId: cooperative._id,
       timestamp_server: { $gte: today },
       qr_hash: { $exists: true, $ne: '' }
     })
@@ -27,7 +31,7 @@ const getSmsAnalytics = async () => {
   return {
     smsSent,
     smsFailed,
-    deliveryRate: deliveryRate, // ✅ FIXED: Return number, not string
+    deliveryRate: deliveryRate,
     receiptsVerifiedToday: receiptsVerified
   };
 };

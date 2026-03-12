@@ -1,9 +1,10 @@
 const Transaction = require('../models/transaction');
 const Farmer = require('../models/farmer');
-const logger = require('../utils/logger');
 
-// Top Milk Producers
-const getTopMilkProducers = async (limit = 10, period = 'weekly') => {
+const getTopMilkProducers = async (limit = 10, period = 'weekly', adminId) => {
+  const cooperative = await require('../models/cooperative').findById(adminId);
+  if (!cooperative) throw new Error('Cooperative not found');
+
   const now = new Date();
   let startDate;
   
@@ -18,7 +19,7 @@ const getTopMilkProducers = async (limit = 10, period = 'weekly') => {
   }
 
   const topProducers = await Transaction.aggregate([
-    { $match: { type: 'milk', timestamp_server: { $gte: startDate } } },
+    { $match: { type: 'milk', cooperativeId: cooperative._id, timestamp_server: { $gte: startDate } } },
     { $group: {
       _id: '$farmer_id',
       totalLitres: { $sum: '$litres' },
@@ -49,8 +50,10 @@ const getTopMilkProducers = async (limit = 10, period = 'weekly') => {
   return topProducers;
 };
 
-// Low Performing Farmers (compared to last period)
-const getLowPerformingFarmers = async (period = 'weekly') => {
+const getLowPerformingFarmers = async (period = 'weekly', adminId) => {
+  const cooperative = await require('../models/cooperative').findById(adminId);
+  if (!cooperative) throw new Error('Cooperative not found');
+
   const now = new Date();
   let currentStartDate, previousStartDate;
   
@@ -66,19 +69,13 @@ const getLowPerformingFarmers = async (period = 'weekly') => {
   }
 
   const currentPeriod = await Transaction.aggregate([
-    { $match: { type: 'milk', timestamp_server: { $gte: currentStartDate } } },
-    { $group: {
-      _id: '$farmer_id',
-      totalLitres: { $sum: '$litres' }
-    }}
+    { $match: { type: 'milk', cooperativeId: cooperative._id, timestamp_server: { $gte: currentStartDate } } },
+    { $group: { _id: '$farmer_id', totalLitres: { $sum: '$litres' } } }
   ]);
 
   const previousPeriod = await Transaction.aggregate([
-    { $match: { type: 'milk', timestamp_server: { $gte: previousStartDate, $lt: currentStartDate } } },
-    { $group: {
-      _id: '$farmer_id',
-      totalLitres: { $sum: '$litres' }
-    }}
+    { $match: { type: 'milk', cooperativeId: cooperative._id, timestamp_server: { $gte: previousStartDate, $lt: currentStartDate } } },
+    { $group: { _id: '$farmer_id', totalLitres: { $sum: '$litres' } } }
   ]);
 
   const currentMap = new Map(currentPeriod.map(p => [p._id.toString(), p.totalLitres]));
@@ -110,8 +107,10 @@ const getLowPerformingFarmers = async (period = 'weekly') => {
   return lowPerformers.sort((a, b) => a.changePercent - b.changePercent);
 };
 
-// Milk Collection Trends
-const getMilkCollectionTrends = async (period = 'daily') => {
+const getMilkCollectionTrends = async (period = 'daily', adminId) => {
+  const cooperative = await require('../models/cooperative').findById(adminId);
+  if (!cooperative) throw new Error('Cooperative not found');
+
   const now = new Date();
   let startDate;
   
@@ -126,7 +125,7 @@ const getMilkCollectionTrends = async (period = 'daily') => {
   }
 
   const trends = await Transaction.aggregate([
-    { $match: { type: 'milk', timestamp_server: { $gte: startDate } } },
+    { $match: { type: 'milk', cooperativeId: cooperative._id, timestamp_server: { $gte: startDate } } },
     { $group: {
       _id: { $dateToString: { format: '%Y-%m-%d', date: '$timestamp_server' } },
       totalLitres: { $sum: '$litres' },
@@ -139,10 +138,12 @@ const getMilkCollectionTrends = async (period = 'daily') => {
   return trends;
 };
 
-// Zone-wise Milk Collection
-const getZoneMilkCollection = async () => {
+const getZoneMilkCollection = async (adminId) => {
+  const cooperative = await require('../models/cooperative').findById(adminId);
+  if (!cooperative) throw new Error('Cooperative not found');
+
   const transactions = await Transaction.aggregate([
-    { $match: { type: 'milk' } },
+    { $match: { type: 'milk', cooperativeId: cooperative._id } },
     { $lookup: {
       from: 'farmers',
       localField: 'farmer_id',

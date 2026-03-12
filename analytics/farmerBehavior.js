@@ -1,25 +1,41 @@
 const Farmer = require('../models/farmer');
 const Transaction = require('../models/transaction');
+const logger = require('../utils/logger');
 
-const getFarmerRisks = async () => {
-  const farmers = await Farmer.find({});
-  const risks = [];
+// ✅ FIXED: Replaced loop with Aggregation + Cooperative Scoping
+const getFarmerRisks = async (adminId) => {
+  const cooperative = await require('../models/cooperative').findById(adminId);
+  if (!cooperative) throw new Error('Cooperative not found');
 
-  for (const farmer of farmers) {
-    const lastDelivery = await Transaction.findOne({
-      farmer_id: farmer._id,
-      type: 'milk'
-    }).sort({ timestamp_server: -1 });
+  const risks = await Transaction.aggregate([
+    { $match: { cooperativeId: cooperative._id, type: 'milk' } },
+    { $group: {
+      _id: '$farmer_id',
+      lastDelivery: { $max: '$timestamp_server' },
+      totalLitres: { $sum: '$litres' }
+    }},
+    { $lookup: {
+      from: 'farmers',
+      localField: '_id',
+      foreignField: '_id',
+      as: 'farmer'
+    }},
+    { $unwind: '$farmer' },
+    { $project: {
+      farmerName: '$farmer.name',
+      lastDelivery: '$lastDelivery',
+      currentBalance: '$farmer.balance'
+    }},
+    { $sort: { lastDelivery: -1 } }
+  ]);
 
-    const debtLevel = Math.abs(farmer.balance) / 1000;
-    const milkTrendDrop = 0; // Can be calculated from historical data
-
-    // ✅ FIXED: Realistic risk score calculation
-    const daysSince = lastDelivery 
-      ? (Date.now() - new Date(lastDelivery.timestamp_server)) / 86400000 
+  const riskList = risks.map(item => {
+    const daysSince = item.lastDelivery 
+      ? (Date.now() - new Date(item.lastDelivery)) / 86400000 
       : 30;
-
-    const riskScore = (daysSince * 0.5) + (debtLevel * 0.3) + (milkTrendDrop * 0.2);
+    
+    const debtLevel = Math.abs(item.currentBalance) / 1000;
+    const riskScore = (daysSince * 0.5) + (debtLevel * 0.3);
     
     let risk = 'LOW';
     if (riskScore >= 81) risk = 'CRITICAL';
@@ -27,17 +43,18 @@ const getFarmerRisks = async () => {
     else if (riskScore >= 31) risk = 'MEDIUM';
 
     if (risk !== 'LOW') {
-      risks.push({
-        farmer: farmer.name,
+      return {
+        farmer: item.farmerName,
         lastDelivery: `${daysSince.toFixed(0)} days ago`,
         risk,
         riskScore: riskScore.toFixed(1),
-        currentBalance: farmer.balance
-      });
+        currentBalance: item.currentBalance
+      };
     }
-  }
+    return null;
+  }).filter(Boolean);
 
-  return risks.sort((a, b) => b.riskScore - a.riskScore);
+  return riskList.sort((a, b) => b.riskScore - a.riskScore);
 };
 
 module.exports = { getFarmerRisks };

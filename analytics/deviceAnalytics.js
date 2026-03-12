@@ -1,10 +1,12 @@
 const Device = require('../models/device');
 const Transaction = require('../models/transaction');
-const logger = require('../utils/logger');
 
 // Active Devices
-const getActiveDevices = async () => {
-  const devices = await Device.find({ approved: true, revoked: false });
+const getActiveDevices = async (adminId) => {
+  const cooperative = await require('../models/cooperative').findById(adminId);
+  if (!cooperative) throw new Error('Cooperative not found');
+
+  const devices = await Device.find({ approved: true, revoked: false, cooperativeId: cooperative._id });
   
   const activeList = [];
   
@@ -32,8 +34,11 @@ const getActiveDevices = async () => {
 };
 
 // Devices Stopped Syncing (>24 hours)
-const getInactiveDevices = async () => {
-  const devices = await Device.find({ approved: true, revoked: false });
+const getInactiveDevices = async (adminId) => {
+  const cooperative = await require('../models/cooperative').findById(adminId);
+  if (!cooperative) throw new Error('Cooperative not found');
+
+  const devices = await Device.find({ approved: true, revoked: false, cooperativeId: cooperative._id });
   
   const inactiveList = [];
   
@@ -61,18 +66,24 @@ const getInactiveDevices = async () => {
 };
 
 // Pending Device Approvals
-const getPendingDevices = async () => {
-  return await Device.find({ approved: false, revoked: false });
+const getPendingDevices = async (adminId) => {
+  const cooperative = await require('../models/cooperative').findById(adminId);
+  if (!cooperative) throw new Error('Cooperative not found');
+
+  return await Device.find({ approved: false, revoked: false, cooperativeId: cooperative._id });
 };
 
 // Device Sync Summary
-const getDeviceSyncSummary = async () => {
-  const totalDevices = await Device.countDocuments();
-  const activeDevices = await Device.countDocuments({ approved: true, revoked: false });
-  const pendingDevices = await Device.countDocuments({ approved: false, revoked: false });
-  const revokedDevices = await Device.countDocuments({ revoked: true });
+const getDeviceSyncSummary = async (adminId) => {
+  const cooperative = await require('../models/cooperative').findById(adminId);
+  if (!cooperative) throw new Error('Cooperative not found');
+
+  const totalDevices = await Device.countDocuments({ cooperativeId: cooperative._id });
+  const activeDevices = await Device.countDocuments({ cooperativeId: cooperative._id, approved: true, revoked: false });
+  const pendingDevices = await Device.countDocuments({ cooperativeId: cooperative._id, approved: false, revoked: false });
+  const revokedDevices = await Device.countDocuments({ cooperativeId: cooperative._id, revoked: true });
   
-  const inactiveDevices = await Device.find({ approved: true, revoked: false });
+  const inactiveDevices = await Device.find({ cooperativeId: cooperative._id, approved: true, revoked: false });
   let inactiveCount = 0;
   
   for (const device of inactiveDevices) {

@@ -4,11 +4,14 @@ const Farmer = require('../models/farmer');
 const Transaction = require('../models/transaction');
 const Porter = require('../models/porter');
 
-const generateActions = async () => {
+const generateActions = async (adminId) => {
+  const cooperative = await require('../models/cooperative').findById(adminId);
+  if (!cooperative) throw new Error('Cooperative not found');
+
   const actions = [];
 
   // 1. Device Inactivity
-  const devices = await Device.find({ approved: true, revoked: false });
+  const devices = await Device.find({ approved: true, revoked: false, cooperativeId: cooperative._id });
   for (const device of devices) {
     const lastTx = await Transaction.findOne({ device_id: device.uuid }).sort({ timestamp_server: -1 });
     if (lastTx) {
@@ -24,7 +27,7 @@ const generateActions = async () => {
   }
 
   // 2. High Debt Farmers
-  const highDebtFarmers = await Farmer.find({ balance: { $lt: -20000 } }).limit(5);
+  const highDebtFarmers = await Farmer.find({ cooperativeId: cooperative._id, balance: { $lt: -20000 } }).limit(5);
   for (const farmer of highDebtFarmers) {
     actions.push({
       type: 'high_debt',
@@ -35,7 +38,7 @@ const generateActions = async () => {
 
   // 3. Stockout Risk
   const lowStock = await Inventory.aggregate([
-    { $match: { $expr: { $lte: ['$stock', '$threshold'] } } },
+    { $match: { cooperativeId: cooperative._id, $expr: { $lte: ['$stock', '$threshold'] } } },
     { $limit: 3 }
   ]);
   for (const product of lowStock) {
@@ -47,9 +50,9 @@ const generateActions = async () => {
   }
 
   // 4. Farmer Inactivity
-  const farmers = await Farmer.find({}).limit(5);
+  const farmers = await Farmer.find({ cooperativeId: cooperative._id }).limit(5);
   for (const farmer of farmers) {
-    const lastTx = await Transaction.findOne({ farmer_id: farmer._id, type: 'milk' }).sort({ timestamp_server: -1 });
+    const lastTx = await Transaction.findOne({ farmer_id: farmer._id, type: 'milk', cooperativeId: cooperative._id }).sort({ timestamp_server: -1 });
     if (lastTx) {
       const days = (Date.now() - new Date(lastTx.timestamp_server)) / 86400000;
       if (days > 7) {
@@ -63,10 +66,11 @@ const generateActions = async () => {
   }
 
   // 5. Porter Fraud Risk
-  const porters = await Porter.find({});
+  const porters = await Porter.find({ cooperativeId: cooperative._id });
   for (const porter of porters) {
     const largeDeliveries = await Transaction.countDocuments({
       device_id: porter._id,
+      cooperativeId: cooperative._id,
       type: 'milk',
       litres: { $gt: 100 }
     });
@@ -81,7 +85,7 @@ const generateActions = async () => {
 
   // 6. Zone Underperformance
   const zones = await Transaction.aggregate([
-    { $match: { type: 'milk' } },
+    { $match: { type: 'milk', cooperativeId: cooperative._id } },
     { $lookup: {
       from: 'farmers',
       localField: 'farmer_id',

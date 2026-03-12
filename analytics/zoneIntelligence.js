@@ -1,10 +1,12 @@
 const Transaction = require('../models/transaction');
 const Farmer = require('../models/farmer');
-const Porter = require('../models/porter');
 
-const getZoneIntelligence = async () => {
+const getZoneIntelligence = async (adminId) => {
+  const cooperative = await require('../models/cooperative').findById(adminId);
+  if (!cooperative) throw new Error('Cooperative not found');
+
   const transactions = await Transaction.aggregate([
-    { $match: { type: 'milk' } },
+    { $match: { type: 'milk', cooperativeId: cooperative._id } },
     { $lookup: {
       from: 'farmers',
       localField: 'farmer_id',

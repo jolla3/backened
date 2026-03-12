@@ -5,7 +5,10 @@ const Inventory = require('../models/inventory');
 const Device = require('../models/device');
 const logger = require('../utils/logger');
 
-const getTodayMetrics = async () => {
+const getTodayMetrics = async (adminId) => {
+  const cooperative = await require('../models/cooperative').findById(adminId);
+  if (!cooperative) throw new Error('Cooperative not found');
+
   const today = new Date();
   today.setHours(0, 0, 0, 0);
 
@@ -17,18 +20,18 @@ const getTodayMetrics = async () => {
     portersToday,
     devicesToday
   ] = await Promise.all([
-    Transaction.countDocuments({ timestamp_server: { $gte: today } }),
+    Transaction.countDocuments({ cooperativeId: cooperative._id, timestamp_server: { $gte: today } }),
     Transaction.aggregate([
-      { $match: { type: 'milk', timestamp_server: { $gte: today } } },
+      { $match: { type: 'milk', cooperativeId: cooperative._id, timestamp_server: { $gte: today } } },
       { $group: { _id: null, totalLitres: { $sum: '$litres' }, totalPayout: { $sum: '$payout' } } }
     ]),
     Transaction.aggregate([
-      { $match: { type: 'feed', timestamp_server: { $gte: today } } },
+      { $match: { type: 'feed', cooperativeId: cooperative._id, timestamp_server: { $gte: today } } },
       { $group: { _id: null, totalQuantity: { $sum: '$quantity' }, totalCost: { $sum: '$cost' } } }
     ]),
-    Farmer.countDocuments({ createdAt: { $gte: today } }),
-    Porter.countDocuments({ createdAt: { $gte: today } }),
-    Device.countDocuments({ last_seen: { $gte: today } })
+    Farmer.countDocuments({ cooperativeId: cooperative._id, createdAt: { $gte: today } }),
+    Porter.countDocuments({ cooperativeId: cooperative._id, createdAt: { $gte: today } }),
+    Device.countDocuments({ cooperativeId: cooperative._id, last_seen: { $gte: today } })
   ]);
 
   return {
@@ -41,17 +44,19 @@ const getTodayMetrics = async () => {
   };
 };
 
-const getSystemHealth = async () => {
-  const totalTransactions = await Transaction.countDocuments();
-  const pendingTransactions = await Transaction.countDocuments({ status: 'pending' });
-  const failedTransactions = await Transaction.countDocuments({ status: 'failed' });
-  const totalFarmers = await Farmer.countDocuments();
-  const totalPorters = await Porter.countDocuments();
-  const totalDevices = await Device.countDocuments();
+const getSystemHealth = async (adminId) => {
+  const cooperative = await require('../models/cooperative').findById(adminId);
+  if (!cooperative) throw new Error('Cooperative not found');
+
+  const totalTransactions = await Transaction.countDocuments({ cooperativeId: cooperative._id });
+  const pendingTransactions = await Transaction.countDocuments({ cooperativeId: cooperative._id, status: 'pending' });
+  const failedTransactions = await Transaction.countDocuments({ cooperativeId: cooperative._id, status: 'failed' });
+  const totalFarmers = await Farmer.countDocuments({ cooperativeId: cooperative._id });
+  const totalPorters = await Porter.countDocuments({ cooperativeId: cooperative._id });
+  const totalDevices = await Device.countDocuments({ cooperativeId: cooperative._id });
   
-  // ✅ FIXED: Use $count in aggregation instead of countDocuments()
   const lowStockProducts = await Inventory.aggregate([
-    { $match: { $expr: { $lte: ['$stock', '$threshold'] } } },
+    { $match: { cooperativeId: cooperative._id, $expr: { $lte: ['$stock', '$threshold'] } } },
     { $count: 'count' }
   ]);
 

@@ -1,8 +1,12 @@
 const Transaction = require('../models/transaction');
 const Farmer = require('../models/farmer');
 const Inventory = require('../models/inventory');
+const Porter = require('../models/porter');
 
-const getAiAdvisory = async () => {
+const getAiAdvisory = async (adminId) => {
+  const cooperative = await require('../models/cooperative').findById(adminId);
+  if (!cooperative) throw new Error('Cooperative not found');
+
   const insights = [];
 
   // 1. Milk Production Drop Analysis
@@ -11,14 +15,15 @@ const getAiAdvisory = async () => {
   const lastWeek = new Date(today);
   lastWeek.setDate(lastWeek.getDate() - 7);
 
-  const todayMilk = await Transaction.aggregate([
-    { $match: { type: 'milk', timestamp_server: { $gte: today } } },
-    { $group: { _id: null, totalLitres: { $sum: '$litres' } } }
-  ]);
-
-  const lastWeekMilk = await Transaction.aggregate([
-    { $match: { type: 'milk', timestamp_server: { $gte: lastWeek, $lt: today } } },
-    { $group: { _id: null, totalLitres: { $sum: '$litres' } } }
+  const [todayMilk, lastWeekMilk] = await Promise.all([
+    Transaction.aggregate([
+      { $match: { type: 'milk', cooperativeId: cooperative._id, timestamp_server: { $gte: today } } },
+      { $group: { _id: null, totalLitres: { $sum: '$litres' } } }
+    ]),
+    Transaction.aggregate([
+      { $match: { type: 'milk', cooperativeId: cooperative._id, timestamp_server: { $gte: lastWeek, $lt: today } } },
+      { $group: { _id: null, totalLitres: { $sum: '$litres' } } }
+    ])
   ]);
 
   const todayLitres = todayMilk[0]?.totalLitres || 0;
@@ -37,7 +42,7 @@ const getAiAdvisory = async () => {
 
   // 2. Feed Shortage Analysis
   const lowStock = await Inventory.aggregate([
-    { $match: { $expr: { $lte: ['$stock', '$threshold'] } } },
+    { $match: { cooperativeId: cooperative._id, $expr: { $lte: ['$stock', '$threshold'] } } },
     { $limit: 3 }
   ]);
 
@@ -51,15 +56,19 @@ const getAiAdvisory = async () => {
     });
   }
 
-  // 3. Farmer Retention Risk
-  const inactiveFarmers = await Farmer.find({});
+  // 3. Farmer Retention Risk (Optimized)
+  const inactiveFarmers = await Transaction.aggregate([
+    { $match: { type: 'milk', cooperativeId: cooperative._id } },
+    { $group: { _id: '$farmer_id', lastDelivery: { $max: '$timestamp_server' } } },
+    { $lookup: { from: 'farmers', localField: '_id', foreignField: '_id', as: 'farmer' } },
+    { $unwind: '$farmer' },
+    { $project: { farmerId: '$_id', lastDelivery: 1 } }
+  ]);
+
   let criticalInactive = 0;
   for (const farmer of inactiveFarmers) {
-    const lastTx = await Transaction.findOne({ farmer_id: farmer._id, type: 'milk' }).sort({ timestamp_server: -1 });
-    if (lastTx) {
-      const days = (Date.now() - new Date(lastTx.timestamp_server)) / 86400000;
-      if (days > 14) criticalInactive++;
-    }
+    const days = (Date.now() - new Date(farmer.lastDelivery)) / 86400000;
+    if (days > 14) criticalInactive++;
   }
 
   if (criticalInactive > 5) {
@@ -72,20 +81,14 @@ const getAiAdvisory = async () => {
     });
   }
 
-  // 4. Porter Efficiency Analysis
-  const porters = await require('../models/porter').find({});
-  const porterStats = [];
-  for (const porter of porters) {
-    const stats = await Transaction.aggregate([
-      { $match: { device_id: porter._id, type: 'milk' } },
-      { $group: { _id: null, totalLitres: { $sum: '$litres' }, transactionCount: { $sum: 1 } } }
-    ]);
-    porterStats.push({
-      name: porter.name,
-      litres: stats[0]?.totalLitres || 0,
-      transactions: stats[0]?.transactionCount || 0
-    });
-  }
+  // 4. Porter Efficiency Analysis (Optimized)
+  const porterStats = await Transaction.aggregate([
+    { $match: { type: 'milk', cooperativeId: cooperative._id } },
+    { $group: { _id: '$device_id', totalLitres: { $sum: '$litres' }, transactionCount: { $sum: 1 } } },
+    { $lookup: { from: 'porters', localField: '_id', foreignField: '_id', as: 'porter' } },
+    { $unwind: '$porter' },
+    { $project: { name: '$porter.name', litres: '$totalLitres', transactions: '$transactionCount' } }
+  ]);
 
   const avgLitres = porterStats.length > 0 
     ? porterStats.reduce((sum, p) => sum + p.litres, 0) / porterStats.length 

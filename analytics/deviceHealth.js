@@ -1,8 +1,11 @@
 const Device = require('../models/device');
 const Transaction = require('../models/transaction');
 
-const getDeviceHealth = async () => {
-  const devices = await Device.find({ approved: true, revoked: false });
+const getDeviceHealth = async (adminId) => {
+  const cooperative = await require('../models/cooperative').findById(adminId);
+  if (!cooperative) throw new Error('Cooperative not found');
+
+  const devices = await Device.find({ approved: true, revoked: false, cooperativeId: cooperative._id });
   const healthData = [];
   let totalDevices = 0;
   let activeDevices = 0;
@@ -13,7 +16,6 @@ const getDeviceHealth = async () => {
     const lastTx = await Transaction.findOne({ device_id: device.uuid }).sort({ timestamp_server: -1 });
     const pendingTx = await Transaction.countDocuments({ device_id: device.uuid, status: 'pending' });
     
-    // ✅ FIXED: Use null instead of 999 for missing data
     const hoursSinceSync = lastTx 
       ? (Date.now() - new Date(lastTx.timestamp_server)) / 36e5 
       : null;
@@ -23,7 +25,6 @@ const getDeviceHealth = async () => {
       timestamp_server: { $gte: new Date(new Date().setHours(0, 0, 0, 0)) }
     });
 
-    // Calculate health score
     let healthScore = 100;
     if (hoursSinceSync !== null && hoursSinceSync > 24) healthScore -= 30;
     if (hoursSinceSync !== null && hoursSinceSync > 48) healthScore -= 20;
@@ -34,7 +35,6 @@ const getDeviceHealth = async () => {
     if (healthScore < 50) status = 'critical';
     else if (healthScore < 75) status = 'warning';
 
-    // ✅ FIXED: Track counts for summary (mutually exclusive)
     totalDevices++;
     if (hoursSinceSync !== null && hoursSinceSync <= 24 && todayTx > 0) {
       activeDevices++;
@@ -65,7 +65,7 @@ const getDeviceHealth = async () => {
       activeDevices,
       inactiveDevices,
       pendingDevices,
-      syncRate: totalDevices > 0 ? ((activeDevices / totalDevices) * 100) : 0 // ✅ FIXED: Return number, not string
+      syncRate: totalDevices > 0 ? ((activeDevices / totalDevices) * 100) : 0
     }
   };
 };

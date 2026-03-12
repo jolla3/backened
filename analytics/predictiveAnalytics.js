@@ -2,13 +2,16 @@ const Inventory = require('../models/inventory');
 const Transaction = require('../models/transaction');
 const Farmer = require('../models/farmer');
 
-const predictStockout = async () => {
-  const products = await Inventory.find({ category: 'feed' });
+const predictStockout = async (adminId) => {
+  const cooperative = await require('../models/cooperative').findById(adminId);
+  if (!cooperative) throw new Error('Cooperative not found');
+
+  const products = await Inventory.find({ category: 'feed', cooperativeId: cooperative._id });
   const predictions = [];
 
   for (const product of products) {
     const last30Days = await Transaction.aggregate([
-      { $match: { type: 'feed', product_id: product._id, timestamp_server: { $gte: new Date(Date.now() - 30*24*60*60*1000) } } },
+      { $match: { type: 'feed', cooperativeId: cooperative._id, product_id: product._id, timestamp_server: { $gte: new Date(Date.now() - 30*24*60*60*1000) } } },
       { $group: { _id: null, totalQty: { $sum: '$quantity' } } }
     ]);
 
@@ -29,18 +32,21 @@ const predictStockout = async () => {
   return predictions;
 };
 
-const predictFarmerDropout = async () => {
-  const farmers = await Farmer.find({});
+const predictFarmerDropout = async (adminId) => {
+  const cooperative = await require('../models/cooperative').findById(adminId);
+  if (!cooperative) throw new Error('Cooperative not found');
+
+  const farmers = await Farmer.find({ cooperativeId: cooperative._id });
   const risks = [];
 
   for (const farmer of farmers) {
     const last30Days = await Transaction.aggregate([
-      { $match: { type: 'milk', farmer_id: farmer._id, timestamp_server: { $gte: new Date(Date.now() - 30*24*60*60*1000) } } },
+      { $match: { type: 'milk', cooperativeId: cooperative._id, farmer_id: farmer._id, timestamp_server: { $gte: new Date(Date.now() - 30*24*60*60*1000) } } },
       { $group: { _id: null, totalLitres: { $sum: '$litres' } } }
     ]);
 
     const last90Days = await Transaction.aggregate([
-      { $match: { type: 'milk', farmer_id: farmer._id, timestamp_server: { $gte: new Date(Date.now() - 90*24*60*60*1000), $lt: new Date(Date.now() - 30*24*60*60*1000) } } },
+      { $match: { type: 'milk', cooperativeId: cooperative._id, farmer_id: farmer._id, timestamp_server: { $gte: new Date(Date.now() - 90*24*60*60*1000), $lt: new Date(Date.now() - 30*24*60*60*1000) } } },
       { $group: { _id: null, totalLitres: { $sum: '$litres' } } }
     ]);
 

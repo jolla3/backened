@@ -2,10 +2,13 @@ const Transaction = require('../models/transaction');
 const Inventory = require('../models/inventory');
 const logger = require('../utils/logger');
 
-// Best Selling Feed Products
-const getTopFeedProducts = async (limit = 5) => {
+// ✅ FIXED: Added adminId, filtered by cooperative
+const getTopFeedProducts = async (limit = 5, adminId) => {
+  const cooperative = await require('../models/cooperative').findById(adminId);
+  if (!cooperative) throw new Error('Cooperative not found');
+
   const topProducts = await Transaction.aggregate([
-    { $match: { type: 'feed' } },
+    { $match: { type: 'feed', cooperativeId: cooperative._id } },
     { $group: {
       _id: '$product_id',
       totalQuantity: { $sum: '$quantity' },
@@ -35,9 +38,15 @@ const getTopFeedProducts = async (limit = 5) => {
   return topProducts;
 };
 
-// Feed Stock Risk Prediction
-const getFeedStockRisk = async () => {
-  const products = await Inventory.find({ category: 'feed' });
+// ✅ FIXED: Added adminId, filtered by cooperative
+const getFeedStockRisk = async (adminId) => {
+  const cooperative = await require('../models/cooperative').findById(adminId);
+  if (!cooperative) throw new Error('Cooperative not found');
+
+  const products = await Inventory.find({ 
+    category: 'feed', 
+    cooperativeId: cooperative._id 
+  });
   
   const riskAnalysis = [];
   
@@ -45,6 +54,7 @@ const getFeedStockRisk = async () => {
     const last30Days = await Transaction.aggregate([
       { $match: {
         type: 'feed',
+        cooperativeId: cooperative._id,
         product_id: product._id,
         timestamp_server: {
           $gte: new Date(new Date().setDate(new Date().getDate() - 30))
@@ -78,8 +88,11 @@ const getFeedStockRisk = async () => {
   return riskAnalysis.sort((a, b) => a.daysUntilStockout - b.daysUntilStockout);
 };
 
-// Feed Sales Trends
-const getFeedSalesTrends = async (period = 'daily') => {
+// ✅ FIXED: Added adminId, filtered by cooperative
+const getFeedSalesTrends = async (period = 'daily', adminId) => {
+  const cooperative = await require('../models/cooperative').findById(adminId);
+  if (!cooperative) throw new Error('Cooperative not found');
+
   const now = new Date();
   let startDate;
   
@@ -88,7 +101,7 @@ const getFeedSalesTrends = async (period = 'daily') => {
   else if (period === 'monthly') startDate = new Date(now.setMonth(now.getMonth() - 1));
 
   const trends = await Transaction.aggregate([
-    { $match: { type: 'feed', timestamp_server: { $gte: startDate } } },
+    { $match: { type: 'feed', cooperativeId: cooperative._id, timestamp_server: { $gte: startDate } } },
     { $group: {
       _id: { $dateToString: { format: '%Y-%m-%d', date: '$timestamp_server' } },
       totalQuantity: { $sum: '$quantity' },

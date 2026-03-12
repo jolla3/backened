@@ -1,16 +1,20 @@
 const Transaction = require('../models/transaction');
+const logger = require('../utils/logger');
 
-const getMilkQuality = async () => {
+const getMilkQuality = async (adminId) => {
+  const cooperative = await require('../models/cooperative').findById(adminId);
+  if (!cooperative) throw new Error('Cooperative not found');
+
   const today = new Date();
   today.setHours(0, 0, 0, 0);
 
   const rejected = await Transaction.aggregate([
-    { $match: { type: 'milk', timestamp_server: { $gte: today }, status: 'rejected' } },
+    { $match: { type: 'milk', cooperativeId: cooperative._id, timestamp_server: { $gte: today }, status: 'rejected' } },
     { $group: { _id: null, count: { $sum: 1 } } }
   ]);
 
   const total = await Transaction.aggregate([
-    { $match: { type: 'milk', timestamp_server: { $gte: today } } },
+    { $match: { type: 'milk', cooperativeId: cooperative._id, timestamp_server: { $gte: today } } },
     { $group: { _id: null, count: { $sum: 1 } } }
   ]);
 
@@ -21,7 +25,7 @@ const getMilkQuality = async () => {
   return {
     rejectedToday: rejectedCount,
     rejectedPercentage: rejectedPercentage + '%',
-    problemZones: [] // Add zone analysis if you track quality by zone
+    problemZones: []
   };
 };
 
