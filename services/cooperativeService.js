@@ -7,18 +7,13 @@ const getCooperative = async () => {
   return coops;
 };
 
-// Setup cooperative details (NO adminId required - First Time Setup)
+// Setup cooperative details (NO CHECK - Allows Multiple Cooperatives)
 const setupCooperative = async (data) => {
-  // Check if cooperative already exists
-  const existing = await Cooperative.findOne();
+  // FIX: Removed the check that prevents multiple cooperatives
   
-  if (existing) {
-    throw new Error('Cooperative already setup');
-  }
-
   const coop = await Cooperative.create(data);
   
-  logger.info('Cooperative setup', { 
+  logger.info('Cooperative created', { 
     name: coop.name,
     id: coop._id
   });
@@ -46,15 +41,8 @@ const updateCooperative = async (coopId, data) => {
   return coop;
 };
 
-// Get cooperative by ID
-const getCooperativeById = async (coopId) => {
-  const coop = await Cooperative.findById(coopId);
-  return coop;
-};
-
 module.exports = {
   getCooperative,
   setupCooperative,
-  updateCooperative,
-  getCooperativeById
+  updateCooperative
 };

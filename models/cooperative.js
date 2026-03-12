@@ -36,10 +36,12 @@ const cooperativeSchema = new mongoose.Schema({
       trim: true
     }
   },
+  // FIX: Made adminId optional for initial setup
   adminId: {
     type: mongoose.Schema.Types.ObjectId,
     ref: 'User',
-    required: true
+    required: false, // Changed from true to false
+    default: null
   },
   senderName: {
     type: String,
@@ -61,7 +63,6 @@ const cooperativeSchema = new mongoose.Schema({
   timestamps: true
 });
 
-// Add compound index for better query performance
-cooperativeSchema.index({ adminId: 1, createdAt: -1 });
+cooperativeSchema.index({ name: 1 });
 
 module.exports = mongoose.model('Cooperative', cooperativeSchema);

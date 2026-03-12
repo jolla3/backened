@@ -4,11 +4,6 @@ const logger = require('../utils/logger');
 const getCooperative = async (req, res) => {
   try {
     const coops = await cooperativeService.getCooperative();
-    
-    if (!coops || coops.length === 0) {
-      return res.status(404).json({ error: 'No cooperatives found' });
-    }
-
     res.json({ success: true, cooperatives: coops });
   } catch (error) {
     logger.error('Get cooperatives failed', { error: error.message });
@@ -18,10 +13,9 @@ const getCooperative = async (req, res) => {
 
 const setupCooperative = async (req, res) => {
   try {
-    // FIX: adminId is NOT required during initial setup
     const { name, registrationNumber, location, contact } = req.body;
 
-    // Validate required fields (no adminId)
+    // FIX: Removed adminId validation
     if (!name || !registrationNumber) {
       return res.status(400).json({ error: 'Name and registration number are required' });
     }
@@ -42,7 +36,7 @@ const setupCooperative = async (req, res) => {
 
 const updateCooperative = async (req, res) => {
   try {
-    const coopId = req.params.id || req.body.id;
+    const coopId = req.params.id;
     const { name, registrationNumber, location, contact } = req.body;
 
     if (!coopId) {
