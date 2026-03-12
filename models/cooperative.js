@@ -8,7 +8,7 @@ const cooperativeSchema = new mongoose.Schema({
   },
   registrationNumber: {
     type: String,
-    unique: true,  // ✅ This creates the unique index
+    unique: true,
     trim: true
   },
   location: {
@@ -61,7 +61,7 @@ const cooperativeSchema = new mongoose.Schema({
   timestamps: true
 });
 
-// ✅ Only add indexes that are NOT already created by field definitions
-cooperativeSchema.index({ name: 1 });
+// Add compound index for better query performance
+cooperativeSchema.index({ adminId: 1, createdAt: -1 });
 
 module.exports = mongoose.model('Cooperative', cooperativeSchema);

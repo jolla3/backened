@@ -3,31 +3,37 @@ const logger = require('../utils/logger');
 
 const getCooperative = async (req, res) => {
   try {
-    const coop = await cooperativeService.getCooperative();
+    const coops = await cooperativeService.getCooperative();
     
-    if (!coop) {
-      return res.status(404).json({ error: 'Cooperative not setup yet' });
+    if (!coops || coops.length === 0) {
+      return res.status(404).json({ error: 'No cooperatives found' });
     }
 
-    res.json({ success: true, cooperative: coop });
+    res.json({ success: true, cooperatives: coops });
   } catch (error) {
-    logger.error('Get cooperative failed', { error: error.message });
+    logger.error('Get cooperatives failed', { error: error.message });
     res.status(500).json({ error: error.message });
   }
 };
 
 const setupCooperative = async (req, res) => {
   try {
-    const { name, registrationNumber, location, contact , adminId} = req.body;
+    // FIX: Get adminId from authenticated user, not from request body
+    const adminId = req.user.id;
+    
+    const { name, registrationNumber, location, contact } = req.body;
+
+    // Validate required fields
+    if (!name || !registrationNumber) {
+      return res.status(400).json({ error: 'Name and registration number are required' });
+    }
 
     const coop = await cooperativeService.setupCooperative({
       name,
       registrationNumber,
       location,
-      contact,
-      adminId
-
-    });
+      contact
+    }, adminId);
 
     res.status(201).json({ success: true, cooperative: coop });
   } catch (error) {
@@ -38,9 +44,14 @@ const setupCooperative = async (req, res) => {
 
 const updateCooperative = async (req, res) => {
   try {
+    const coopId = req.params.id || req.body.id;
     const { name, registrationNumber, location, contact } = req.body;
 
-    const coop = await cooperativeService.updateCooperative({
+    if (!coopId) {
+      return res.status(400).json({ error: 'Cooperative ID is required' });
+    }
+
+    const coop = await cooperativeService.updateCooperative(coopId, {
       name,
       registrationNumber,
       location,
