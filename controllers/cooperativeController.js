@@ -18,22 +18,21 @@ const getCooperative = async (req, res) => {
 
 const setupCooperative = async (req, res) => {
   try {
-    // FIX: Get adminId from authenticated user, not from request body
-    const adminId = req.user.id;
-    
-    const { name, registrationNumber, location, contact } = req.body;
+    // FIX: adminId comes from request body (no auth required for setup)
+    const { name, registrationNumber, location, contact, adminId } = req.body;
 
     // Validate required fields
-    if (!name || !registrationNumber) {
-      return res.status(400).json({ error: 'Name and registration number are required' });
+    if (!name || !registrationNumber || !adminId) {
+      return res.status(400).json({ error: 'Name, registration number, and adminId are required' });
     }
 
     const coop = await cooperativeService.setupCooperative({
       name,
       registrationNumber,
       location,
-      contact
-    }, adminId);
+      contact,
+      adminId
+    });
 
     res.status(201).json({ success: true, cooperative: coop });
   } catch (error) {

@@ -3,23 +3,24 @@ const logger = require('../utils/logger');
 
 // Get cooperative details
 const getCooperative = async () => {
-  const coop = await Cooperative.find(); // Changed from findOne() to find() to get all cooperatives
-  return coop;
+  const coops = await Cooperative.find();
+  return coops;
 };
 
-// Setup cooperative details (allows multiple cooperatives)
-const setupCooperative = async (data, adminId) => {
-  // FIX: Removed the check that prevents multiple cooperatives
+// Setup cooperative details (NO AUTH REQUIRED - First Time Setup)
+const setupCooperative = async (data) => {
+  // Check if cooperative already exists
+  const existing = await Cooperative.findOne();
   
-  const coop = await Cooperative.create({
-    ...data,
-    adminId // Set adminId from the authenticated user
-  });
+  if (existing) {
+    throw new Error('Cooperative already setup');
+  }
+
+  const coop = await Cooperative.create(data);
   
-  logger.info('Cooperative created', { 
+  logger.info('Cooperative setup', { 
     name: coop.name,
-    id: coop._id,
-    adminId
+    id: coop._id
   });
 
   return coop;
@@ -56,4 +57,4 @@ module.exports = {
   setupCooperative,
   updateCooperative,
   getCooperativeById
-};  
+};
