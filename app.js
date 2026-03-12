@@ -33,14 +33,14 @@ app.use('/api', routes);
 app.use(errorMiddleware);
 
 // Start server
-const PORT = config.PORT || 3000;
+const PORT = config.PORT 
 
 const startServer = async () => {
   try {
     await connectDB();
     
     server.listen(PORT, () => {
-      // No log here - too verbose
+     console.log(`Server started on port ${PORT}`); 
     });
   } catch (error) {
     logger.error('Failed to start server', { error: error.message });
