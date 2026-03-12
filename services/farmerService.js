@@ -36,7 +36,8 @@ const getFarmer = async (farmerId, adminId) => {
   }
 
   // Verify farmer belongs to admin's cooperative
-  const cooperative = await Cooperative.findById(adminId);
+  // FIX: Use findOne with adminId instead of findById
+  const cooperative = await Cooperative.findOne({ adminId: adminId });
   if (!cooperative || farmer.cooperativeId.toString() !== cooperative._id.toString()) {
     throw new Error('Unauthorized: Farmer does not belong to your cooperative');
   }
@@ -53,7 +54,7 @@ const getFarmerByCode = async (farmerCode, adminId) => {
   }
 
   // Verify farmer belongs to admin's cooperative
-  const cooperative = await Cooperative.findById(adminId);
+  const cooperative = await Cooperative.findOne({ adminId: adminId });
   if (!cooperative || farmer.cooperativeId.toString() !== cooperative._id.toString()) {
     throw new Error('Unauthorized: Farmer does not belong to your cooperative');
   }
@@ -70,7 +71,7 @@ const updateFarmer = async (farmerId, data, adminId) => {
   }
 
   // Verify farmer belongs to admin's cooperative
-  const cooperative = await Cooperative.findById(adminId);
+  const cooperative = await Cooperative.findOne({ adminId: adminId });
   if (!cooperative || farmer.cooperativeId.toString() !== cooperative._id.toString()) {
     throw new Error('Unauthorized: Cannot modify farmers from other cooperatives');
   }
@@ -94,7 +95,7 @@ const deleteFarmer = async (farmerId, adminId) => {
   }
 
   // Verify farmer belongs to admin's cooperative
-  const cooperative = await Cooperative.findById(adminId);
+  const cooperative = await Cooperative.findOne({ adminId: adminId });
   if (!cooperative || farmer.cooperativeId.toString() !== cooperative._id.toString()) {
     throw new Error('Unauthorized: Cannot delete farmers from other cooperatives');
   }
@@ -107,7 +108,8 @@ const deleteFarmer = async (farmerId, adminId) => {
 
 // Get All Farmers for Admin's Cooperative
 const getAllFarmers = async (adminId) => {
-  const cooperative = await Cooperative.findById(adminId);
+  // FIX: Use findOne with adminId instead of findById
+  const cooperative = await Cooperative.findOne({ adminId: adminId });
   if (!cooperative) {
     throw new Error('Cooperative not found for this admin');
   }
@@ -128,7 +130,7 @@ const getBalance = async (farmerId, adminId) => {
   }
 
   // Verify farmer belongs to admin's cooperative
-  const cooperative = await Cooperative.findById(adminId);
+  const cooperative = await Cooperative.findOne({ adminId: adminId });
   if (!cooperative || farmer.cooperativeId.toString() !== cooperative._id.toString()) {
     throw new Error('Unauthorized: Farmer does not belong to your cooperative');
   }
@@ -150,20 +152,23 @@ const updateBalance = async (farmerId, amount, adminId) => {
   }
 
   // Verify farmer belongs to admin's cooperative
-  const cooperative = await Cooperative.findById(adminId);
+  const cooperative = await Cooperative.findOne({ adminId: adminId });
   if (!cooperative || farmer.cooperativeId.toString() !== cooperative._id.toString()) {
     throw new Error('Unauthorized: Cannot update balance for farmers from other cooperatives');
   }
+
+  // Ensure amount is a number
+  const numericAmount = Number(amount);
 
   const session = await Farmer.startSession();
   session.startTransaction();
   
   try {
-    farmer.balance += amount;
+    farmer.balance += numericAmount;
     await farmer.save({ session });
     
     await session.commitTransaction();
-    logger.info('Balance updated', { farmerId, amount, adminId });
+    logger.info('Balance updated', { farmerId, amount: numericAmount, adminId });
     return farmer;
   } catch (error) {
     await session.abortTransaction();
@@ -182,7 +187,7 @@ const getFarmerHistory = async (farmerId, adminId, limit = 50) => {
   }
 
   // Verify farmer belongs to admin's cooperative
-  const cooperative = await Cooperative.findById(adminId);
+  const cooperative = await Cooperative.findOne({ adminId: adminId });
   if (!cooperative || farmer.cooperativeId.toString() !== cooperative._id.toString()) {
     throw new Error('Unauthorized: Farmer does not belong to your cooperative');
   }

@@ -11,11 +11,28 @@ const Transaction = require('../models/transaction');
 const Device = require('../models/device');
 const AuditLog = require('../models/auditLog');
 
+// ✅ YOUR COOPERATIVE ID
+const COOPERATIVE_ID = '69b31bedf575f028cbd92a63';
+
 // ✅ YOUR EXACT FARMER IDs
 const FARMER_IDS = [
   '69a9d29a40bc4ce9e60474a8',  // John Kamau
   '69a9d29a40bc4ce9e60474a9',  // Mary Wanjiku
   '69a9d29a40bc4ce9e60474aa'   // David Ochieng
+];
+
+// ✅ YOUR EXACT PORTER IDs
+const PORTER_IDS = [
+  '69a9d1ce16fb321864bbfe04',  // Porter 1
+  '69a9d1ce16fb321864bbfe05',  // Porter 2
+  '69a9d1ce16fb321864bbfe06'   // Porter 3
+];
+
+// ✅ YOUR EXACT TRANSACTION IDs
+const TRANSACTION_IDS = [
+  '69ab39efd75f38c71bcf5cd8',  // David 0
+  '69ab39efd75f38c71bcf5cd9',  // David 1
+  '69ab39efd75f38c71bcf5cdb'   // David 3
 ];
 
 const seedRealisticData = async () => {
@@ -41,31 +58,67 @@ const seedRealisticData = async () => {
       console.log('✅ Admin already exists');
     }
 
-    // 2. Create Porters
+    // 2. Create Porters (with cooperativeId)
     const porters = await Porter.find({});
     if (porters.length === 0) {
       await Porter.insertMany([
-        { name: 'Porter 1 - Main Route', zones: ['Zone A', 'Zone B'], totals: { litresCollected: 15000, transactionsCount: 750 } },
-        { name: 'Porter 2 - Nakuru Route', zones: ['Zone C'], totals: { litresCollected: 12000, transactionsCount: 600 } }
+        { 
+          name: 'Porter 1 - Main Route', 
+          zones: ['Zone A', 'Zone B'], 
+          cooperativeId: COOPERATIVE_ID,
+          totals: { litresCollected: 15000, transactionsCount: 750 } 
+        },
+        { 
+          name: 'Porter 2 - Nakuru Route', 
+          zones: ['Zone C'], 
+          cooperativeId: COOPERATIVE_ID,
+          totals: { litresCollected: 12000, transactionsCount: 600 } 
+        },
+        { 
+          name: 'Porter 3 - Rural Route', 
+          zones: ['Zone D'], 
+          cooperativeId: COOPERATIVE_ID,
+          totals: { litresCollected: 8000, transactionsCount: 400 } 
+        }
       ]);
-      console.log('✅ Created 2 porters');
+      console.log('✅ Created 3 porters with cooperativeId');
     } else {
       console.log(`✅ ${porters.length} porters already exist`);
+      // Update existing porters with cooperativeId
+      await Porter.updateMany(
+        { _id: { $in: PORTER_IDS } },
+        { $set: { cooperativeId: COOPERATIVE_ID } }
+      );
+      console.log(`✅ Updated ${PORTER_IDS.length} existing porters with cooperativeId`);
     }
 
-    // 3. Create Inventory
+    // 3. Create Inventory (with cooperativeId)
     const inventory = await Inventory.find({});
     if (inventory.length === 0) {
       await Inventory.insertMany([
-        { name: 'Cattle Feed Premium', category: 'feed', stock: 50, price: 1500, threshold: 100 },
-        { name: 'Cattle Feed Standard', category: 'feed', stock: 300, price: 1200, threshold: 50 }
+        { 
+          name: 'Cattle Feed Premium', 
+          category: 'feed', 
+          stock: 50, 
+          price: 1500, 
+          threshold: 100,
+          cooperativeId: COOPERATIVE_ID 
+        },
+        { 
+          name: 'Cattle Feed Standard', 
+          category: 'feed', 
+          stock: 300, 
+          price: 1200, 
+          threshold: 50,
+          cooperativeId: COOPERATIVE_ID 
+        }
       ]);
-      console.log('✅ Created 2 inventory products');
+      console.log('✅ Created 2 inventory products with cooperativeId');
     } else {
       console.log(`✅ ${inventory.length} inventory products already exist`);
     }
 
-    // 4. Create Rate Versions
+    // 4. Create Rate Versions (with admin_id)
     const rates = await RateVersion.find({});
     if (rates.length === 0) {
       await RateVersion.insertMany([
@@ -88,7 +141,7 @@ const seedRealisticData = async () => {
       console.log('✅ Old transactions cleared');
     }
 
-    const portersList = await Porter.find({});
+    const portersList = await Porter.find({ cooperativeId: COOPERATIVE_ID });
     const rateList = await RateVersion.find({});
     const milkRate = rateList.find(r => r.type === 'milk');
     const feedRate = rateList.find(r => r.type === 'feed');
@@ -121,6 +174,10 @@ const seedRealisticData = async () => {
         payout: payout,
         cost: 0,
         farmer_id: '69a9d29a40bc4ce9e60474a8',
+        cooperativeId: COOPERATIVE_ID,
+        branch_id: 'Zone A',
+        zone: 'Zone A',
+        porter_id: portersList[0]._id,
         rate_version_id: milkRate._id
       });
     }
@@ -149,6 +206,10 @@ const seedRealisticData = async () => {
         payout: payout,
         cost: 0,
         farmer_id: '69a9d29a40bc4ce9e60474a9',
+        cooperativeId: COOPERATIVE_ID,
+        branch_id: 'Zone B',
+        zone: 'Zone B',
+        porter_id: portersList[0]._id,
         rate_version_id: milkRate._id
       });
     }
@@ -177,15 +238,26 @@ const seedRealisticData = async () => {
         payout: payout,
         cost: 0,
         farmer_id: '69a9d29a40bc4ce9e60474aa',
+        cooperativeId: COOPERATIVE_ID,
+        branch_id: 'Zone C',
+        zone: 'Zone C',
+        porter_id: portersList[1]._id,
         rate_version_id: milkRate._id
       });
     }
 
     const insertedTransactions = await Transaction.insertMany(transactionData);
-    console.log(`✅ Created ${insertedTransactions.length} transactions\n`);
+    console.log(`✅ Created ${insertedTransactions.length} transactions with cooperativeId\n`);
 
     // 6. UPDATE FARMER HISTORY WITH TRANSACTION IDS
     console.log('🔄 STEP 6: Updating farmer history with transaction IDs...');
+
+    // Update farmers with cooperativeId
+    await Farmer.updateMany(
+      { _id: { $in: FARMER_IDS } },
+      { $set: { cooperativeId: COOPERATIVE_ID } }
+    );
+    console.log(`✅ Updated ${FARMER_IDS.length} existing farmers with cooperativeId`);
 
     const farmerTransactionMap = {};
     for (const tx of insertedTransactions) {
@@ -205,16 +277,28 @@ const seedRealisticData = async () => {
       console.log(`✅ Updated ${farmerId} with ${transactionIds.length} transactions in history`);
     }
 
-    console.log('\n✅ Farmer history updated successfully!\n');
-
-    // 7. Create Devices
+    // 7. Create Devices (with cooperativeId)
     const devices = await Device.find({});
     if (devices.length === 0) {
       await Device.insertMany([
-        { uuid: 'device-uuid-001', hardware_id: 'HW001', approved: true, revoked: false, last_seen: new Date() },
-        { uuid: 'device-uuid-002', hardware_id: 'HW002', approved: true, revoked: false, last_seen: new Date() }
+        { 
+          uuid: 'device-uuid-001', 
+          hardware_id: 'HW001', 
+          approved: true, 
+          revoked: false, 
+          last_seen: new Date(),
+          cooperativeId: COOPERATIVE_ID 
+        },
+        { 
+          uuid: 'device-uuid-002', 
+          hardware_id: 'HW002', 
+          approved: true, 
+          revoked: false, 
+          last_seen: new Date(),
+          cooperativeId: COOPERATIVE_ID 
+        }
       ]);
-      console.log('✅ Created 2 devices');
+      console.log('✅ Created 2 devices with cooperativeId');
     } else {
       console.log(`✅ ${devices.length} devices already exist`);
     }
@@ -234,23 +318,41 @@ const seedRealisticData = async () => {
 
     // 9. VERIFY RESULTS
     console.log('\n📊 STEP 7: Verifying results...\n');
+    console.log('Cooperative ID:', COOPERATIVE_ID);
+    console.log('');
     console.log('Farmer: John Kamau');
     console.log(`  ID: 69a9d29a40bc4ce9e60474a8`);
     const john = await Farmer.findById('69a9d29a40bc4ce9e60474a8');
+    console.log(`  Cooperative ID: ${john.cooperativeId}`);
     console.log(`  History Length: ${john.history.length}`);
     console.log(`  History IDs: ${john.history.map(id => id.toString()).join(', ')}`);
     console.log('');
     console.log('Farmer: Mary Wanjiku');
     console.log(`  ID: 69a9d29a40bc4ce9e60474a9`);
     const mary = await Farmer.findById('69a9d29a40bc4ce9e60474a9');
+    console.log(`  Cooperative ID: ${mary.cooperativeId}`);
     console.log(`  History Length: ${mary.history.length}`);
     console.log(`  History IDs: ${mary.history.map(id => id.toString()).join(', ')}`);
     console.log('');
     console.log('Farmer: David Ochieng');
     console.log(`  ID: 69a9d29a40bc4ce9e60474aa`);
     const david = await Farmer.findById('69a9d29a40bc4ce9e60474aa');
+    console.log(`  Cooperative ID: ${david.cooperativeId}`);
     console.log(`  History Length: ${david.history.length}`);
     console.log(`  History IDs: ${david.history.map(id => id.toString()).join(', ')}`);
+    console.log('');
+    console.log('Porter 1:');
+    const porter1 = await Porter.findById('69a9d1ce16fb321864bbfe04');
+    console.log(`  Cooperative ID: ${porter1.cooperativeId}`);
+    console.log('');
+    console.log('Transaction 1:');
+    const tx1 = await Transaction.findById('69ab39efd75f38c71bcf5cd8');
+    console.log(`  Cooperative ID: ${tx1.cooperativeId}`);
+    console.log(`  Farmer ID: ${tx1.farmer_id}`);
+    console.log(`  Litres: ${tx1.litres}`);
+    console.log(`  Branch ID: ${tx1.branch_id}`);
+    console.log(`  Zone: ${tx1.zone}`);
+    console.log(`  Porter ID: ${tx1.porter_id}`);
 
     console.log('\n✅ SEEDING COMPLETE\n');
 

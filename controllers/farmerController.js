@@ -16,14 +16,14 @@ const createFarmer = async (req, res) => {
     logger.info('Farmer created', { 
       farmerId: farmer._id, 
       cooperativeId,
-      correlationId: req.correlationId 
+      correlationId: req.correlationId || 'unknown' 
     });
 
     res.status(201).json(farmer);
   } catch (error) {
     logger.error('Create farmer failed', { 
       error: error.message,
-      correlationId: req.correlationId 
+      correlationId: req.correlationId || 'unknown' 
     });
     
     res.status(400).json({ error: error.message });
@@ -40,7 +40,7 @@ const getFarmer = async (req, res) => {
   } catch (error) {
     logger.error('Get farmer failed', { 
       error: error.message,
-      correlationId: req.correlationId 
+      correlationId: req.correlationId || 'unknown' 
     });
     
     res.status(400).json({ error: error.message });
@@ -57,7 +57,7 @@ const getFarmerByCode = async (req, res) => {
   } catch (error) {
     logger.error('Get farmer by code failed', { 
       error: error.message,
-      correlationId: req.correlationId 
+      correlationId: req.correlationId || 'unknown' 
     });
     
     res.status(400).json({ error: error.message });
@@ -74,7 +74,7 @@ const getAllFarmers = async (req, res) => {
   } catch (error) {
     logger.error('Get all farmers failed', { 
       error: error.message,
-      correlationId: req.correlationId 
+      correlationId: req.correlationId || 'unknown' 
     });
     
     res.status(400).json({ error: error.message });
@@ -89,14 +89,14 @@ const updateFarmer = async (req, res) => {
     
     logger.info('Farmer updated', { 
       farmerId: farmer._id,
-      correlationId: req.correlationId 
+      correlationId: req.correlationId || 'unknown' 
     });
 
     res.json(farmer);
   } catch (error) {
     logger.error('Update farmer failed', { 
       error: error.message,
-      correlationId: req.correlationId 
+      correlationId: req.correlationId || 'unknown' 
     });
     
     res.status(400).json({ error: error.message });
@@ -111,14 +111,14 @@ const deleteFarmer = async (req, res) => {
     
     logger.info('Farmer deleted', { 
       farmerId: req.params.id,
-      correlationId: req.correlationId 
+      correlationId: req.correlationId || 'unknown' 
     });
 
     res.json(result);
   } catch (error) {
     logger.error('Delete farmer failed', { 
       error: error.message,
-      correlationId: req.correlationId 
+      correlationId: req.correlationId || 'unknown' 
     });
     
     res.status(400).json({ error: error.message });
@@ -135,7 +135,7 @@ const getBalance = async (req, res) => {
   } catch (error) {
     logger.error('Get balance failed', { 
       error: error.message,
-      correlationId: req.correlationId 
+      correlationId: req.correlationId || 'unknown' 
     });
     
     res.status(400).json({ error: error.message });
@@ -152,14 +152,14 @@ const updateBalance = async (req, res) => {
     logger.info('Balance updated', { 
       farmerId: req.params.id,
       amount,
-      correlationId: req.correlationId 
+      correlationId: req.correlationId || 'unknown' 
     });
 
     res.json(farmer);
   } catch (error) {
     logger.error('Update balance failed', { 
       error: error.message,
-      correlationId: req.correlationId 
+      correlationId: req.correlationId || 'unknown' 
     });
     
     res.status(400).json({ error: error.message });
@@ -177,7 +177,7 @@ const getFarmerHistory = async (req, res) => {
   } catch (error) {
     logger.error('Get farmer history failed', { 
       error: error.message,
-      correlationId: req.correlationId 
+      correlationId: req.correlationId || 'unknown' 
     });
     
     res.status(400).json({ error: error.message });

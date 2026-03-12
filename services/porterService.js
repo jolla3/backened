@@ -36,12 +36,28 @@ const getPorter = async (porterId, adminId) => {
   }
 
   // Verify porter belongs to admin's cooperative
-  const cooperative = await Cooperative.findById(adminId);
+  // FIX: Use findOne with adminId instead of findById
+  const cooperative = await Cooperative.findOne({ adminId: adminId });
   if (!cooperative || porter.cooperativeId.toString() !== cooperative._id.toString()) {
     throw new Error('Unauthorized: Porter does not belong to your cooperative');
   }
 
   return porter;
+};
+
+// Get All Porters for Admin's Cooperative
+const getAllPorters = async (adminId) => {
+  // FIX: Use findOne with adminId instead of findById
+  const cooperative = await Cooperative.findOne({ adminId: adminId });
+  if (!cooperative) {
+    throw new Error('Cooperative not found for this admin');
+  }
+
+  const porters = await Porter.find({ cooperativeId: cooperative._id })
+    .sort({ createdAt: -1 });
+
+  logger.info('Porters retrieved', { count: porters.length, cooperativeId: cooperative._id });
+  return porters;
 };
 
 // Update Porter (with Cooperative Scoping)
@@ -53,7 +69,7 @@ const updatePorter = async (porterId, data, adminId) => {
   }
 
   // Verify porter belongs to admin's cooperative
-  const cooperative = await Cooperative.findById(adminId);
+  const cooperative = await Cooperative.findOne({ adminId: adminId });
   if (!cooperative || porter.cooperativeId.toString() !== cooperative._id.toString()) {
     throw new Error('Unauthorized: Cannot modify porters from other cooperatives');
   }
@@ -77,7 +93,7 @@ const deletePorter = async (porterId, adminId) => {
   }
 
   // Verify porter belongs to admin's cooperative
-  const cooperative = await Cooperative.findById(adminId);
+  const cooperative = await Cooperative.findOne({ adminId: adminId });
   if (!cooperative || porter.cooperativeId.toString() !== cooperative._id.toString()) {
     throw new Error('Unauthorized: Cannot delete porters from other cooperatives');
   }
@@ -88,23 +104,8 @@ const deletePorter = async (porterId, adminId) => {
   return { message: 'Porter deleted successfully' };
 };
 
-// Get All Porters for Admin's Cooperative
-const getAllPorters = async (adminId) => {
-  const cooperative = await Cooperative.findById(adminId);
-  if (!cooperative) {
-    throw new Error('Cooperative not found for this admin');
-  }
-
-  const porters = await Porter.find({ cooperativeId: cooperative._id })
-    .select('-pin')
-    .sort({ createdAt: -1 });
-
-  logger.info('Porters retrieved', { count: porters.length, cooperativeId: cooperative._id });
-  return porters;
-};
-
-// Get Porter Performance (Scoped to Cooperative)
-const getPerformance = async (porterId, adminId) => {
+// Get Porter Performance (with Cooperative Scoping)
+const getPerformance = async (porterId, adminId, period = 'monthly') => {
   const porter = await Porter.findById(porterId);
   
   if (!porter) {
@@ -112,13 +113,29 @@ const getPerformance = async (porterId, adminId) => {
   }
 
   // Verify porter belongs to admin's cooperative
-  const cooperative = await Cooperative.findById(adminId);
+  const cooperative = await Cooperative.findOne({ adminId: adminId });
   if (!cooperative || porter.cooperativeId.toString() !== cooperative._id.toString()) {
-    throw new Error('Unauthorized: Porter does not belong to your cooperative');
+    throw new Error('Unauthorized: Cannot access performance data for porters from other cooperatives');
   }
 
-  const stats = await Transaction.aggregate([
-    { $match: { porter_id: porter._id, cooperativeId: cooperative._id } },
+  // Calculate performance metrics
+  const now = new Date();
+  let startDate;
+  
+  if (period === 'daily') {
+    startDate = new Date(now.setHours(0, 0, 0));
+  } else if (period === 'weekly') {
+    startDate = new Date(now.setDate(now.getDate() - 7));
+  } else if (period === 'monthly') {
+    startDate = new Date(now.setMonth(now.getMonth() - 1));
+  }
+
+  const performance = await Transaction.aggregate([
+    { $match: { 
+      device_id: porter.assigned_device_id,
+      cooperativeId: cooperative._id,
+      timestamp_server: { $gte: startDate }
+    }},
     { $group: {
       _id: null,
       totalLitres: { $sum: '$litres' },
@@ -128,16 +145,21 @@ const getPerformance = async (porterId, adminId) => {
   ]);
 
   return {
-    ...porter.toObject(),
-    performance: stats[0] || { totalLitres: 0, totalPayout: 0, transactionCount: 0 }
+    porterId: porter._id,
+    porterName: porter.name,
+    zones: porter.zones,
+    totalLitres: performance[0]?.totalLitres || 0,
+    totalPayout: performance[0]?.totalPayout || 0,
+    transactionCount: performance[0]?.transactionCount || 0,
+    period
   };
 };
 
 module.exports = {
   createPorter,
   getPorter,
+  getAllPorters,
   updatePorter,
   deletePorter,
-  getAllPorters,
   getPerformance
 };

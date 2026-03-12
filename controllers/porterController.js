@@ -16,14 +16,14 @@ const createPorter = async (req, res) => {
     logger.info('Porter created', { 
       porterId: porter._id, 
       cooperativeId,
-      correlationId: req.correlationId 
+      correlationId: req.correlationId || 'unknown' 
     });
 
     res.status(201).json(porter);
   } catch (error) {
     logger.error('Create porter failed', { 
       error: error.message,
-      correlationId: req.correlationId 
+      correlationId: req.correlationId || 'unknown' 
     });
     
     res.status(400).json({ error: error.message });
@@ -40,7 +40,7 @@ const getPorter = async (req, res) => {
   } catch (error) {
     logger.error('Get porter failed', { 
       error: error.message,
-      correlationId: req.correlationId 
+      correlationId: req.correlationId || 'unknown' 
     });
     
     res.status(400).json({ error: error.message });
@@ -57,7 +57,7 @@ const getAllPorters = async (req, res) => {
   } catch (error) {
     logger.error('Get all porters failed', { 
       error: error.message,
-      correlationId: req.correlationId 
+      correlationId: req.correlationId || 'unknown' 
     });
     
     res.status(400).json({ error: error.message });
@@ -72,14 +72,14 @@ const updatePorter = async (req, res) => {
     
     logger.info('Porter updated', { 
       porterId: porter._id,
-      correlationId: req.correlationId 
+      correlationId: req.correlationId || 'unknown' 
     });
 
     res.json(porter);
   } catch (error) {
     logger.error('Update porter failed', { 
       error: error.message,
-      correlationId: req.correlationId 
+      correlationId: req.correlationId || 'unknown' 
     });
     
     res.status(400).json({ error: error.message });
@@ -94,14 +94,14 @@ const deletePorter = async (req, res) => {
     
     logger.info('Porter deleted', { 
       porterId: req.params.id,
-      correlationId: req.correlationId 
+      correlationId: req.correlationId || 'unknown' 
     });
 
     res.json(result);
   } catch (error) {
     logger.error('Delete porter failed', { 
       error: error.message,
-      correlationId: req.correlationId 
+      correlationId: req.correlationId || 'unknown' 
     });
     
     res.status(400).json({ error: error.message });
@@ -112,13 +112,14 @@ const deletePorter = async (req, res) => {
 const getPerformance = async (req, res) => {
   try {
     const adminId = req.user.id;
-    const performance = await porterService.getPerformance(req.params.id, adminId);
+    const { period = 'monthly' } = req.query;
+    const performance = await porterService.getPerformance(req.params.id, adminId, period);
     
     res.json(performance);
   } catch (error) {
     logger.error('Get performance failed', { 
       error: error.message,
-      correlationId: req.correlationId 
+      correlationId: req.correlationId || 'unknown' 
     });
     
     res.status(400).json({ error: error.message });

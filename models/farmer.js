@@ -4,7 +4,7 @@ const farmerSchema = new mongoose.Schema({
   farmer_code: {
     type: String,
     required: true,
-    unique: true,  // ✅ This creates the unique index
+    unique: true,
     trim: true
   },
   name: {
@@ -26,7 +26,7 @@ const farmerSchema = new mongoose.Schema({
     type: mongoose.Schema.Types.ObjectId,
     ref: 'Cooperative',
     required: true,
-    index: true  // ✅ This creates the index
+    index: true
   },
   balance: {
     type: Number,
@@ -35,6 +35,11 @@ const farmerSchema = new mongoose.Schema({
   isActive: {
     type: Boolean,
     default: true
+  },
+  history: {
+    type: [mongoose.Schema.Types.ObjectId],
+    ref: 'Transaction',
+    default: []  // ✅ Initialize as empty array
   },
   createdAt: {
     type: Date,

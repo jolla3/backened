@@ -20,12 +20,9 @@ const generateJWT = (userId, role, email, cooperativeId, adminId = null) => {
     id: userId,
     role,
     email,
-    cooperativeId
+    cooperativeId,
+    adminId: role === 'admin' ? adminId : null
   };
-
-  if (role === 'admin' && adminId) {
-    payload.adminId = adminId;
-  }
 
   return jwt.sign(payload, config.JWT_SECRET, { expiresIn: '8h' });
 };
@@ -62,7 +59,6 @@ const login = async (email, password) => {
   // Handle existing users without cooperativeId
   let cooperativeId = user.cooperativeId;
   if (!cooperativeId) {
-    // Get the first cooperative as default
     const defaultCoop = await Cooperative.findOne();
     if (defaultCoop) {
       cooperativeId = defaultCoop._id;
@@ -99,6 +95,10 @@ const porterLogin = async (phone, pin) => {
 
   if (!porter.isActive) {
     throw new Error('Porter account is deactivated');
+  }
+
+  if (!porter.cooperativeId) {
+    throw new Error('Porter not assigned to any cooperative');
   }
 
   const cooperative = await Cooperative.findById(porter.cooperativeId);
