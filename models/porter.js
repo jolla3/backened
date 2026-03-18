@@ -3,18 +3,15 @@ const mongoose = require('mongoose');
 const porterSchema = new mongoose.Schema({
   name: {
     type: String,
-    required: true,
     trim: true
   },
   phone: {
     type: String,
-    required: true,
     trim: true,
     unique: true  // ✅ This creates the unique index
   },
   pin: {
     type: String,
-    required: true,
     trim: true,
     minlength: 4,
     maxlength: 6,
@@ -22,7 +19,6 @@ const porterSchema = new mongoose.Schema({
   },
   branch_id: {
     type: String,
-    required: true,
     trim: true
   },
   zones: [{

@@ -3,7 +3,6 @@ const mongoose = require('mongoose');
 const farmerSchema = new mongoose.Schema({
   farmer_code: {
     type: String,
-    required: true,
     unique: true,
     trim: true
   },
@@ -14,12 +13,10 @@ const farmerSchema = new mongoose.Schema({
   },
   phone: {
     type: String,
-    required: true,
     trim: true
   },
   branch_id: {
     type: String,
-    required: true,
     trim: true
   },
   cooperativeId: {
