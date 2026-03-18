@@ -15,14 +15,35 @@ const getAlerts = async (req, res) => {
 const createProduct = async (req, res) => {
   try {
     const adminId = req.user.id;
-    const product = await inventoryService.createProduct(req.body, adminId);
+    
+    // ✅ EXTRACT FROM TOKEN
+    const cooperativeId = req.user.cooperativeId;
+    
+    if (!cooperativeId) {
+      return res.status(400).json({ error: 'Cooperative ID missing from token' });
+    }
+
+    const product = await inventoryService.createProduct({ 
+      ...req.body, 
+      cooperativeId  // Pass it to service
+    }, adminId);
+    
+    logger.info('Product created', { 
+      productId: product._id, 
+      cooperativeId,
+      adminId 
+    });
+    
     res.status(201).json(product);
   } catch (error) {
-    logger.error('Create product failed', { error: error.message, adminId: req.user.id });
+    logger.error('Create product failed', { 
+      error: error.message, 
+      adminId: req.user.id,
+      correlationId: req.correlationId || 'unknown'
+    });
     res.status(400).json({ error: error.message });
   }
 };
-
 const deductStock = async (req, res) => {
   try {
     const adminId = req.user.id;

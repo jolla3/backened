@@ -4,13 +4,17 @@ const logger = require('../utils/logger');
 // Create Porter with Cooperative Scoping
 const createPorter = async (req, res) => {
   try {
-    const { cooperativeId, ...porterData } = req.body;
     const adminId = req.user.id;
-
+    
+    // ✅ EXTRACT FROM TOKEN - NO MORE req.body check
+    const cooperativeId = req.user.cooperativeId;
+    
     if (!cooperativeId) {
-      return res.status(400).json({ error: 'Cooperative ID required' });
+      return res.status(400).json({ error: 'Cooperative ID missing from token' });
     }
 
+    const { ...porterData } = req.body; // Ignore body cooperativeId
+    
     const porter = await porterService.createPorter({ ...porterData, cooperativeId }, adminId);
     
     logger.info('Porter created', { 
@@ -29,7 +33,6 @@ const createPorter = async (req, res) => {
     res.status(400).json({ error: error.message });
   }
 };
-
 // Get Porter by ID with Cooperative Scoping
 const getPorter = async (req, res) => {
   try {
