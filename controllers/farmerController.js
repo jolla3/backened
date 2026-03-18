@@ -4,13 +4,17 @@ const logger = require('../utils/logger');
 // Create Farmer with Cooperative Scoping
 const createFarmer = async (req, res) => {
   try {
-    const { cooperativeId, ...farmerData } = req.body;
     const adminId = req.user.id;
-
+    
+    // ✅ EXTRACT FROM TOKEN - NO NEED FOR BODY
+    const cooperativeId = req.user.cooperativeId;
+    
     if (!cooperativeId) {
-      return res.status(400).json({ error: 'Cooperative ID required' });
+      return res.status(400).json({ error: 'Cooperative ID missing from token' });
     }
 
+    const { ...farmerData } = req.body; // Ignore body cooperativeId
+    
     const farmer = await farmerService.createFarmer({ ...farmerData, cooperativeId }, adminId);
     
     logger.info('Farmer created', { 
@@ -29,7 +33,6 @@ const createFarmer = async (req, res) => {
     res.status(400).json({ error: error.message });
   }
 };
-
 // Get Farmer by ID with Cooperative Scoping
 const getFarmer = async (req, res) => {
   try {
