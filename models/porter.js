@@ -21,6 +21,10 @@ const porterSchema = new mongoose.Schema({
     type: String,
     trim: true
   },
+  location: {
+    type: String,
+    trim: true
+  },
   zones: [{
     type: String,
     required: true

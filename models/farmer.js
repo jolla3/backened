@@ -19,6 +19,10 @@ const farmerSchema = new mongoose.Schema({
     type: String,
     trim: true
   },
+  location: {
+    type: String,
+    trim: true
+  },
   cooperativeId: {
     type: mongoose.Schema.Types.ObjectId,
     ref: 'Cooperative',
