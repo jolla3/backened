@@ -2,35 +2,28 @@ const Inventory = require('../models/inventory');
 const Cooperative = require('../models/cooperative');
 const logger = require('../utils/logger');
 
+// ✅ FIXED: Single service that returns BOTH arrays
 const getInventory = async (cooperativeId) => {
-  return await Inventory.find({ 
+  // Get ALL inventory
+  const allInventory = await Inventory.find({ 
     cooperativeId,
-    stock: { $gt: 0 } 
+    stock: { $gte: 0 }  // Only non-deleted items
   })
-  .sort({ name: 1 })
-  .populate('created_by', 'name email')
+  .sort({ createdAt: -1 })
+  .populate('created_by', 'name')
   .lean();
+
+  // ✅ FIXED: Get LOW STOCK directly from same query (no separate getAlerts needed)
+  const lowStock = allInventory.filter(item => 
+    item.threshold > 0 && item.stock <= item.threshold
+  ).sort((a, b) => a.stock - b.stock); // Sort by lowest stock first
+
+  return {
+    inventory: allInventory,  // ALL items
+    lowStock: lowStock        // ONLY low stock items
+  };
 };
 
-const getAlerts = async (adminId) => {
-  const cooperative = await Cooperative.findOne({ adminId });
-  if (!cooperative) throw new Error('Cooperative not found');
-
-  // ✅ FIXED: Proper aggregation for low stock alerts
-  return await Inventory.aggregate([
-    { $match: { 
-        cooperativeId: cooperative._id,
-        stock: { $gt: 0 }
-      } 
-    },
-    { $match: { 
-        $expr: { $lte: ['$stock', '$threshold'] } 
-      }
-    },
-    { $sort: { stock: 1 } },
-    { $limit: 10 }
-  ]);
-};
 
 const createProduct = async (data, adminId) => {
   const { cooperativeId, name, category, stock, price, threshold, unit } = data;
@@ -75,4 +68,4 @@ const deductStock = async (productId, quantity, adminId) => {
   }
 };
 
-module.exports = { getInventory, getAlerts, createProduct, deductStock };
+module.exports = { getInventory,  createProduct, deductStock };

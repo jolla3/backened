@@ -3,16 +3,22 @@ const logger = require('../utils/logger');
 
 const getInventory = async (req, res) => {
   try {
-    const { adminId } = req.user;
-    const cooperativeId = req.user.cooperativeId;
+    const { cooperativeId } = req.user;
     
-    const inventory = await inventoryService.getInventory(cooperativeId);
-    res.json(inventory);
+    // ✅ SINGLE SERVICE CALL - returns BOTH arrays
+    const result = await inventoryService.getInventory(cooperativeId);
+    
+    res.json({
+      inventory: result.inventory,    // All 6 items
+      lowStock: result.lowStock,      // Only low stock items (maclick plus, maclick super)
+      alerts: result.lowStock         // Legacy support
+    });
   } catch (error) {
     logger.error('Get inventory failed', { error: error.message });
-    res.status(400).json({ error: error.message });
+    res.status(500).json({ error: error.message });
   }
 };
+
 
 const getAlerts = async (req, res) => {
   try {
