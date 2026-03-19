@@ -2,20 +2,20 @@ const mongoose = require('mongoose');
 const feedPurchaseService = require('../services/feedPurchaseService');
 const logger = require('../utils/logger');
 
-// ✅ Search farmers for feed purchase (code, phone, name)
+// ✅ Search farmers for feed purchase
 const getFeedPurchaseFarmers = async (req, res) => {
   try {
-    const { q = '', limit = 10, cooperativeId } = req.query;
-    const adminId = req.user.id;
-
+    const { q = '' } = req.query;
+    
     if (!q || q.length < 2) {
       return res.status(400).json({ error: 'Search term must be at least 2 characters' });
     }
 
-    const farmers = await feedPurchaseService.getFeedPurchaseFarmer(q, cooperativeId || req.user.cooperativeId);
+    // ✅ FIXED: Pass req.user.cooperativeId
+    const farmer = await feedPurchaseService.getFeedPurchaseFarmer(q, req.user.cooperativeId);
     
     res.json({
-      farmers: [farmers], // Return as array for consistency
+      farmers: [farmer],
       count: 1
     });
   } catch (error) {
@@ -24,38 +24,39 @@ const getFeedPurchaseFarmers = async (req, res) => {
   }
 };
 
-// ✅ Record feed purchase
+// ✅ FIXED: Record feed purchase
 const purchaseFeed = async (req, res) => {
+  const session = await mongoose.startSession();
+  
   try {
-    const adminId = req.user.id;
-    const { farmerId, products } = req.body; // farmerId from frontend search
-    
-    const session = await mongoose.startSession();
     session.startTransaction();
     
-    try {
-      const result = await feedPurchaseService.purchaseFeed(
-        farmerId,
-        products,
+    const { farmerId, products } = req.body;
+    const adminId = req.user.id;
+    
+    // ✅ FIXED: Pass cooperativeId from JWT
+    const result = await feedPurchaseService.purchaseFeed(
+      { 
+        farmerId, 
+        products, 
         adminId,
-        session
-      );
-      
-      await session.commitTransaction();
-      res.json(result);
-    } catch (error) {
-      await session.abortTransaction();
-      throw error;
-    } finally {
-      session.endSession();
-    }
+        cooperativeId: req.user.cooperativeId  // ✅ CRITICAL FIX
+      },
+      session
+    );
+    
+    await session.commitTransaction();
+    res.json(result);
   } catch (error) {
+    await session.abortTransaction();
     logger.error('Feed purchase failed', { 
       error: error.message, 
       adminId: req.user.id,
-      body: req.body 
+      farmerId: req.body.farmerId
     });
     res.status(400).json({ error: error.message });
+  } finally {
+    session.endSession();
   }
 };
 
