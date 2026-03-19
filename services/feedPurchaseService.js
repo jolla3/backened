@@ -6,7 +6,6 @@ const Cooperative = require('../models/cooperative');
 const smsService = require('./smsService');
 const logger = require('../utils/logger');
 
-// ✅ getFeedPurchaseFarmer (UNCHANGED - WORKS)
 const getFeedPurchaseFarmer = async (identifier, cooperativeId) => {
   const coop = await Cooperative.findById(cooperativeId);
   if (!coop) throw new Error('Cooperative not found');
@@ -54,7 +53,7 @@ const getFeedPurchaseFarmer = async (identifier, cooperativeId) => {
       $match: {
         farmer_id: farmer._id,
         cooperativeId: coop._id,
-        type: 'feed',  // ✅ FIXED: Use 'feed' to match enum
+        type: 'feed',
         timestamp_server: { $gte: firstDayOfMonth },
         status: 'completed'
       }
@@ -80,7 +79,7 @@ const getFeedPurchaseFarmer = async (identifier, cooperativeId) => {
   };
 };
 
-// ✅ FIXED: purchaseFeed - Uses 'feed' enum value
+// ✅ FIXED: MINIMAL REQUIRED FIELDS ONLY
 const purchaseFeed = async (data, session) => {
   const { farmerId, products, adminId, cooperativeId } = data;
 
@@ -119,30 +118,33 @@ const purchaseFeed = async (data, session) => {
     const cost = quantity * unitPrice;
     totalCost += cost;
 
-    // ✅ FIXED: Use 'feed' (matches your enum: ['milk', 'feed'])
-    const transaction = await Transaction.create([{
-      type: 'feed',  // ✅ FIXED: Schema enum value
-      product_id: productId,
-      product_name: product.name,
-      product_unit: product.unit || 'units',
+    // ✅ FIXED: ONLY REQUIRED FIELDS - Let schema defaults handle rest
+    const idempotency_key = `feed-${Date.now()}-${farmerId}-${productId}`;
+    
+    const transactionData = {
+      // ✅ ABSOLUTELY REQUIRED (unique constraint)
+      receipt_num: idempotency_key,  // ✅ Unique receipt
+      idempotency_key,               // ✅ Unique key
+      
+      // ✅ BUSINESS FIELDS
+      type: 'feed',
       quantity,
-      unit_price: unitPrice,
       cost,
       farmer_id: farmerId,
-      farmer_name: farmer.name,
       cooperativeId: cooperative._id,
-      adminId,
-      device_id: 'feed_purchase_system',
-      status: 'completed',
-      idempotency_key: `feed-${Date.now()}-${farmerId}-${productId}`
-    }], { session });
+      
+      // ✅ STATUS
+      status: 'completed'
+    };
 
+    const transaction = await Transaction.create([transactionData], { session });
     transactions.push(transaction[0]);
 
+    // Update inventory
     product.stock -= quantity;
     await product.save({ session });
 
-    smsItems.push(`${quantity} ${product.unit || 'units'} ${product.name}`);
+    smsItems.push(`${quantity} ${product.name}`);
   }
 
   // Balance check
@@ -153,9 +155,9 @@ const purchaseFeed = async (data, session) => {
     throw new Error(`Insufficient balance. Required: KES ${totalCost.toLocaleString()}, Available: KES ${balanceBefore.toLocaleString()}`);
   }
 
-  // SMS
+  // SMS (optional)
   if (farmer.phone) {
-    const smsMessage = `🛒 ${cooperative.name}\nDear ${farmer.name},\n✅ Feed Purchase (${products.length} items):\n\n${smsItems.map((item, i) => `${i+1}. ${item}`).join('\n')}\n\n💰 TOTAL: KES ${totalCost.toLocaleString()}\n💳 New Balance: KES ${Math.max(0, balanceBefore - totalCost).toLocaleString()}`;
+    const smsMessage = `🛒 ${cooperative.name}\nDear ${farmer.name},\n✅ Feed Purchase:\n${smsItems.join('\n')}\n💰 TOTAL: KES ${totalCost.toLocaleString()}`;
     await smsService.sendSMS(farmer.phone, smsMessage);
   }
 
