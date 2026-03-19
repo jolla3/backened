@@ -1,21 +1,24 @@
 const axios = require('axios');
+const qs = require('qs');  // npm install qs
 const smsConfig = require('../config/smsConfig');
 const logger = require('./logger');
 
 const sendSMS = async ({ to, message, from }) => {
   try {
-    // ✅ FIXED: Correct Africa's Talking SMS endpoint
+    // ✅ FIXED: URL-encoded form data (required by Africa's Talking)
+    const formData = qs.stringify({
+      to,
+      message,
+      from: from || smsConfig.defaultSender
+    });
+
     const response = await axios.post(
-      `${smsConfig.baseUrl}/messaging`,  // v1/messaging ✅
-      {
-        to,
-        message,
-        from: from || smsConfig.defaultSender
-      },
+      `${smsConfig.baseUrl}/messaging`,
+      formData,
       {
         headers: {
-          'apiKey': smsConfig.apiKey,  // ✅ lowercase apiKey
-          'Content-Type': 'application/json'
+          'apiKey': smsConfig.apiKey,
+          'Content-Type': 'application/x-www-form-urlencoded'  // ✅ FIXED
         },
         timeout: smsConfig.timeout
       }
