@@ -11,31 +11,36 @@ const getFeedPurchaseFarmer = async (identifier, cooperativeId) => {
   const coop = await Cooperative.findById(cooperativeId);
   if (!coop) throw new Error('Cooperative not found');
 
-  // ✅ Search by farmerCode, phone, OR name
+  // ✅ FIXED: Match ACTUAL farmer schema fields (farmer_code, phone, name)
   const farmer = await Farmer.findOne({
-    $or: [
-      { farmerCode: identifier },
-      { phone: identifier },
-      { phoneNumber: identifier },
-      { name: { $regex: identifier, $options: 'i' } }
+    $and: [
+      { cooperativeId: coop._id }, // ✅ Must belong to this cooperative
+      {
+        $or: [
+          { farmer_code: identifier },        // ✅ Correct field name
+          { phone: identifier },              // ✅ Correct field name  
+          { name: { $regex: identifier, $options: 'i' } }  // ✅ Case insensitive name search
+        ]
+      }
     ]
-  });
+  }).select('farmer_code name phone location balance isActive'); // ✅ Only select needed fields
 
   if (!farmer) {
     throw new Error(`Farmer not found. Try code, phone, or name.`);
   }
 
-  // ✅ Calculate CURRENT BALANCE from TRANSACTIONS (milk payouts - feed purchases)
-  const monthAgo = new Date();
-  monthAgo.setMonth(monthAgo.getMonth() - 1);
+  // ✅ FIXED: Proper month calculation from ACTUAL current month start
+  const now = new Date();
+  const firstDayOfMonth = new Date(now.getFullYear(), now.getMonth(), 1); // ✅ Start of CURRENT month
 
+  // ✅ Milk payouts this month
   const milkPayouts = await Transaction.aggregate([
     {
       $match: {
         farmer_id: farmer._id,
         cooperativeId: coop._id,
         type: 'milk',
-        timestamp_server: { $gte: monthAgo },
+        timestamp_server: { $gte: firstDayOfMonth },
         status: 'completed'
       }
     },
@@ -47,13 +52,14 @@ const getFeedPurchaseFarmer = async (identifier, cooperativeId) => {
     }
   ]);
 
+  // ✅ Feed purchases this month  
   const feedPurchases = await Transaction.aggregate([
     {
       $match: {
         farmer_id: farmer._id,
         cooperativeId: coop._id,
         type: { $in: ['feed', 'feed_purchase'] },
-        timestamp_server: { $gte: monthAgo },
+        timestamp_server: { $gte: firstDayOfMonth },
         status: 'completed'
       }
     },
@@ -67,17 +73,17 @@ const getFeedPurchaseFarmer = async (identifier, cooperativeId) => {
 
   const milkBalance = (milkPayouts[0]?.totalPayout || 0) - (feedPurchases[0]?.totalCost || 0);
 
+  // ✅ FIXED: Return CORRECT field names, NO ID exposure
   return {
-    _id: farmer._id,
-    id: farmer._id,
+    id: farmer._id.toString(),           // ✅ Keep for internal use only
     name: farmer.name,
-    farmerCode: farmer.farmerCode,
-    phone: farmer.phone || farmer.phoneNumber,
-    milkBalance: Math.max(0, milkBalance), // No negative balances
+    farmerCode: farmer.farmer_code,      // ✅ Correct field mapping
+    phone: farmer.phone,
+    location: farmer.location || '',
+    milkBalance: Math.max(0, milkBalance),
     searchIdentifier: identifier
   };
 };
-
 // ✅ Main purchase function
 const purchaseFeed = async (farmerId, products, adminId, session) => {
   // Validate inputs
