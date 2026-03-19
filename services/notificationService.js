@@ -1,5 +1,5 @@
 const logger = require('../utils/logger');
-const smsClient = require('../config/sms');
+const smsClient = require('../config/smsConfig');
 const Cooperative = require('../models/cooperative');
 
 const queueSMS = async (phone, message, adminId) => {
