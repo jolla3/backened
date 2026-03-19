@@ -1,7 +1,9 @@
 const express = require('express');
 const router = express.Router();
-const { purchaseFeed } = require('../controllers/feedPurchaseController');
+const { getFeedPurchaseFarmers, purchaseFeed } = require('../controllers/feedPurchaseController');
 
-router.post('/purchase', purchaseFeed);
+// ✅ PROTECTED ROUTES (admin only)
+router.get('/farmers/search',  getFeedPurchaseFarmers);  // ✅ ADDED
+router.post('/purchase',  purchaseFeed);
 
 module.exports = router;
