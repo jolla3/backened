@@ -1,26 +1,20 @@
-// utils/smsUtil.js
 const axios = require('axios');
 const smsConfig = require('../config/smsConfig');
 const logger = require('./logger');
 
-/**
- * Low-level SMS API call to Africa's Talking
- * @param {Object} params - SMS parameters
- * @returns {Promise<Object>} API response
- */
 const sendSMS = async ({ to, message, from }) => {
   try {
+    // ✅ FIXED: Africa's Talking SMS endpoint
     const response = await axios.post(
-      `${smsConfig.baseUrl}/sms`,
+      `${smsConfig.baseUrl}/messaging`,  // ✅ FIXED: /messaging not /sms
       {
         to,
         message,
-        from
+        from: from || smsConfig.defaultSender
       },
       {
         headers: {
-          'Api-Key': smsConfig.apiKey,
-          'Username': smsConfig.username,
+          'apiKey': smsConfig.apiKey,     // ✅ FIXED: apiKey (lowercase)
           'Content-Type': 'application/json'
         },
         timeout: smsConfig.timeout
@@ -34,7 +28,9 @@ const sendSMS = async ({ to, message, from }) => {
   } catch (error) {
     logger.error('SMS API call failed', {
       error: error.message,
-      code: error.code
+      code: error.code,
+      status: error.response?.status,
+      endpoint: `${smsConfig.baseUrl}/messaging`
     });
 
     return {

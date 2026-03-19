@@ -79,7 +79,7 @@ const getFeedPurchaseFarmer = async (identifier, cooperativeId) => {
   };
 };
 
-// ✅ FIXED: Handles ALL unique indexes + ALLOWS PURCHASE EVEN NEGATIVE BALANCE
+// ✅ FIXED: No balance block + SMS non-blocking
 const purchaseFeed = async (data, session) => {
   const { farmerId, products, adminId, cooperativeId } = data;
 
@@ -118,24 +118,18 @@ const purchaseFeed = async (data, session) => {
     const cost = quantity * unitPrice;
     totalCost += cost;
 
-    // ✅ FIXED: COMPLETE MINIMAL transaction - ALL unique indexes handled
-    const transactionId = new mongoose.Types.ObjectId(); // Generate unique ID first
-    const idempotency_key = `feed-${Date.now()}-${farmerId}-${productId}-${transactionId}`;
-    
+    const transactionId = new mongoose.Types.ObjectId();
+    const uniqueKey = `feed-${Date.now()}-${farmerId}-${productId}-${transactionId}`;
+
     const transactionData = {
-      // ✅ ALL UNIQUE INDEX FIELDS - NON-NULL & UNIQUE
-      receipt_num: idempotency_key,
-      qr_hash: idempotency_key,           // ✅ FIXED: qr_hash unique index
-      idempotency_key,
-      
-      // ✅ REQUIRED BUSINESS FIELDS
+      receipt_num: uniqueKey,
+      qr_hash: uniqueKey,        // ✅ FIXED: Unique for index
+      idempotency_key: uniqueKey,
       type: 'feed',
       quantity,
       cost,
       farmer_id: farmerId,
       cooperativeId: cooperative._id,
-      
-      // ✅ STATUS
       status: 'completed'
     };
 
@@ -148,15 +142,22 @@ const purchaseFeed = async (data, session) => {
     smsItems.push(`${quantity} ${product.name}`);
   }
 
-  // ✅ REMOVED BALANCE CHECK - ALLOW PURCHASE EVEN NEGATIVE
+  // ✅ SHOW BALANCE BUT DON'T BLOCK PURCHASE
   const farmerBalanceInfo = await getFeedPurchaseFarmer(farmer.farmer_code || farmer.phone, cooperative._id);
   const balanceBefore = farmerBalanceInfo.milkBalance;
+  const balanceAfter = balanceBefore - totalCost;  // Can be negative ✅
 
-  // SMS (always send)
+  // ✅ SMS NON-BLOCKING (continues even if SMS fails)
   if (farmer.phone) {
-    const balanceAfter = balanceBefore - totalCost; // Can be negative
-    const smsMessage = `🛒 ${cooperative.name}\nDear ${farmer.name},\n✅ Feed Purchase:\n${smsItems.join('\n')}\n💰 TOTAL: KES ${totalCost.toLocaleString()}\n💳 Balance: KES ${balanceAfter.toLocaleString()}`;
-    await smsService.sendSMS(farmer.phone, smsMessage);
+    try {
+      const smsMessage = `🛒 ${cooperative.name}\nDear ${farmer.name},\n✅ Feed Purchase:\n${smsItems.join('\n')}\n💰 TOTAL: KES ${totalCost.toLocaleString()}\n💳 Balance: KES ${balanceAfter.toLocaleString()}`;
+      await smsService.sendSMS(farmer.phone, smsMessage);
+    } catch (smsError) {
+      logger.warn('SMS failed but purchase completed', { 
+        phone: farmer.phone, 
+        error: smsError.message 
+      });
+    }
   }
 
   logger.info('Feed purchase completed', { 
@@ -165,7 +166,7 @@ const purchaseFeed = async (data, session) => {
     productsCount: products.length, 
     totalCost,
     balanceBefore,
-    balanceAfter: balanceBefore - totalCost
+    balanceAfter
   });
 
   return {
@@ -175,7 +176,7 @@ const purchaseFeed = async (data, session) => {
     transactions,
     totalCost,
     balanceBefore,
-    balanceAfter: balanceBefore - totalCost  // Can be negative ✅
+    balanceAfter  // Can be negative ✅
   };
 };
 
