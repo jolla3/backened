@@ -1,12 +1,12 @@
 const axios = require('axios');
-const qs = require('qs');  // npm install qs
+const qs = require('qs');
 const smsConfig = require('../config/smsConfig');
 const logger = require('./logger');
 
 const sendSMS = async ({ to, message, from }) => {
   try {
-    // ✅ FIXED: URL-encoded form data (required by Africa's Talking)
     const formData = qs.stringify({
+      username: smsConfig.username,     // ✅ FIXED: REQUIRED
       to,
       message,
       from: from || smsConfig.defaultSender
@@ -17,8 +17,9 @@ const sendSMS = async ({ to, message, from }) => {
       formData,
       {
         headers: {
-          'apiKey': smsConfig.apiKey,
-          'Content-Type': 'application/x-www-form-urlencoded'  // ✅ FIXED
+          'apiKey': smsConfig.apiKey,           // ✅ apiKey header
+          'username': smsConfig.username,       // ✅ username header  
+          'Content-Type': 'application/x-www-form-urlencoded'
         },
         timeout: smsConfig.timeout
       }
@@ -26,7 +27,7 @@ const sendSMS = async ({ to, message, from }) => {
 
     logger.info('SMS sent successfully', { 
       to, 
-      smsId: response.data.SMSMessageData?.Message,
+      messageId: response.data.SMSMessageData?.Message,
       recipients: response.data.SMSMessageData?.Recipients?.length 
     });
 
@@ -42,6 +43,7 @@ const sendSMS = async ({ to, message, from }) => {
       statusText: error.response?.statusText,
       endpoint: `${smsConfig.baseUrl}/messaging`,
       to,
+      username: smsConfig.username ? 'set' : 'MISSING',
       response: error.response?.data
     });
 
