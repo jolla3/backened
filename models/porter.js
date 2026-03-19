@@ -13,8 +13,7 @@ const porterSchema = new mongoose.Schema({
   pin: {
     type: String,
     trim: true,
-    minlength: 4,
-    maxlength: 6,
+    unique: true,
     select: false
   },
   branch_id: {
