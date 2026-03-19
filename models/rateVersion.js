@@ -3,7 +3,7 @@ const mongoose = require('mongoose');
 const rateVersionSchema = new mongoose.Schema({
   type: {
     type: String,
-    required: true,
+    
     index: true
   },
   rate: {
@@ -12,7 +12,7 @@ const rateVersionSchema = new mongoose.Schema({
   },
   effective_date: {
     type: Date,
-    required: true,
+    
     index: true
   },
   admin_id: {
@@ -20,7 +20,7 @@ const rateVersionSchema = new mongoose.Schema({
     ref: 'User',
     required: true
   },
-  cooperativeId: { type: mongoose.Schema.Types.ObjectId, ref: 'Cooperative', required: true, index: true },
+  cooperativeId: { type: mongoose.Schema.Types.ObjectId, ref: 'Cooperative',required: true,  index: true },
   createdAt: { type: Date, default: Date.now },
   updatedAt: { type: Date, default: Date.now }
 }, {
