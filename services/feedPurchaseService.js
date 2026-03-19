@@ -79,7 +79,6 @@ const getFeedPurchaseFarmer = async (identifier, cooperativeId) => {
   };
 };
 
-// ✅ FIXED: MINIMAL REQUIRED FIELDS ONLY
 const purchaseFeed = async (data, session) => {
   const { farmerId, products, adminId, cooperativeId } = data;
 
@@ -118,36 +117,31 @@ const purchaseFeed = async (data, session) => {
     const cost = quantity * unitPrice;
     totalCost += cost;
 
-    // ✅ FIXED: ONLY REQUIRED FIELDS - Let schema defaults handle rest
     const idempotency_key = `feed-${Date.now()}-${farmerId}-${productId}`;
     
+    // ✅ FIXED: ONLY unique constraint fields + business data
     const transactionData = {
-      // ✅ ABSOLUTELY REQUIRED (unique constraint)
-      receipt_num: idempotency_key,  // ✅ Unique receipt
-      idempotency_key,               // ✅ Unique key
+      receipt_num: idempotency_key,     // ✅ Unique index
+      qr_hash: idempotency_key,         // ✅ FIXED: Unique index  
+      idempotency_key,                  // ✅ Unique index
       
-      // ✅ BUSINESS FIELDS
       type: 'feed',
       quantity,
       cost,
       farmer_id: farmerId,
       cooperativeId: cooperative._id,
-      
-      // ✅ STATUS
       status: 'completed'
     };
 
     const transaction = await Transaction.create([transactionData], { session });
     transactions.push(transaction[0]);
 
-    // Update inventory
     product.stock -= quantity;
     await product.save({ session });
 
     smsItems.push(`${quantity} ${product.name}`);
   }
 
-  // Balance check
   const farmerBalanceInfo = await getFeedPurchaseFarmer(farmer.farmer_code || farmer.phone, cooperative._id);
   const balanceBefore = farmerBalanceInfo.milkBalance;
   
@@ -155,7 +149,6 @@ const purchaseFeed = async (data, session) => {
     throw new Error(`Insufficient balance. Required: KES ${totalCost.toLocaleString()}, Available: KES ${balanceBefore.toLocaleString()}`);
   }
 
-  // SMS (optional)
   if (farmer.phone) {
     const smsMessage = `🛒 ${cooperative.name}\nDear ${farmer.name},\n✅ Feed Purchase:\n${smsItems.join('\n')}\n💰 TOTAL: KES ${totalCost.toLocaleString()}`;
     await smsService.sendSMS(farmer.phone, smsMessage);
