@@ -3,18 +3,18 @@ const mongoose = require('mongoose');
 const transactionSchema = new mongoose.Schema({
   device_id: {
     type: String,
-    required: true,
+    
     index: true
   },
   receipt_num: {
     type: String,
-    required: true,
+    
     unique: true,
     index: true
   },
   qr_hash: {
     type: String,
-    required: true,
+    
     unique: true,
     index: true
   },
@@ -31,11 +31,11 @@ const transactionSchema = new mongoose.Schema({
   },
   server_seq_num: {
     type: String,
-    required: true
+    
   },
   timestamp_local: {
     type: Date,
-    required: true,
+    
     index: true
   },
   timestamp_server: {
@@ -45,11 +45,11 @@ const transactionSchema = new mongoose.Schema({
   },
   digital_signature: {
     type: String,
-    required: true
+    
   },
   idempotency_key: {
     type: String,
-    required: true,
+    
     unique: true,
     index: true
   },
@@ -60,7 +60,7 @@ const transactionSchema = new mongoose.Schema({
   type: {
     type: String,
     enum: ['milk', 'feed'],
-    required: true,
+    
     index: true
   },
   litres: {
@@ -82,35 +82,35 @@ const transactionSchema = new mongoose.Schema({
   farmer_id: {
     type: mongoose.Schema.Types.ObjectId,
     ref: 'Farmer',
-    required: true,
+    
     index: true
   },
   rate_version_id: {
     type: mongoose.Schema.Types.ObjectId,
     ref: 'RateVersion',
-    required: true,
+    
     index: true
   },
   porter_id: {
     type: mongoose.Schema.Types.ObjectId,
     ref: 'Porter',
-    required: true,
+    
     index: true
   },
   zone: {
     type: String,
-    required: true,
+    
     index: true
   },
   branch_id: {
     type: String,
-    required: true,
+    
     index: true
   },
   cooperativeId: {
     type: mongoose.Schema.Types.ObjectId,
     ref: 'Cooperative',
-    required: true,
+    
     index: true
   },
   createdAt: {
