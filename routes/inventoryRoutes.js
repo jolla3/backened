@@ -1,7 +1,6 @@
 const express = require('express');
 const router = express.Router();
-const { getAlerts, createProduct, deductStock } = require('../controllers/inventoryController');
-const { getInventory } = require('../controllers/dashboardController');
+const { getAlerts, createProduct, deductStock, getInventory } = require('../controllers/inventoryController');
 
 router.get('/low-alerts', getAlerts);
 router.get('/inventory', getInventory);
