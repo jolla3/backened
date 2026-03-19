@@ -85,102 +85,106 @@ const getFeedPurchaseFarmer = async (identifier, cooperativeId) => {
   };
 };
 // ✅ Main purchase function
-const purchaseFeed = async (farmerId, products, adminId, session) => {
-  // Validate inputs
-  if (!mongoose.Types.ObjectId.isValid(farmerId)) {
-    throw new Error('Invalid farmer ID');
-  }
-  if (!Array.isArray(products) || products.length === 0) {
-    throw new Error('No products specified');
-  }
+const purchaseFeed = async (req, res) => {
+  const session = await mongoose.startSession();
+  try {
+    const { farmerId, products } = req.body;
+    const adminId = req.user.id;  // ✅ From JWT token
+    const cooperativeId = req.user.cooperativeId;  // ✅ From JWT token
 
-  const cooperative = await Cooperative.findById(adminId).session(session);
-  if (!cooperative) throw new Error('Cooperative not found');
-
-  // ✅ Get farmer details
-  const farmer = await Farmer.findById(farmerId).session(session);
-  if (!farmer) throw new Error('Farmer not found');
-
-  let totalCost = 0;
-  const transactions = [];
-  const smsItems = [];
-
-  // ✅ Process each product
-  for (const { productId, quantity } of products) {
-    const product = await Inventory.findById(productId).session(session);
-    if (!product) throw new Error(`Product not found: ${productId}`);
-    if (product.stock < quantity) {
-      throw new Error(`Insufficient stock: ${product.name} (${product.stock} available)`);
+    // Validate inputs
+    if (!mongoose.Types.ObjectId.isValid(farmerId)) {
+      return res.status(400).json({ error: 'Invalid farmer ID' });
     }
-    if (product.cooperativeId.toString() !== cooperative._id.toString()) {
-      throw new Error(`Product ${product.name} not authorized`);
+    if (!Array.isArray(products) || products.length === 0) {
+      return res.status(400).json({ error: 'No products specified' });
     }
 
-    const unitPrice = Number(product.price) || 0;
-    const cost = quantity * unitPrice;
-    totalCost += cost;
+    await session.withTransaction(async () => {
+      // ✅ FIXED: Use cooperativeId from JWT, NOT adminId
+      const cooperative = await Cooperative.findById(cooperativeId).session(session);
+      if (!cooperative) throw new Error('Cooperative not found');
 
-    // ✅ Create transaction
-    const transaction = await Transaction.create([{
-      type: 'feed_purchase',
-      product_id: productId,
-      product_name: product.name,
-      product_unit: product.unit || 'units',
-      quantity,
-      unit_price: unitPrice,
-      cost, // Use 'cost' field from Transaction schema
-      farmer_id: farmerId,
-      farmer_name: farmer.name,
-      cooperativeId: cooperative._id,
-      adminId,
-      device_id: 'feed_purchase_system',
-      status: 'completed',
-      idempotency_key: `feed-${Date.now()}-${farmerId}-${productId}`
-    }], { session });
+      // ✅ Get farmer details
+      const farmer = await Farmer.findById(farmerId).session(session);
+      if (!farmer) throw new Error('Farmer not found');
 
-    transactions.push(transaction[0]);
+      let totalCost = 0;
+      const transactions = [];
+      const smsItems = [];
 
-    // ✅ Deduct inventory stock
-    product.stock -= quantity;
-    await product.save({ session });
+      // ✅ Process each product
+      for (const { productId, quantity } of products) {
+        const product = await Inventory.findById(productId).session(session);
+        if (!product) throw new Error(`Product not found: ${productId}`);
+        if (product.stock < quantity) {
+          throw new Error(`Insufficient stock: ${product.name} (${product.stock} available)`);
+        }
+        if (product.cooperativeId.toString() !== cooperativeId.toString()) {
+          throw new Error(`Product ${product.name} not authorized`);
+        }
 
-    smsItems.push(`${quantity} ${product.unit || 'units'} ${product.name}`);
+        const unitPrice = Number(product.price) || 0;
+        const cost = quantity * unitPrice;
+        totalCost += cost;
+
+        // ✅ Create transaction
+        const transaction = await Transaction.create([{
+          type: 'feed_purchase',
+          product_id: productId,
+          product_name: product.name,
+          product_unit: product.unit || 'units',
+          quantity,
+          unit_price: unitPrice,
+          cost,
+          farmer_id: farmerId,
+          farmer_name: farmer.name,
+          cooperativeId: cooperativeId,  // ✅ Use cooperativeId
+          adminId,
+          device_id: 'feed_purchase_system',
+          status: 'completed',
+          idempotency_key: `feed-${Date.now()}-${farmerId}-${productId}`
+        }], { session });
+
+        transactions.push(transaction[0]);
+        product.stock -= quantity;
+        await product.save({ session });
+        smsItems.push(`${quantity} ${product.unit || 'units'} ${product.name}`);
+      }
+
+      // ✅ Check balance
+      const farmerBalanceInfo = await getFeedPurchaseFarmer(farmer.farmer_code || farmer.phone || farmer.name, cooperativeId);
+      const balanceBefore = farmerBalanceInfo.milkBalance;
+      
+      if (totalCost > balanceBefore) {
+        throw new Error(`Insufficient balance. Required: KES ${totalCost.toLocaleString()}, Available: KES ${balanceBefore.toLocaleString()}`);
+      }
+
+      // ✅ Send SMS
+      if (farmer.phone) {
+        const smsMessage = `🛒 ${cooperative.name}\n\nDear ${farmer.name},\n\n✅ Feed Purchase (${products.length} items):\n\n` +
+          smsItems.map((item, i) => `${i+1}. ${item}`).join('\n') + '\n\n' +
+          `💰 TOTAL: KES ${totalCost.toLocaleString()}\n` +
+          `💳 New Balance: KES ${Math.max(0, balanceBefore - totalCost).toLocaleString()}\n\nThank you!`;
+
+        await smsService.sendSMS(farmer.phone, smsMessage);
+      }
+
+      res.json({
+        success: true,
+        farmerId,
+        farmerName: farmer.name,
+        transactions,
+        totalCost,
+        balanceBefore,
+        estimatedBalanceAfter: Math.max(0, balanceBefore - totalCost)
+      });
+    });
+  } catch (error) {
+    res.status(400).json({ error: error.message });
+  } finally {
+    await session.endSession();
   }
-
-  // ✅ Calculate balance from transactions (NOT stored in farmer)
-  const farmerBalanceInfo = await getFeedPurchaseFarmer(farmer.farmerCode || farmer._id.toString(), cooperative._id);
-  const balanceBefore = farmerBalanceInfo.milkBalance;
-  
-  if (totalCost > balanceBefore) {
-    throw new Error(`Insufficient balance. Required: KES ${totalCost.toLocaleString()}, Available: KES ${balanceBefore.toLocaleString()}`);
-  }
-
-  // ✅ Send SMS
-  if (farmer.phone) {
-    const smsMessage = `🛒 ${cooperative.name}\n\nDear ${farmer.name},\n\n✅ Feed Purchase (${products.length} items):\n\n` +
-      smsItems.map((item, i) => `${i+1}. ${item}`).join('\n') + '\n\n' +
-      `💰 TOTAL: KES ${totalCost.toLocaleString()}\n` +
-      `💳 New Balance: KES ${Math.max(0, balanceBefore - totalCost).toLocaleString()}\n\nThank you!`;
-
-    await smsService.sendSMS(farmer.phone, smsMessage);
-  }
-
-  logger.info('Feed purchase completed', { 
-    farmerId, 
-    farmerName: farmer.name, 
-    productsCount: products.length, 
-    totalCost 
-  });
-
-  return {
-    success: true,
-    farmerId,
-    farmerName: farmer.name,
-    transactions,
-    totalCost,
-    balanceBefore,
-    estimatedBalanceAfter: Math.max(0, balanceBefore - totalCost)
-  };
 };
 
 module.exports = {
