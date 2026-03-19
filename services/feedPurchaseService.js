@@ -6,7 +6,7 @@ const Cooperative = require('../models/cooperative');
 const smsService = require('./smsService');
 const logger = require('../utils/logger');
 
-// ✅ FIXED: getFeedPurchaseFarmer - Uses req.user.cooperativeId
+// ✅ getFeedPurchaseFarmer (UNCHANGED - WORKS)
 const getFeedPurchaseFarmer = async (identifier, cooperativeId) => {
   const coop = await Cooperative.findById(cooperativeId);
   if (!coop) throw new Error('Cooperative not found');
@@ -54,7 +54,7 @@ const getFeedPurchaseFarmer = async (identifier, cooperativeId) => {
       $match: {
         farmer_id: farmer._id,
         cooperativeId: coop._id,
-        type: { $in: ['feed', 'feed_purchase'] },
+        type: 'feed',  // ✅ FIXED: Use 'feed' to match enum
         timestamp_server: { $gte: firstDayOfMonth },
         status: 'completed'
       }
@@ -80,9 +80,9 @@ const getFeedPurchaseFarmer = async (identifier, cooperativeId) => {
   };
 };
 
-// ✅ FIXED: purchaseFeed - Uses req.user.cooperativeId from JWT
+// ✅ FIXED: purchaseFeed - Uses 'feed' enum value
 const purchaseFeed = async (data, session) => {
-  const { farmerId, products, adminId } = data;
+  const { farmerId, products, adminId, cooperativeId } = data;
 
   if (!mongoose.Types.ObjectId.isValid(farmerId)) {
     throw new Error('Invalid farmer ID');
@@ -91,12 +91,9 @@ const purchaseFeed = async (data, session) => {
     throw new Error('No products specified');
   }
 
-  // ✅ FIXED: Get cooperativeId from JWT (passed from controller)
-  const cooperativeId = data.cooperativeId;
   const cooperative = await Cooperative.findById(cooperativeId).session(session);
   if (!cooperative) throw new Error('Cooperative not found');
 
-  // ✅ FIXED: Farmer must belong to this cooperative
   const farmer = await Farmer.findOne({
     _id: farmerId,
     cooperativeId: cooperative._id
@@ -115,15 +112,16 @@ const purchaseFeed = async (data, session) => {
       throw new Error(`Insufficient stock: ${product.name} (${product.stock} available)`);
     }
     if (product.cooperativeId.toString() !== cooperative._id.toString()) {
-      throw new Error(`Product ${product.name} not authorized for this cooperative`);
+      throw new Error(`Product ${product.name} not authorized`);
     }
 
     const unitPrice = Number(product.price) || 0;
     const cost = quantity * unitPrice;
     totalCost += cost;
 
+    // ✅ FIXED: Use 'feed' (matches your enum: ['milk', 'feed'])
     const transaction = await Transaction.create([{
-      type: 'feed_purchase',
+      type: 'feed',  // ✅ FIXED: Schema enum value
       product_id: productId,
       product_name: product.name,
       product_unit: product.unit || 'units',
@@ -147,7 +145,7 @@ const purchaseFeed = async (data, session) => {
     smsItems.push(`${quantity} ${product.unit || 'units'} ${product.name}`);
   }
 
-  // ✅ Check balance BEFORE completing
+  // Balance check
   const farmerBalanceInfo = await getFeedPurchaseFarmer(farmer.farmer_code || farmer.phone, cooperative._id);
   const balanceBefore = farmerBalanceInfo.milkBalance;
   
@@ -155,8 +153,9 @@ const purchaseFeed = async (data, session) => {
     throw new Error(`Insufficient balance. Required: KES ${totalCost.toLocaleString()}, Available: KES ${balanceBefore.toLocaleString()}`);
   }
 
+  // SMS
   if (farmer.phone) {
-    const smsMessage = `🛒 ${cooperative.name}\nDear ${farmer.name},\n✅ Feed Purchase:\n${smsItems.join('\n')}\n💰 TOTAL: KES ${totalCost.toLocaleString()}\n💳 Balance: KES ${Math.max(0, balanceBefore - totalCost).toLocaleString()}`;
+    const smsMessage = `🛒 ${cooperative.name}\nDear ${farmer.name},\n✅ Feed Purchase (${products.length} items):\n\n${smsItems.map((item, i) => `${i+1}. ${item}`).join('\n')}\n\n💰 TOTAL: KES ${totalCost.toLocaleString()}\n💳 New Balance: KES ${Math.max(0, balanceBefore - totalCost).toLocaleString()}`;
     await smsService.sendSMS(farmer.phone, smsMessage);
   }
 
