@@ -12,11 +12,39 @@ const getAlerts = async (req, res) => {
   }
 };
 
+const getInventory = async (req, res) => {
+  try {
+    const adminId = req.user.id;
+    const cooperativeId = req.user.cooperativeId;
+    
+    if (!cooperativeId) {
+      return res.status(400).json({ error: 'Cooperative ID missing from token' });
+    }
+
+    const inventory = await inventoryService.getInventory(cooperativeId);
+    
+    logger.info('Inventory retrieved', { 
+      cooperativeId,
+      adminId,
+      count: inventory.length 
+    });
+    
+    res.json(inventory);
+  } catch (error) {
+    logger.error('Get inventory failed', { 
+      error: error.message, 
+      adminId: req.user.id,
+      correlationId: req.correlationId || 'unknown'
+    });
+    res.status(400).json({ error: error.message });
+  }
+};
+
 const createProduct = async (req, res) => {
   try {
     const adminId = req.user.id;
     
-    // ✅ EXTRACT FROM TOKEN
+    // ✅ EXTRACT FROM TOKEN (lowercase)
     const cooperativeId = req.user.cooperativeId;
     
     if (!cooperativeId) {
@@ -25,7 +53,7 @@ const createProduct = async (req, res) => {
 
     const product = await inventoryService.createProduct({ 
       ...req.body, 
-      cooperativeId  // Pass it to service
+      cooperativeId  // ✅ Pass lowercase cooperativeId to service
     }, adminId);
     
     logger.info('Product created', { 
@@ -44,6 +72,7 @@ const createProduct = async (req, res) => {
     res.status(400).json({ error: error.message });
   }
 };
+
 const deductStock = async (req, res) => {
   try {
     const adminId = req.user.id;
@@ -56,4 +85,4 @@ const deductStock = async (req, res) => {
   }
 };
 
-module.exports = { getAlerts, createProduct, deductStock };
+module.exports = { getAlerts, getInventory, createProduct, deductStock };
