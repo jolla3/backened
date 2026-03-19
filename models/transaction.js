@@ -9,13 +9,13 @@ const transactionSchema = new mongoose.Schema({
   receipt_num: {
     type: String,
     
-    unique: true,
+    
     index: true
   },
   qr_hash: {
     type: String,
     
-    unique: true,
+    
     index: true
   },
   status: {
@@ -50,7 +50,7 @@ const transactionSchema = new mongoose.Schema({
   idempotency_key: {
     type: String,
     
-    unique: true,
+    
     index: true
   },
   soft_delta: {
