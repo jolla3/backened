@@ -3,8 +3,8 @@ const Farmer = require('../models/farmer');
 const Cooperative = require('../models/cooperative');
 const logger = require('../utils/logger');
 
-const getMonthlyReport = async (year, month, adminId) => {
-  const cooperative = await Cooperative.findById(adminId);
+const getMonthlyReport = async (year, month, cooperativeId) => {  // ✅ cooperativeId
+  const cooperative = await Cooperative.findById(cooperativeId);
   if (!cooperative) throw new Error('Cooperative not found');
 
   const startOfMonth = new Date(year, month - 1, 1);
@@ -27,8 +27,6 @@ const getMonthlyReport = async (year, month, adminId) => {
     totalPayout: transactions.filter(t => t.type === 'milk').reduce((sum, t) => sum + t.payout, 0)
   };
 
-  logger.info('Monthly report generated', { year, month, cooperativeId: cooperative._id });
   return report;
 };
-
 module.exports = { getMonthlyReport };

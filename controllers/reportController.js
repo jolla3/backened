@@ -3,15 +3,18 @@ const logger = require('../utils/logger');
 
 const getMonthly = async (req, res) => {
   try {
-    const adminId = req.user.id;
-    const report = await reportService.getMonthlyReport(req.query.year, req.query.month, adminId);
+    const cooperativeId = req.user.cooperativeId;  // ✅ From JWT
+    const report = await reportService.getMonthlyReport(
+      req.query.year || new Date().getFullYear(),
+      req.query.month || (new Date().getMonth() + 1),
+      cooperativeId  // ✅ Pass cooperativeId
+    );
     res.json(report);
   } catch (error) {
-    logger.error('Get monthly report failed', { error: error.message, adminId: req.user.id });
+    logger.error('Get monthly report failed', { error: error.message, coopId: req.user.cooperativeId });
     res.status(400).json({ error: error.message });
   }
 };
-
 const exportCSV = async (req, res) => {
   try {
     const adminId = req.user.id;
