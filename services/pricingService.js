@@ -4,9 +4,8 @@ const Inventory = require('../models/inventory');
 const Cooperative = require('../models/cooperative');
 const logger = require('../utils/logger');
 
-// Milk rates (historical versions)
+// ✅ SIMPLIFIED - Only needs adminId for audit trail, cooperativeId from controller
 const updateMilkRate = async (rate, effectiveDate, adminId, cooperativeId) => {
-  // ✅ FIX: Use cooperativeId from JWT, not adminId
   const cooperative = await Cooperative.findById(cooperativeId);
   if (!cooperative) throw new Error('Cooperative not found');
   
@@ -18,75 +17,45 @@ const updateMilkRate = async (rate, effectiveDate, adminId, cooperativeId) => {
     cooperativeId: cooperative._id
   });
   
-  logger.info('Milk rate updated', { rate, adminId, cooperativeId });
   return newVersion;
 };
 
-// Inventory category pricing (PATCH existing items)
 const updateInventoryCategoryPrice = async (category, price, adminId, cooperativeId) => {
-  // ✅ FIX: Use cooperativeId from JWT
   const cooperative = await Cooperative.findById(cooperativeId);
   if (!cooperative) throw new Error('Cooperative not found');
   
   const result = await Inventory.updateMany(
-    { 
-      category, 
-      cooperativeId: cooperative._id 
-    },
-    { 
-      $set: { 
-        price: Number(price),
-        updated_by: adminId 
-      }
-    }
+    { category, cooperativeId: cooperative._id },
+    { $set: { price: Number(price), updated_by: adminId } }
   );
   
   if (result.modifiedCount === 0) {
     throw new Error(`No items found in category "${category}"`);
   }
   
-  logger.info('Inventory category price updated', { 
-    category, price, modifiedCount: result.modifiedCount, adminId, cooperativeId 
-  });
-  
-  return { 
-    success: true, 
-    modifiedCount: result.modifiedCount, category, price 
-  };
+  return { success: true, modifiedCount: result.modifiedCount, category, price };
 };
 
-// Get milk rate history
+// ✅ GET methods only need cooperativeId
 const getMilkHistory = async (cooperativeId) => {
-  // ✅ FIX: Use cooperativeId directly
   const cooperative = await Cooperative.findById(cooperativeId);
   if (!cooperative) throw new Error('Cooperative not found');
-  
-  return await RateVersion.find({ 
-    type: 'milk', 
-    cooperativeId: cooperative._id 
-  }).sort({ effective_date: -1 });
+  return RateVersion.find({ type: 'milk', cooperativeId: cooperative._id })
+    .sort({ effective_date: -1 });
 };
 
-// Get inventory categories
 const getInventoryCategories = async (cooperativeId) => {
-  // ✅ FIX: Use cooperativeId directly
   const cooperative = await Cooperative.findById(cooperativeId);
   if (!cooperative) throw new Error('Cooperative not found');
-  
-  return await Inventory.distinct('category', { 
-    cooperativeId: cooperative._id 
-  });
+  return Inventory.distinct('category', { cooperativeId: cooperative._id });
 };
 
-// Get current prices by category
 const getCurrentPrices = async (cooperativeId) => {
-  // ✅ FIX: Use cooperativeId directly
   const cooperative = await Cooperative.findById(cooperativeId);
   if (!cooperative) throw new Error('Cooperative not found');
   
   const milkRate = await RateVersion.findOne({ 
-    type: 'milk', 
-    cooperativeId: cooperative._id 
+    type: 'milk', cooperativeId: cooperative._id 
   }).sort({ effective_date: -1 });
   
   const categories = await Inventory.aggregate([
@@ -95,8 +64,7 @@ const getCurrentPrices = async (cooperativeId) => {
       $group: {
         _id: '$category',
         avgPrice: { $avg: '$price' },
-        itemCount: { $sum: 1 },
-        items: { $push: { name: '$name', price: '$price', stock: '$stock' } }
+        itemCount: { $sum: 1 }
       }
     }
   ]);
