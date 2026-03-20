@@ -24,13 +24,13 @@ const updateMilkRate = async (req, res) => {
 
 const updateInventoryCategory = async (req, res) => {
   try {
-    const { itemId } = req.params;  // ✅ /inventory/:itemId
-    const { price } = req.body;
+    const { itemId } = req.params;
+    const updates = req.body; // ✅ Now {price?, stock?, unit?, threshold?}
     const adminId = req.user.id;
     const cooperativeId = req.user.cooperativeId;
     
     const result = await pricingService.updateInventoryCategory(
-      itemId, price, adminId, cooperativeId
+      itemId, updates, adminId, cooperativeId
     );
     
     res.json(result);

@@ -21,18 +21,38 @@ const updateMilkRate = async (rate, effectiveDate, adminId, cooperativeId) => {
 };
 
 // ✅ NEW: Update SINGLE inventory item by ID
-const updateInventoryCategory = async (itemId, price, adminId, cooperativeId) => {
+const updateInventoryCategory = async (itemId, updates, adminId, cooperativeId) => {
   const cooperative = await Cooperative.findById(cooperativeId);
   if (!cooperative) throw new Error('Cooperative not found');
   
+  // ✅ FLEXIBLE UPDATES - stock, unit, threshold, price
+  const updateFields = {};
+  
+  if (updates.price !== undefined) {
+    updateFields.price = Number(updates.price);
+  }
+  if (updates.stock !== undefined) {
+    updateFields.stock = Number(updates.stock);
+  }
+  if (updates.unit !== undefined) {
+    updateFields.unit = updates.unit.trim();
+  }
+  if (updates.threshold !== undefined) {
+    updateFields.threshold = Number(updates.threshold);
+  }
+
+  if (Object.keys(updateFields).length === 0) {
+    throw new Error('No valid fields to update');
+  }
+
   const result = await Inventory.updateOne(
     { 
       _id: itemId, 
-      cooperativeId: cooperative._id  // Security: only own coop items
+      cooperativeId: cooperative._id
     },
     { 
       $set: { 
-        price: Number(price),
+        ...updateFields,
         updated_by: adminId,
         updatedAt: new Date()
       } 
@@ -48,12 +68,13 @@ const updateInventoryCategory = async (itemId, price, adminId, cooperativeId) =>
   return { 
     success: true, 
     itemId, 
-    newPrice: Number(price),
     itemName: updatedItem.name,
-    category: updatedItem.category 
+    category: updatedItem.category,
+    changes: updateFields,
+    newStock: updatedItem.stock,
+    newPrice: updatedItem.price
   };
 };
-
 // ✅ GET methods only need cooperativeId
 const getMilkHistory = async (cooperativeId) => {
   const cooperative = await Cooperative.findById(cooperativeId);
