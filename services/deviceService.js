@@ -32,7 +32,7 @@ const registerDevice = async (deviceData) => {
     
     // ✅ REQUIRED: cooperativeId & created_by (use adminId)
     cooperativeId,
-    created_by: adminId || cooperativeId, // fallback to coopId if no adminId
+    created_by: adminId 
     
     // ✅ Schema defaults handle the rest:
     // approved: false
