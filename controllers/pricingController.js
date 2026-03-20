@@ -24,18 +24,18 @@ const updateMilkRate = async (req, res) => {
 
 const updateInventoryCategory = async (req, res) => {
   try {
-    const { category } = req.params;
+    const { itemId } = req.params;  // ✅ /inventory/:itemId
     const { price } = req.body;
     const adminId = req.user.id;
-    const cooperativeId = req.user.cooperativeId;  // ✅ FROM JWT
+    const cooperativeId = req.user.cooperativeId;
     
-    const result = await pricingService.updateInventoryCategoryPrice(
-      category, price, adminId, cooperativeId
+    const result = await pricingService.updateInventoryItemPrice(
+      itemId, price, adminId, cooperativeId
     );
     
     res.json(result);
   } catch (error) {
-    logger.error('Update inventory category failed', { 
+    logger.error('Update inventory item failed', { 
       error: error.message, 
       userId: req.user.id, 
       coopId: req.user.cooperativeId 
@@ -43,7 +43,6 @@ const updateInventoryCategory = async (req, res) => {
     res.status(400).json({ error: error.message });
   }
 };
-
 const getMilkHistory = async (req, res) => {
   try {
     const cooperativeId = req.user.cooperativeId;  // ✅ FROM JWT
@@ -61,9 +60,9 @@ const getMilkHistory = async (req, res) => {
 
 const getInventoryCategories = async (req, res) => {
   try {
-    const cooperativeId = req.user.cooperativeId;  // ✅ FROM JWT
+    const cooperativeId = req.user.cooperativeId;
     const categories = await pricingService.getInventoryCategories(cooperativeId);
-    res.json(categories);
+    res.json(categories); // Now returns [{ _id: 'Feed', items: [...], itemCount: 5, avgPrice: 2500 }, ...]
   } catch (error) {
     logger.error('Get inventory categories failed', { 
       error: error.message, 

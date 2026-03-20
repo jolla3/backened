@@ -20,20 +20,38 @@ const updateMilkRate = async (rate, effectiveDate, adminId, cooperativeId) => {
   return newVersion;
 };
 
-const updateInventoryCategoryPrice = async (category, price, adminId, cooperativeId) => {
+// ✅ NEW: Update SINGLE inventory item by ID
+const updateInventoryCategoryPrice = async (itemId, price, adminId, cooperativeId) => {
   const cooperative = await Cooperative.findById(cooperativeId);
   if (!cooperative) throw new Error('Cooperative not found');
   
-  const result = await Inventory.updateMany(
-    { category, cooperativeId: cooperative._id },
-    { $set: { price: Number(price), updated_by: adminId } }
+  const result = await Inventory.updateOne(
+    { 
+      _id: itemId, 
+      cooperativeId: cooperative._id  // Security: only own coop items
+    },
+    { 
+      $set: { 
+        price: Number(price),
+        updated_by: adminId,
+        updatedAt: new Date()
+      } 
+    }
   );
   
   if (result.modifiedCount === 0) {
-    throw new Error(`No items found in category "${category}"`);
+    throw new Error('Item not found or no changes made');
   }
   
-  return { success: true, modifiedCount: result.modifiedCount, category, price };
+  // Return updated item
+  const updatedItem = await Inventory.findById(itemId).lean();
+  return { 
+    success: true, 
+    itemId, 
+    newPrice: Number(price),
+    itemName: updatedItem.name,
+    category: updatedItem.category 
+  };
 };
 
 // ✅ GET methods only need cooperativeId
@@ -44,12 +62,34 @@ const getMilkHistory = async (cooperativeId) => {
     .sort({ effective_date: -1 });
 };
 
+// Get inventory categories WITH items grouped by category
 const getInventoryCategories = async (cooperativeId) => {
   const cooperative = await Cooperative.findById(cooperativeId);
   if (!cooperative) throw new Error('Cooperative not found');
-  return Inventory.distinct('category', { cooperativeId: cooperative._id });
+  
+  // ✅ NEW: Return categories + ALL items grouped by category
+  return await Inventory.aggregate([
+    { $match: { cooperativeId: cooperative._id } },
+    {
+      $group: {
+        _id: '$category',
+        items: {
+          $push: {
+            _id: '$_id',
+            name: '$name',
+            price: '$price',
+            stock: '$stock',
+            unit: '$unit',
+            threshold: '$threshold'
+          }
+        },
+        itemCount: { $sum: 1 },
+        avgPrice: { $avg: '$price' }
+      }
+    },
+    { $sort: { _id: 1 } } // Sort categories alphabetically
+  ]);
 };
-
 const getCurrentPrices = async (cooperativeId) => {
   const cooperative = await Cooperative.findById(cooperativeId);
   if (!cooperative) throw new Error('Cooperative not found');
