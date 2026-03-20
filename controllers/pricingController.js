@@ -29,7 +29,7 @@ const updateInventoryCategory = async (req, res) => {
     const adminId = req.user.id;
     const cooperativeId = req.user.cooperativeId;
     
-    const result = await pricingService.updateInventoryItemPrice(
+    const result = await pricingService.updateInventoryItem(
       itemId, price, adminId, cooperativeId
     );
     

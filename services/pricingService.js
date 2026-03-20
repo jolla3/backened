@@ -21,7 +21,7 @@ const updateMilkRate = async (rate, effectiveDate, adminId, cooperativeId) => {
 };
 
 // ✅ NEW: Update SINGLE inventory item by ID
-const updateInventoryCategoryPrice = async (itemId, price, adminId, cooperativeId) => {
+const updateInventoryCategory = async (itemId, price, adminId, cooperativeId) => {
   const cooperative = await Cooperative.findById(cooperativeId);
   if (!cooperative) throw new Error('Cooperative not found');
   
@@ -79,7 +79,6 @@ const getInventoryCategories = async (cooperativeId) => {
             name: '$name',
             price: '$price',
             stock: '$stock',
-            unit: '$unit',
             threshold: '$threshold'
           }
         },
@@ -114,7 +113,7 @@ const getCurrentPrices = async (cooperativeId) => {
 
 module.exports = { 
   updateMilkRate, 
-  updateInventoryCategoryPrice, 
+  updateInventoryCategory, 
   getMilkHistory, 
   getInventoryCategories, 
   getCurrentPrices 
