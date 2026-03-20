@@ -1,8 +1,11 @@
 const express = require('express');
 const router = express.Router();
-const { updateRate, getHistory } = require('../controllers/pricingController');
+const {  updateMilkRate, updateInventoryCategory, getMilkHistory, getCurrentPrices, getInventoryCategories } = require('../controllers/pricingController');
 
-router.post('/update-milk', updateRate);
-router.get('/history/:type', getHistory);
+router.post('/milk',updateMilkRate);
+router.patch('/inventory/:category',updateInventoryCategory);
+router.get('/milk-history',getMilkHistory);
+router.get('/categories',getInventoryCategories);
+router.get('/current',getCurrentPrices);
 
 module.exports = router;

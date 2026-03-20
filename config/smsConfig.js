@@ -1,7 +1,7 @@
 module.exports = {
-  username: process.env.AT_USERNAME,
+  username: process.env.AT_USERNAME ,  // ✅ Fallback
   apiKey: process.env.AT_API_KEY,
-  baseUrl: 'https://api.africastalking.com/version1',  // ✅ FIXED: version1
-  defaultSender: 'AgriWallet',
+  baseUrl: 'https://api.africastalking.com/version1',
+  defaultSender: process.env.AT_DEFAULT_SENDER || 'AgriWallet',
   timeout: 10000
 };

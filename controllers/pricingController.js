@@ -1,27 +1,73 @@
 const pricingService = require('../services/pricingService');
 const logger = require('../utils/logger');
 
-const updateRate = async (req, res) => {
+const updateMilkRate = async (req, res) => {
   try {
     const adminId = req.user.id;
-    const { type, rate, effective_date } = req.body;
-    const rateVersion = await pricingService.updateRate(type, rate, effective_date, adminId);
+    const { rate, effectiveDate, notes } = req.body;
+    
+    const rateVersion = await pricingService.updateMilkRate(
+      Number(rate), 
+      effectiveDate, 
+      adminId
+    );
+    
     res.json(rateVersion);
   } catch (error) {
-    logger.error('Update rate failed', { error: error.message, adminId: req.user.id });
+    logger.error('Update milk rate failed', { error: error.message });
     res.status(400).json({ error: error.message });
   }
 };
 
-const getHistory = async (req, res) => {
+const updateInventoryCategory = async (req, res) => {
   try {
     const adminId = req.user.id;
-    const history = await pricingService.getHistory(req.params.type, adminId);
-    res.json(history);
+    const { category, price } = req.body;
+    
+    const result = await pricingService.updateInventoryCategoryPrice(
+      category, 
+      Number(price), 
+      adminId
+    );
+    
+    res.json(result);
   } catch (error) {
-    logger.error('Get rate history failed', { error: error.message, adminId: req.user.id });
+    logger.error('Update inventory category failed', { error: error.message });
     res.status(400).json({ error: error.message });
   }
 };
 
-module.exports = { updateRate, getHistory };
+const getMilkHistory = async (req, res) => {
+  try {
+    const history = await pricingService.getMilkHistory(req.user.id);
+    res.json(history);
+  } catch (error) {
+    res.status(400).json({ error: error.message });
+  }
+};
+
+const getInventoryCategories = async (req, res) => {
+  try {
+    const categories = await pricingService.getInventoryCategories(req.user.id);
+    res.json(categories);
+  } catch (error) {
+    res.status(400).json({ error: error.message });
+  }
+};
+
+const getCurrentPrices = async (req, res) => {
+  try {
+    const prices = await pricingService.getCurrentPrices(req.user.id);
+    res.json(prices);
+  } catch (error) {
+    res.status(400).json({ error: error.message });
+  }
+};
+
+module.exports = { 
+  updateMilkRate, 
+  updateInventoryCategory, 
+  getMilkHistory, 
+  getInventoryCategories, 
+  getCurrentPrices 
+};
