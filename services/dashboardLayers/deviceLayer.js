@@ -3,12 +3,16 @@ const Transaction = require('../../models/transaction');
 const Cooperative = require('../../models/cooperative');
 const logger = require('../../utils/logger');
 
-const getDevices = async (adminId) => {
+const getDevices = async (cooperativeId) => {  // ✅ FIXED: Accept cooperativeId
   try {
-    const cooperative = await Cooperative.findById(adminId);
-    if (!cooperative) throw new Error('Cooperative not found');
-
-    const devices = await Device.find({ approved: true, revoked: false, cooperativeId: cooperative._id });
+    // ✅ FIXED: Use cooperativeId directly (no lookup needed)
+    const devices = await Device.find({ 
+      approved: true, 
+      revoked: false, 
+      cooperativeId 
+    });
+    
+    // ... rest of your logic stays the same
     const healthData = [];
     let totalDevices = 0;
     let activeDevices = 0;
@@ -72,7 +76,7 @@ const getDevices = async (adminId) => {
       }
     };
   } catch (error) {
-    logger.warn('Devices failed', { error: error.message });
+    logger.warn('Devices failed', { error: error.message, coopId: cooperativeId });
     return getDefaultDevices();
   }
 };

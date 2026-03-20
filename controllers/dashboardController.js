@@ -1,22 +1,36 @@
 const dashboardService = require('../services/dashboardService');
 const logger = require('../utils/logger');
 
+const getDevices = async (req, res) => {
+  try {
+    const cooperativeId = req.user.cooperativeId;  // ✅ FIXED: Pass coopId
+    const devices = await dashboardService.getDevices(cooperativeId);
+    res.json(devices);
+  } catch (error) {
+    logger.error('Devices failed', { error: error.message, coopId: req.user?.cooperativeId });
+    res.status(500).json({ error: error.message });
+  }
+};
+
+// ✅ Apply same pattern to ALL endpoints
 const getSummary = async (req, res) => {
   try {
-    const summary = await dashboardService.getSummary();
+    const cooperativeId = req.user.cooperativeId;
+    const summary = await dashboardService.getSummary(cooperativeId);
     res.json(summary);
   } catch (error) {
-    logger.error('Summary failed', { error: error.message });
+    logger.error('Summary failed', { error: error.message, coopId: req.user?.cooperativeId });
     res.status(500).json({ error: error.message });
   }
 };
 
 const getFinancial = async (req, res) => {
   try {
-    const financial = await dashboardService.getFinancial();
+    const cooperativeId = req.user.cooperativeId;
+    const financial = await dashboardService.getFinancial(cooperativeId);
     res.json(financial);
   } catch (error) {
-    logger.error('Financial failed', { error: error.message });
+    logger.error('Financial failed', { error: error.message, coopId: req.user?.cooperativeId });
     res.status(500).json({ error: error.message });
   }
 };
@@ -24,25 +38,14 @@ const getFinancial = async (req, res) => {
 const getAnalytics = async (req, res) => {
   try {
     const { period = 'daily' } = req.query;
-    const analytics = await dashboardService.getAnalytics(period);
+    const cooperativeId = req.user.cooperativeId;
+    const analytics = await dashboardService.getAnalytics(period, cooperativeId);
     res.json(analytics);
   } catch (error) {
-    logger.error('Analytics failed', { error: error.message });
+    logger.error('Analytics failed', { error: error.message, coopId: req.user?.cooperativeId });
     res.status(500).json({ error: error.message });
   }
-};
-
-const getDevices = async (req, res) => {
-  try {
-    const devices = await dashboardService.getDevices();
-    res.json(devices);
-  } catch (error) {
-    logger.error('Devices failed', { error: error.message });
-    res.status(500).json({ error: error.message });
-  }
-};
-
-const getAlerts = async (req, res) => {
+};const getAlerts = async (req, res) => {
   try {
     const alerts = await dashboardService.getAlerts();
     res.json(alerts);
