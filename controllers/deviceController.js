@@ -3,19 +3,18 @@ const logger = require('../utils/logger');
 
 const register = async (req, res) => {
   try {
-    // ✅ FIXED: Get cooperativeId from JWT (like reports controller)
     const cooperativeId = req.user.cooperativeId;
+    const adminId = req.user.id;  // ✅ Send JWT user ID as adminId
     
-    const { deviceId, name, location, type, adminId, uuid, hardware_id } = req.body;
+    const { deviceId, name, location, type, uuid, hardware_id } = req.body;
     
-    // ✅ Pass cooperativeId to service
     const device = await deviceService.registerDevice({
       deviceId, 
       name, 
       location, 
       type, 
-      adminId, 
-      cooperativeId,  // ✅ This was missing!
+      adminId,           // ✅ Pass JWT user ID
+      cooperativeId,
       uuid, 
       hardware_id
     });
@@ -26,6 +25,7 @@ const register = async (req, res) => {
     res.status(400).json({ error: error.message });
   }
 };
+
 
 const approve = async (req, res) => {
   try {
@@ -38,6 +38,7 @@ const approve = async (req, res) => {
     res.status(400).json({ error: error.message });
   }
 };
+
 
 const revoke = async (req, res) => {
   try {
