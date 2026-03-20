@@ -3,12 +3,13 @@ const logger = require('../utils/logger');
 
 const getMonthly = async (req, res) => {
   try {
-    const cooperativeId = req.user.cooperativeId;  // ✅ From JWT
-    const report = await reportService.getMonthlyReport(
-      req.query.year || new Date().getFullYear(),
-      req.query.month || (new Date().getMonth() + 1),
-      cooperativeId  // ✅ Pass cooperativeId
-    );
+    const cooperativeId = req.user.cooperativeId;
+    
+    // ✅ FIXED: Parse query params safely
+    const year = parseInt(req.query.year) || new Date().getFullYear();
+    const month = parseInt(req.query.month) || new Date().getMonth() + 1;
+    
+    const report = await reportService.getMonthlyReport(year, month, cooperativeId);
     res.json(report);
   } catch (error) {
     logger.error('Get monthly report failed', { error: error.message, coopId: req.user.cooperativeId });
