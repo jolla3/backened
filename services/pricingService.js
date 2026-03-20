@@ -111,26 +111,45 @@ const getInventoryCategories = async (cooperativeId) => {
     { $sort: { _id: 1 } } // Sort categories alphabetically
   ]);
 };
+// ✅ PROPER SERVICE
 const getCurrentPrices = async (cooperativeId) => {
   const cooperative = await Cooperative.findById(cooperativeId);
   if (!cooperative) throw new Error('Cooperative not found');
   
   const milkRate = await RateVersion.findOne({ 
-    type: 'milk', cooperativeId: cooperative._id 
-  }).sort({ effective_date: -1 });
+    type: 'milk', 
+    cooperativeId: cooperative._id 
+  })
+  .sort({ effective_date: -1 })
+  .lean();
   
   const categories = await Inventory.aggregate([
     { $match: { cooperativeId: cooperative._id } },
     {
       $group: {
         _id: '$category',
-        avgPrice: { $avg: '$price' },
-        itemCount: { $sum: 1 }
+        items: {
+          $push: {
+            _id: '$_id',
+            name: '$name',
+            price: '$price',
+            stock: '$stock',
+            unit: '$unit',
+            threshold: '$threshold'
+          }
+        },
+        itemCount: { $sum: 1 },
+        avgPrice: { $avg: '$price' }
       }
-    }
+    },
+    { $sort: { _id: 1 } }
   ]);
   
-  return { milkRate, categories };
+  return { 
+    milkRate, 
+    categories,
+    totalItems: categories.reduce((sum, cat) => sum + (cat.itemCount || 0), 0)
+  };
 };
 
 module.exports = { 
