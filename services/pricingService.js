@@ -79,6 +79,7 @@ const getInventoryCategories = async (cooperativeId) => {
             name: '$name',
             price: '$price',
             stock: '$stock',
+            unit: '$unit',
             threshold: '$threshold'
           }
         },
