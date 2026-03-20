@@ -1,6 +1,9 @@
 const reportService = require('../services/reportService');
 const logger = require('../utils/logger');
 
+// ✅ Move json2csv to TOP - fix dynamic import issue
+const { json2csv } = require('json2csv');
+
 const getMonthly = async (req, res) => {
   try {
     const cooperativeId = req.user.cooperativeId;
@@ -16,16 +19,16 @@ const getMonthly = async (req, res) => {
   }
 };
 
-// ✅ FIXED: Use cooperativeId (not adminId) + proper parsing
 const exportCSV = async (req, res) => {
   try {
-    const cooperativeId = req.user.cooperativeId; // ✅ FIXED: Use cooperativeId like getMonthly
+    const cooperativeId = req.user.cooperativeId;
     
     const year = parseInt(req.query.year) || new Date().getFullYear();
     const month = parseInt(req.query.month) || new Date().getMonth() + 1;
     
-    const data = await reportService.getMonthlyReport(year, month, cooperativeId); // ✅ FIXED: Pass cooperativeId
-    const { json2csv } = require('json2csv');
+    const data = await reportService.getMonthlyReport(year, month, cooperativeId);
+    
+    // ✅ json2csv now available at module scope
     const csv = json2csv.parse([data]);
     
     res.setHeader('Content-Type', 'text/csv');
