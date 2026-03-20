@@ -1,66 +1,53 @@
 const Device = require('../models/device');
 const Cooperative = require('../models/cooperative');
-const io = require('../websocket');
-const logger = require('../utils/logger');
 
-const registerDevice = async (uuid, hardwareId, adminId) => {
-  const cooperative = await Cooperative.findById(adminId);
+const registerDevice = async (deviceData) => {
+  const { deviceId, name, location, type, adminId, cooperativeId, uuid, hardware_id } = deviceData;
+  
+  // ✅ Validate cooperative exists
+  const cooperative = await Cooperative.findById(cooperativeId);
   if (!cooperative) throw new Error('Cooperative not found');
-
-  const device = await Device.findOne({ $or: [{ uuid }, { hardware_id: hardwareId }] });
-  if (device) return device;
-
-  const newDevice = await Device.create({
-    uuid,
-    hardware_id: hardwareId,
-    approved: false,
-    cooperativeId: cooperative._id,
-    created_by: adminId
+  
+  // Create device
+  const device = new Device({
+    deviceId: deviceId || uuid || hardware_id,
+    name,
+    location,
+    type,
+    adminId,
+    cooperativeId,
+    status: 'pending'
   });
-
-  logger.info('Device registered', { uuid: newDevice.uuid, cooperativeId: cooperative._id });
-  return newDevice;
+  
+  return await device.save();
 };
 
-const approveDevice = async (deviceId, adminId) => {
-  const device = await Device.findById(deviceId);
-  if (!device) throw new Error('Device not found');
-
-  const cooperative = await Cooperative.findById(adminId);
-  if (!cooperative || device.cooperativeId.toString() !== cooperative._id.toString()) {
-    throw new Error('Unauthorized: Device does not belong to your cooperative');
-  }
-
-  const updatedDevice = await Device.findByIdAndUpdate(
-    deviceId,
-    { approved: true },
+const approveDevice = async (deviceId, cooperativeId) => {
+  const cooperative = await Cooperative.findById(cooperativeId);
+  if (!cooperative) throw new Error('Cooperative not found');
+  
+  const device = await Device.findOneAndUpdate(
+    { _id: deviceId, cooperativeId },
+    { status: 'approved' },
     { new: true }
   );
-
-  io.to('admin').emit('device-approved', { deviceId });
-  return updatedDevice;
+  
+  if (!device) throw new Error('Device not found');
+  return device;
 };
 
-const revokeDevice = async (deviceId, adminId) => {
-  const device = await Device.findById(deviceId);
-  if (!device) throw new Error('Device not found');
-
-  const cooperative = await Cooperative.findById(adminId);
-  if (!cooperative || device.cooperativeId.toString() !== cooperative._id.toString()) {
-    throw new Error('Unauthorized: Device does not belong to your cooperative');
-  }
-
-  const updatedDevice = await Device.findByIdAndUpdate(
-    deviceId,
-    {
-      revoked: true,
-      revoked_timestamp: new Date()
-    },
+const revokeDevice = async (deviceId, cooperativeId) => {
+  const cooperative = await Cooperative.findById(cooperativeId);
+  if (!cooperative) throw new Error('Cooperative not found');
+  
+  const device = await Device.findOneAndUpdate(
+    { _id: deviceId, cooperativeId },
+    { status: 'revoked' },
     { new: true }
   );
-
-  io.to('admin').emit('device-revoked', { deviceId });
-  return updatedDevice;
+  
+  if (!device) throw new Error('Device not found');
+  return device;
 };
 
 module.exports = { registerDevice, approveDevice, revokeDevice };
