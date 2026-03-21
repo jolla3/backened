@@ -39,9 +39,8 @@ const createProduct = async (data, adminId) => {
   });
 
   return await product.save();
-};
+};  
 
-// ✅ FIXED: Simple stock update - NO full document validation
 const deductStock = async (productId, quantity, adminId) => {
   const session = await Inventory.startSession();
   session.startTransaction();
@@ -54,7 +53,6 @@ const deductStock = async (productId, quantity, adminId) => {
       throw new Error(`Insufficient stock: ${product.stock} available`);
     }
 
-    // ✅ SIMPLE STOCK UPDATE - no full validation needed
     product.stock -= quantity;
     product.updated_by = adminId;
     product.updatedAt = new Date();
@@ -80,4 +78,48 @@ const deductStock = async (productId, quantity, adminId) => {
   }
 };
 
-module.exports = { getInventory, createProduct, deductStock };
+// ✅ NEW: Soft delete - set stock to -1 (deleted flag)
+const deleteProduct = async (productId, adminId) => {
+  const session = await Inventory.startSession();
+  session.startTransaction();
+  
+  try {
+    const product = await Inventory.findById(productId).session(session);
+    if (!product) throw new Error('Product not found');
+    
+    if (product.stock > 0) {
+      throw new Error('Cannot delete product with stock > 0. Deduct stock first.');
+    }
+
+    // ✅ SOFT DELETE: Set stock to -1 (deleted flag)
+    product.stock = -1;
+    product.deleted = true;
+    product.deletedAt = new Date();
+    product.deleted_by = adminId;
+    product.updated_by = adminId;
+    product.updatedAt = new Date();
+    
+    await product.save({ session });
+    await session.commitTransaction();
+    
+    logger.info('Product soft deleted', {
+      productId,
+      productName: product.name,
+      adminId
+    });
+    
+    return { 
+      success: true, 
+      message: 'Product deleted successfully',
+      productId 
+    };
+  } catch (error) {
+    await session.abortTransaction();
+    logger.error('Delete product service failed', { error: error.message });
+    throw error;
+  } finally {
+    session.endSession();
+  }
+};
+
+module.exports = { getInventory, createProduct, deductStock, deleteProduct };

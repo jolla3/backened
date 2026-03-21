@@ -1,9 +1,16 @@
 const express = require('express');
 const router = express.Router();
-const { getAlerts, createProduct, deductStock, getInventory } = require('../controllers/inventoryController');
+const { 
+  getInventory, 
+  createProduct, 
+  deductStock, 
+  deleteProduct 
+} = require('../controllers/inventoryController');
 
+// ✅ PROTECTED ROUTES
 router.get('/', getInventory);
 router.post('/', createProduct);
 router.put('/:id/deduct', deductStock);
+router.delete('/:id', deleteProduct); // ✅ NEW DELETE ROUTE
 
 module.exports = router;

@@ -47,7 +47,6 @@ const createProduct = async (req, res) => {
   }
 };
 
-// ✅ FIXED: Only update stock, don't validate full document
 const deductStock = async (req, res) => {
   try {
     const adminId = req.user.id;
@@ -70,4 +69,22 @@ const deductStock = async (req, res) => {
   }
 };
 
-module.exports = {  getInventory, createProduct, deductStock };
+// ✅ NEW: Delete product controller
+const deleteProduct = async (req, res) => {
+  try {
+    const adminId = req.user.id;
+    const productId = req.params.id;
+
+    const result = await inventoryService.deleteProduct(productId, adminId);
+    res.json(result);
+  } catch (error) {
+    logger.error('Delete product failed', { 
+      error: error.message, 
+      adminId: req.user.id,
+      productId: req.params.id
+    });
+    res.status(400).json({ error: error.message });
+  }
+};
+
+module.exports = { getInventory, createProduct, deductStock, deleteProduct };
