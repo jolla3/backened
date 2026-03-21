@@ -3,9 +3,9 @@ const Farmer = require('../../models/farmer');
 const Cooperative = require('../../models/cooperative');
 const logger = require('../../utils/logger');
 
-const getFinancial = async (adminId) => {
+const getFinancial = async (cooperativeId) => {  // ✅ FIXED
   try {
-    const cooperative = await Cooperative.findById(adminId);
+    const cooperative = await Cooperative.findById(cooperativeId);
     if (!cooperative) throw new Error('Cooperative not found');
 
     const now = new Date();
@@ -15,11 +15,11 @@ const getFinancial = async (adminId) => {
     const [milkStats, feedStats, debtStats, todayStats] = await Promise.all([
       Transaction.aggregate([
         { $match: { type: 'milk', cooperativeId: cooperative._id, timestamp_server: { $gte: startOfMonth } } },
-        { $group: { _id: null, totalPayout: { $sum: '$payout' }, totalLitres: { $sum: '$litres' } } }
+        { $group: { _id: null, totalPayout: { $sum: { $ifNull: ['$payout', 0] } }, totalLitres: { $sum: { $ifNull: ['$litres', 0] } } } }
       ]),
       Transaction.aggregate([
         { $match: { type: 'feed', cooperativeId: cooperative._id, timestamp_server: { $gte: startOfMonth } } },
-        { $group: { _id: null, totalRevenue: { $sum: '$cost' }, totalQty: { $sum: '$quantity' } } }
+        { $group: { _id: null, totalRevenue: { $sum: { $ifNull: ['$cost', 0] } }, totalQty: { $sum: { $ifNull: ['$quantity', 0] } } } }
       ]),
       Farmer.aggregate([
         { $match: { cooperativeId: cooperative._id, balance: { $lt: 0 } } },
@@ -27,33 +27,33 @@ const getFinancial = async (adminId) => {
       ]),
       Transaction.aggregate([
         { $match: { type: 'milk', cooperativeId: cooperative._id, timestamp_server: { $gte: startOfToday } } },
-        { $group: { _id: null, totalPayout: { $sum: '$payout' }, totalLitres: { $sum: '$litres' } } }
+        { $group: { _id: null, totalPayout: { $sum: { $ifNull: ['$payout', 0] } }, totalLitres: { $sum: { $ifNull: ['$litres', 0] } } } }
       ])
     ]);
 
     const milkPayout = milkStats[0]?.totalPayout || 0;
     const feedRevenue = feedStats[0]?.totalRevenue || 0;
-    const totalDebt = debtStats[0]?.totalDebt || 0;
+    const totalDebt = Math.abs(debtStats[0]?.totalDebt || 0);
     const todayMilkPayout = todayStats[0]?.totalPayout || 0;
     const todayMilkLitres = todayStats[0]?.totalLitres || 0;
 
     const grossProfit = feedRevenue - milkPayout;
     const profitMargin = feedRevenue > 0 ? (grossProfit / feedRevenue) * 100 : 0;
-    const hasRealData = feedRevenue > 0 && milkPayout > 0;
+    const hasRealData = feedRevenue > 0 || milkPayout > 0;
 
     return {
-      milkRevenue: milkPayout,
-      feedRevenue,
-      farmerDebtTotal: Math.abs(totalDebt),
-      expectedMilkPayout: milkPayout,
-      netCashFlow: grossProfit,
-      profitMargin: hasRealData ? parseFloat(profitMargin.toFixed(2)) : null,
-      todayMilkPayout,
-      todayMilkLitres,
+      milkRevenue: Math.round(milkPayout),
+      feedRevenue: Math.round(feedRevenue),
+      farmerDebtTotal: Math.round(totalDebt),
+      expectedMilkPayout: Math.round(milkPayout),
+      netCashFlow: Math.round(grossProfit),
+      profitMargin: hasRealData ? parseFloat(profitMargin.toFixed(1)) : null,
+      todayMilkPayout: Math.round(todayMilkPayout),
+      todayMilkLitres: Math.round(todayMilkLitres),
       hasRealData
     };
   } catch (error) {
-    logger.warn('Financial failed', { error: error.message });
+    logger.warn('Financial failed', { error: error.message, coopId });
     return getDefaultFinancial();
   }
 };

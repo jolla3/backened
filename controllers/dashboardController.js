@@ -12,6 +12,8 @@ const getSummary = async (req, res) => {
   }
 };
 
+// ... existing endpoints (getFinancial, getAnalytics, etc.)
+
 const getFinancial = async (req, res) => {
   try {
     const cooperativeId = req.user.cooperativeId;
@@ -57,6 +59,7 @@ const getAlerts = async (req, res) => {
   }
 };
 
+
 const getInventory = async (req, res) => {
   try {
     const cooperativeId = req.user.cooperativeId;  // ✅ FIXED
@@ -81,12 +84,53 @@ const getCompleteOverview = async (req, res) => {
 };
 
 
+
+// ✅ NEW ENDPOINTS
+const getCEOStats = async (req, res) => {
+  try {
+    const cooperativeId = req.user.cooperativeId;
+    const stats = await dashboardService.getCEOStats(cooperativeId);
+    res.json(stats);
+  } catch (error) {
+    logger.error('CEOStats failed', { error: error.message, coopId: req.user?.cooperativeId });
+    res.status(500).json({ error: error.message });
+  }
+};
+
+const getIntelligence = async (req, res) => {
+  try {
+    const cooperativeId = req.user.cooperativeId;
+    const intelligence = await dashboardService.getIntelligence(cooperativeId);
+    res.json(intelligence);
+  } catch (error) {
+    logger.error('Intelligence failed', { error: error.message, coopId: req.user?.cooperativeId });
+    res.status(500).json({ error: error.message });
+  }
+};
+
+const getSystemOverview = async (req, res) => {
+  try {
+    const cooperativeId = req.user.cooperativeId;
+    const overview = await dashboardService.getSystemOverview(cooperativeId);
+    res.json(overview);
+  } catch (error) {
+    logger.error('SystemOverview failed', { error: error.message, coopId: req.user?.cooperativeId });
+    res.status(500).json({ error: error.message });
+  }
+};
+
+const getTasks = async (req, res) => {
+  try {
+    const cooperativeId = req.user.cooperativeId;
+    const tasks = await dashboardService.getTasks(cooperativeId);
+    res.json(tasks);
+  } catch (error) {
+    logger.error('Tasks failed', { error: error.message, coopId: req.user?.cooperativeId });
+    res.status(500).json({ error: error.message });
+  }
+};
+
 module.exports = {
-  getSummary,
-  getFinancial,
-  getAnalytics,
-  getDevices,
-  getAlerts,
-  getInventory,
-  getCompleteOverview
+  getSummary, getFinancial, getAnalytics, getDevices, getAlerts, getInventory, getCompleteOverview,
+  getCEOStats, getIntelligence, getSystemOverview, getTasks  // ✅ NEW
 };

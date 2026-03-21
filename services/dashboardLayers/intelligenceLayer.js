@@ -6,68 +6,69 @@ const aiAdvisoryModule = require('../../analytics/aiAdvisory');
 const Cooperative = require('../../models/cooperative');
 const logger = require('../../utils/logger');
 
-const getIntelligenceLayer = async (adminId) => {
-  const cooperative = await Cooperative.findById(adminId);
-  if (!cooperative) throw new Error('Cooperative not found');
-
-  const intelligence = {
-    financialIntelligence: getDefaultFinancialIntelligence(),
-    alerts: [],
-    recommendations: [],
-    predictions: { stockout: [], farmerDropout: [] },
-    sms: getDefaultSmsAnalytics(),
-    aiAdvisory: []
-  };
-
+const getIntelligenceLayer = async (cooperativeId) => {  // ✅ FIXED
   try {
-    intelligence.financialIntelligence = await financialAnalytics.getFinancialIntelligence(adminId);
-  } catch (error) {
-    logger.warn('Financial intelligence failed', { error: error.message });
-  }
+    const cooperative = await Cooperative.findById(cooperativeId);
+    if (!cooperative) throw new Error('Cooperative not found');
 
-  try {
-    intelligence.alerts = await alertsAndRecommendations.getSmartAlerts(adminId);
-  } catch (error) {
-    logger.warn('Smart alerts failed', { error: error.message });
-  }
+    const intelligence = {
+      financialIntelligence: getDefaultFinancialIntelligence(),
+      alerts: [],
+      recommendations: [],
+      predictions: { stockout: [], farmerDropout: [] },
+      sms: getDefaultSmsAnalytics(),
+      aiAdvisory: []
+    };
 
-  try {
-    intelligence.recommendations = await alertsAndRecommendations.getRecommendations(adminId);
-  } catch (error) {
-    logger.warn('Recommendations failed', { error: error.message });
-  }
+    const modules = [
+      { name: 'financialIntelligence', fn: () => financialAnalytics.getFinancialIntelligence(cooperativeId) },
+      { name: 'alerts', fn: () => alertsAndRecommendations.getSmartAlerts(cooperativeId) },
+      { name: 'recommendations', fn: () => alertsAndRecommendations.getRecommendations(cooperativeId) },
+      { name: 'predictions.stockout', fn: () => predictiveAnalytics.predictStockout(cooperativeId) },
+      { name: 'predictions.farmerDropout', fn: () => predictiveAnalytics.predictFarmerDropout(cooperativeId) },
+      { name: 'sms', fn: () => smsAnalyticsModule.getSmsAnalytics(cooperativeId) },
+      { name: 'aiAdvisory', fn: () => aiAdvisoryModule.getAiAdvisory(cooperativeId) }
+    ];
 
-  try {
-    intelligence.predictions.stockout = await predictiveAnalytics.predictStockout(adminId);
-  } catch (error) {
-    logger.warn('Stockout predictions failed', { error: error.message });
-  }
+    for (const module of modules) {
+      try {
+        const result = await module.fn();
+        if (module.name.includes('.')) {
+          const [parent, child] = module.name.split('.');
+          intelligence[parent][child] = result;
+        } else {
+          intelligence[module.name] = result;
+        }
+      } catch (error) {
+        logger.warn(`${module.name} failed`, { error: error.message, coopId: cooperativeId });
+      }
+    }
 
-  try {
-    intelligence.predictions.farmerDropout = await predictiveAnalytics.predictFarmerDropout(adminId);
+    return intelligence;
   } catch (error) {
-    logger.warn('Farmer dropout predictions failed', { error: error.message });
+    logger.error('IntelligenceLayer failed', { error: error.message, coopId });
+    return getDefaultIntelligenceLayer();
   }
-
-  try {
-    intelligence.sms = await smsAnalyticsModule.getSmsAnalytics(adminId);
-  } catch (error) {
-    logger.warn('SMS analytics failed', { error: error.message });
-  }
-
-  try {
-    intelligence.aiAdvisory = await aiAdvisoryModule.getAiAdvisory(adminId);
-  } catch (error) {
-    logger.warn('AI advisory failed', { error: error.message });
-  }
-
-  return intelligence;
 };
 
 const getDefaultFinancialIntelligence = () => ({
-  milkRevenue: 0, feedRevenue: 0, farmerDebtTotal: 0, expectedMilkPayout: 0, netCashFlow: 0, profitMargin: 0, todayMilkPayout: 0, todayMilkLitres: 0
+  milkRevenue: 0, feedRevenue: 0, farmerDebtTotal: 0, expectedMilkPayout: 0, netCashFlow: 0, profitMargin: 0
 });
 
-const getDefaultSmsAnalytics = () => ({ smsSent: 0, smsFailed: 0, deliveryRate: '0%', receiptsVerifiedToday: 0 });
+const getDefaultSmsAnalytics = () => ({ 
+  smsSent: 0, 
+  smsFailed: 0, 
+  deliveryRate: '0%', 
+  receiptsVerifiedToday: 0 
+});
+
+const getDefaultIntelligenceLayer = () => ({
+  financialIntelligence: getDefaultFinancialIntelligence(),
+  alerts: [],
+  recommendations: [],
+  predictions: { stockout: [], farmerDropout: [] },
+  sms: getDefaultSmsAnalytics(),
+  aiAdvisory: []
+});
 
 module.exports = { getIntelligenceLayer };

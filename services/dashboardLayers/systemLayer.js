@@ -7,10 +7,13 @@ const RateVersion = require('../../models/rateVersion');
 const Cooperative = require('../../models/cooperative');
 const logger = require('../../utils/logger');
 
-const getSystemOverview = async (adminId) => {
+const getSystemOverview = async (cooperativeId) => {  // ✅ FIXED
   try {
-    const cooperative = await Cooperative.findById(adminId);
+    const cooperative = await Cooperative.findById(cooperativeId);
     if (!cooperative) throw new Error('Cooperative not found');
+
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
 
     const [
       totalFarmers,
@@ -25,35 +28,35 @@ const getSystemOverview = async (adminId) => {
       Porter.countDocuments({ cooperativeId: cooperative._id }),
       Inventory.countDocuments({ cooperativeId: cooperative._id }),
       RateVersion.countDocuments({ cooperativeId: cooperative._id }),
-      Device.countDocuments({ cooperativeId: cooperative._id }),
+      Device.countDocuments({ cooperativeId: cooperative._id, revoked: false }),
       Inventory.aggregate([
         { $match: { cooperativeId: cooperative._id, $expr: { $lte: ['$stock', '$threshold'] } } },
         { $count: 'count' }
       ]),
-      getTodayMetrics(adminId)
+      getTodayMetrics(cooperativeId)
     ]);
+
+    const healthScore = calculateHealthScore({
+      totalTransactions: todayMetrics.transactionsToday,
+      lowStock: lowStockAlerts[0]?.count || 0,
+      totalDevices,
+      totalFarmers
+    });
 
     return {
       systemHealth: {
-        healthScore: 100,
-        status: 'healthy',
+        healthScore,
+        status: healthScore >= 80 ? 'healthy' : healthScore >= 50 ? 'warning' : 'critical',
         totalTransactions: todayMetrics.transactionsToday,
-        pendingTransactions: 0,
-        failedTransactions: 0,
+        pendingTransactions: 0,  // Would need status field
+        failedTransactions: 0,   // Would need error field
         totalFarmers,
         totalPorters,
         totalDevices,
         lowStockProducts: lowStockAlerts[0]?.count || 0,
-        issues: []
+        issues: getSystemIssues(lowStockAlerts[0]?.count || 0, totalDevices)
       },
-      todayMetrics: {
-        transactionsToday: todayMetrics.transactionsToday,
-        milkToday: { litres: todayMetrics.milkToday.litres, payout: todayMetrics.milkToday.payout },
-        feedToday: { quantity: todayMetrics.feedToday.quantity, cost: todayMetrics.feedToday.cost },
-        farmersToday: todayMetrics.farmersToday,
-        portersToday: todayMetrics.portersToday,
-        devicesToday: todayMetrics.devicesToday
-      },
+      todayMetrics,
       totals: {
         totalFarmers,
         totalPorters,
@@ -64,13 +67,13 @@ const getSystemOverview = async (adminId) => {
       }
     };
   } catch (error) {
-    logger.warn('System overview failed, returning defaults', { error: error.message });
+    logger.error('System overview failed', { error: error.message, coopId });
     return getDefaultSystemOverview();
   }
 };
 
-const getTodayMetrics = async (adminId) => {
-  const cooperative = await Cooperative.findById(adminId);
+const getTodayMetrics = async (cooperativeId) => {
+  const cooperative = await Cooperative.findById(cooperativeId);
   const today = new Date();
   today.setHours(0, 0, 0, 0);
 
@@ -85,11 +88,11 @@ const getTodayMetrics = async (adminId) => {
     Transaction.countDocuments({ cooperativeId: cooperative._id, timestamp_server: { $gte: today } }),
     Transaction.aggregate([
       { $match: { type: 'milk', cooperativeId: cooperative._id, timestamp_server: { $gte: today } } },
-      { $group: { _id: null, totalLitres: { $sum: '$litres' }, totalPayout: { $sum: '$payout' } } }
+      { $group: { _id: null, totalLitres: { $sum: { $ifNull: ['$litres', 0] } }, totalPayout: { $sum: { $ifNull: ['$payout', 0] } } } }
     ]),
     Transaction.aggregate([
       { $match: { type: 'feed', cooperativeId: cooperative._id, timestamp_server: { $gte: today } } },
-      { $group: { _id: null, totalQuantity: { $sum: '$quantity' }, totalCost: { $sum: '$cost' } } }
+      { $group: { _id: null, totalQuantity: { $sum: { $ifNull: ['$quantity', 0] } }, totalCost: { $sum: { $ifNull: ['$cost', 0] } } } }
     ]),
     Farmer.countDocuments({ cooperativeId: cooperative._id, createdAt: { $gte: today } }),
     Porter.countDocuments({ cooperativeId: cooperative._id, createdAt: { $gte: today } }),
@@ -98,18 +101,67 @@ const getTodayMetrics = async (adminId) => {
 
   return {
     transactionsToday,
-    milkToday: { litres: milkToday[0]?.totalLitres || 0, payout: milkToday[0]?.totalPayout || 0 },
-    feedToday: { quantity: feedToday[0]?.totalQuantity || 0, cost: feedToday[0]?.totalCost || 0 },
+    milkToday: { 
+      litres: milkToday[0]?.totalLitres || 0, 
+      payout: milkToday[0]?.totalPayout || 0 
+    },
+    feedToday: { 
+      quantity: feedToday[0]?.totalQuantity || 0, 
+      cost: feedToday[0]?.totalCost || 0 
+    },
     farmersToday,
     portersToday,
     devicesToday
   };
 };
 
+const calculateHealthScore = ({ totalTransactions, lowStock, totalDevices, totalFarmers }) => {
+  let score = 100;
+  
+  if (lowStock > 3) score -= 25;
+  if (totalTransactions === 0) score -= 20;
+  if (totalDevices === 0) score -= 15;
+  if (totalFarmers === 0) score -= 30;
+  
+  return Math.max(0, score);
+};
+
+const getSystemIssues = (lowStock, totalDevices) => {
+  const issues = [];
+  if (lowStock > 0) issues.push(`${lowStock} low stock items`);
+  if (totalDevices === 0) issues.push('No devices registered');
+  return issues;
+};
+
 const getDefaultSystemOverview = () => ({
-  systemHealth: { healthScore: 0, status: 'unknown', totalTransactions: 0, issues: [] },
-  todayMetrics: { transactionsToday: 0, milkToday: { litres: 0, payout: 0 }, feedToday: { quantity: 0, cost: 0 } },
-  totals: { totalFarmers: 0, totalPorters: 0, totalProducts: 0, totalRates: 0, totalDevices: 0, lowStockAlerts: 0 }
+  systemHealth: { 
+    healthScore: 0, 
+    status: 'unknown', 
+    totalTransactions: 0, 
+    pendingTransactions: 0, 
+    failedTransactions: 0, 
+    totalFarmers: 0, 
+    totalPorters: 0, 
+    totalDevices: 0, 
+    lowStockProducts: 0,
+    issues: []
+  },
+  todayMetrics: { 
+    transactionsToday: 0, 
+    milkToday: { litres: 0, payout: 0 }, 
+    feedToday: { quantity: 0, cost: 0 },
+    farmersToday: 0,
+    portersToday: 0,
+    devicesToday: 0
+  },
+  totals: { 
+    totalFarmers: 0, 
+    totalPorters: 0, 
+    totalProducts: 0, 
+    totalRates: 0, 
+    totalDevices: 0, 
+    lowStockAlerts: 0 
+  }
 });
 
 module.exports = { getSystemOverview };
