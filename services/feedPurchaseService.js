@@ -79,7 +79,6 @@ const getFeedPurchaseFarmer = async (identifier, cooperativeId) => {
   };
 };
 
-// ✅ FIXED: No balance block + SMS non-blocking
 const purchaseFeed = async (data, session) => {
   const { farmerId, products, adminId, cooperativeId } = data;
 
@@ -104,9 +103,28 @@ const purchaseFeed = async (data, session) => {
   const transactions = [];
   const smsItems = [];
 
-  for (const { productId, quantity } of products) {
+  for (const productData of products) {
+    // ✅ FIXED: Validate required fields BEFORE database lookup
+    const { productId, quantity, category, price } = productData;
+    
+    if (!productId) throw new Error('Product ID is required');
+    if (!mongoose.Types.ObjectId.isValid(productId)) throw new Error('Invalid product ID');
+    if (!category) throw new Error('Product category is required');
+    if (price === undefined || price === null || isNaN(Number(price))) {
+      throw new Error('Product price is required and must be a valid number');
+    }
+    if (!Number.isInteger(quantity) || quantity <= 0) {
+      throw new Error('Product quantity must be a positive integer');
+    }
+
     const product = await Inventory.findById(productId).session(session);
     if (!product) throw new Error(`Product not found: ${productId}`);
+    
+    // ✅ FIXED: Use provided price/category from frontend (allows custom pricing)
+    const unitPrice = Number(price);
+    const cost = quantity * unitPrice;
+    totalCost += cost;
+
     if (product.stock < quantity) {
       throw new Error(`Insufficient stock: ${product.name} (${product.stock} available)`);
     }
@@ -114,40 +132,41 @@ const purchaseFeed = async (data, session) => {
       throw new Error(`Product ${product.name} not authorized`);
     }
 
-    const unitPrice = Number(product.price) || 0;
-    const cost = quantity * unitPrice;
-    totalCost += cost;
-
     const transactionId = new mongoose.Types.ObjectId();
     const uniqueKey = `feed-${Date.now()}-${farmerId}-${productId}-${transactionId}`;
 
     const transactionData = {
       receipt_num: uniqueKey,
-      qr_hash: uniqueKey,        // ✅ FIXED: Unique for index
+      qr_hash: uniqueKey,
       idempotency_key: uniqueKey,
       type: 'feed',
       quantity,
       cost,
+      payout: 0, // feed purchases don't payout
       farmer_id: farmerId,
       cooperativeId: cooperative._id,
-      status: 'completed'
+      admin_id: adminId,
+      status: 'completed',
+      category: category, // ✅ Store category
+      product_id: productId // ✅ Store product reference
     };
 
     const transaction = await Transaction.create([transactionData], { session });
     transactions.push(transaction[0]);
 
+    // Update inventory stock
     product.stock -= quantity;
     await product.save({ session });
 
-    smsItems.push(`${quantity} ${product.name}`);
+    smsItems.push(`${quantity} ${product.name} (${category})`);
   }
 
-  // ✅ SHOW BALANCE BUT DON'T BLOCK PURCHASE
+  // Calculate balance (non-blocking)
   const farmerBalanceInfo = await getFeedPurchaseFarmer(farmer.farmer_code || farmer.phone, cooperative._id);
   const balanceBefore = farmerBalanceInfo.milkBalance;
-  const balanceAfter = balanceBefore - totalCost;  // Can be negative ✅
+  const balanceAfter = balanceBefore - totalCost;
 
-  // ✅ SMS NON-BLOCKING (continues even if SMS fails)
+  // SMS (non-blocking)
   if (farmer.phone) {
     try {
       const smsMessage = `🛒 ${cooperative.name}\nDear ${farmer.name},\n✅ Feed Purchase:\n${smsItems.join('\n')}\n💰 TOTAL: KES ${totalCost.toLocaleString()}\n💳 Balance: KES ${balanceAfter.toLocaleString()}`;
@@ -176,7 +195,7 @@ const purchaseFeed = async (data, session) => {
     transactions,
     totalCost,
     balanceBefore,
-    balanceAfter  // Can be negative ✅
+    balanceAfter
   };
 };
 
