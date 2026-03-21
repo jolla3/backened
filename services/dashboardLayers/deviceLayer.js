@@ -3,21 +3,25 @@ const Transaction = require('../../models/transaction');
 const Cooperative = require('../../models/cooperative');
 const logger = require('../../utils/logger');
 
-const getDevices = async (cooperativeId) => {  // ✅ FIXED: Accept cooperativeId
+const getDevices = async (cooperativeId) => {
   try {
-    // ✅ FIXED: Use cooperativeId directly (no lookup needed)
+    // ✅ VALIDATE: Cooperative exists
+    const cooperative = await Cooperative.findById(cooperativeId);
+    if (!cooperative) throw new Error('Cooperative not found');
+    
+    // ✅ FIXED: Show ALL devices (pending + approved, exclude revoked only)
     const devices = await Device.find({ 
-      approved: true, 
-      revoked: false, 
-      cooperativeId 
+      cooperativeId,
+      revoked: false  // Only exclude revoked
     });
     
-    // ... rest of your logic stays the same
     const healthData = [];
     let totalDevices = 0;
     let activeDevices = 0;
     let inactiveDevices = 0;
     let pendingDevices = 0;
+    let approvedDevices = 0;
+    let pendingApproval = 0;
 
     for (const device of devices) {
       const lastTx = await Transaction.findOne({ device_id: device.uuid }).sort({ timestamp_server: -1 });
@@ -42,33 +46,49 @@ const getDevices = async (cooperativeId) => {  // ✅ FIXED: Accept cooperativeI
       if (healthScore < 50) status = 'critical';
       else if (healthScore < 75) status = 'warning';
 
-      totalDevices++;
-      if (hoursSinceSync !== null && hoursSinceSync <= 24 && todayTx > 0) {
-        activeDevices++;
-      } else if (hoursSinceSync !== null && hoursSinceSync > 24) {
-        inactiveDevices++;
+      // ✅ Track approval status
+      if (device.approved) {
+        approvedDevices++;
+        totalDevices++;  // Only count approved for health stats
+        if (hoursSinceSync !== null && hoursSinceSync <= 24 && todayTx > 0) {
+          activeDevices++;
+        } else if (hoursSinceSync !== null && hoursSinceSync > 24) {
+          inactiveDevices++;
+        }
+      } else {
+        pendingApproval++;
       }
-      if (pendingTx > 0) {
-        pendingDevices++;
-      }
+      
+      if (pendingTx > 0) pendingDevices++;
 
       healthData.push({
+        _id: device._id,
+        uuid: device.uuid,
         deviceId: device.uuid,
         hardwareId: device.hardware_id,
+        name: device.name || 'Unnamed Device',
+        location: device.location || 'Unknown',
+        type: device.type || 'Standard',
+        status: device.approved ? 'approved' : 'pending',
+        approved: device.approved,
+        revoked: device.revoked,
         lastSync: lastTx?.timestamp_server || null,
         hoursSinceSync: hoursSinceSync !== null ? hoursSinceSync.toFixed(1) : null,
         pendingTransactions: pendingTx,
         todayTransactions: todayTx,
         healthScore,
-        status,
+        healthStatus: status,
+        last_seen: device.last_seen,
         autoSyncEnabled: true
       });
     }
 
     return {
-      health: healthData.sort((a, b) => a.healthScore - b.healthScore),
+      health: healthData.sort((a, b) => b.healthScore - a.healthScore),  // Best first
       summary: {
-        totalDevices,
+        totalDevices: devices.length,           // All devices
+        approvedDevices,
+        pendingApproval,
         activeDevices,
         inactiveDevices,
         pendingDevices,
@@ -82,12 +102,11 @@ const getDevices = async (cooperativeId) => {  // ✅ FIXED: Accept cooperativeI
 };
 
 const getDefaultDevices = () => ({
-  totalDevices: 0,
-  activeDevices: 0,
-  inactiveDevices: 0,
-  pendingDevices: 0,
-  syncRate: 0,
-  health: []
+  health: [],
+  summary: { 
+    totalDevices: 0, approvedDevices: 0, pendingApproval: 0,
+    activeDevices: 0, inactiveDevices: 0, pendingDevices: 0, syncRate: 0 
+  }
 });
 
 module.exports = { getDevices };

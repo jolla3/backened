@@ -1,18 +1,6 @@
 const dashboardService = require('../services/dashboardService');
 const logger = require('../utils/logger');
 
-const getDevices = async (req, res) => {
-  try {
-    const cooperativeId = req.user.cooperativeId;  // ✅ FIXED: Pass coopId
-    const devices = await dashboardService.getDevices(cooperativeId);
-    res.json(devices);
-  } catch (error) {
-    logger.error('Devices failed', { error: error.message, coopId: req.user?.cooperativeId });
-    res.status(500).json({ error: error.message });
-  }
-};
-
-// ✅ Apply same pattern to ALL endpoints
 const getSummary = async (req, res) => {
   try {
     const cooperativeId = req.user.cooperativeId;
@@ -45,22 +33,37 @@ const getAnalytics = async (req, res) => {
     logger.error('Analytics failed', { error: error.message, coopId: req.user?.cooperativeId });
     res.status(500).json({ error: error.message });
   }
-};const getAlerts = async (req, res) => {
+};
+
+const getDevices = async (req, res) => {
   try {
-    const alerts = await dashboardService.getAlerts();
+    const cooperativeId = req.user.cooperativeId;
+    const devices = await dashboardService.getDevices(cooperativeId);
+    res.json(devices);
+  } catch (error) {
+    logger.error('Devices failed', { error: error.message, coopId: req.user?.cooperativeId });
+    res.status(500).json({ error: error.message });
+  }
+};
+
+const getAlerts = async (req, res) => {
+  try {
+    const cooperativeId = req.user.cooperativeId;  // ✅ FIXED
+    const alerts = await dashboardService.getAlerts(cooperativeId);
     res.json(alerts);
   } catch (error) {
-    logger.error('Alerts failed', { error: error.message });
+    logger.error('Alerts failed', { error: error.message, coopId: req.user?.cooperativeId });
     res.status(500).json({ error: error.message });
   }
 };
 
 const getInventory = async (req, res) => {
   try {
-    const inventory = await dashboardService.getInventory();
+    const cooperativeId = req.user.cooperativeId;  // ✅ FIXED
+    const inventory = await dashboardService.getInventory(cooperativeId);
     res.json(inventory);
   } catch (error) {
-    logger.error('Inventory failed', { error: error.message });
+    logger.error('Inventory failed', { error: error.message, coopId: req.user?.cooperativeId });
     res.status(500).json({ error: error.message });
   }
 };
@@ -68,13 +71,15 @@ const getInventory = async (req, res) => {
 const getCompleteOverview = async (req, res) => {
   try {
     const { period = 'daily' } = req.query;
-    const overview = await dashboardService.getCompleteOverview(period);
+    const cooperativeId = req.user.cooperativeId;  // ✅ FIXED
+    const overview = await dashboardService.getCompleteOverview(period, cooperativeId);
     res.json(overview);
   } catch (error) {
-    logger.error('Overview failed', { error: error.message });
+    logger.error('Overview failed', { error: error.message, coopId: req.user?.cooperativeId });
     res.status(500).json({ error: error.message });
   }
 };
+
 
 module.exports = {
   getSummary,

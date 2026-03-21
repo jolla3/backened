@@ -8,69 +8,70 @@ const inventoryLayer = require('./dashboardLayers/inventoryLayer');
 const logger = require('../utils/logger');
 
 // ✅ FIXED: All functions now accept adminId
-const getSummary = async (adminId) => {
+// ✅ FIXED: Accept & pass cooperativeId everywhere
+const getSummary = async (cooperativeId) => {
   try {
-    return await summaryLayer.getSummary(adminId);
+    return await summaryLayer.getSummary(cooperativeId);
   } catch (error) {
-    logger.warn('Summary failed', { error: error.message, adminId });
+    logger.warn('Summary failed', { error: error.message, coopId: cooperativeId });
     return getDefaultSummary();
   }
 };
 
-const getFinancial = async (adminId) => {
+const getFinancial = async (cooperativeId) => {
   try {
-    return await financialLayer.getFinancial(adminId);
+    return await financialLayer.getFinancial(cooperativeId);
   } catch (error) {
-    logger.warn('Financial failed', { error: error.message, adminId });
+    logger.warn('Financial failed', { error: error.message, coopId: cooperativeId });
     return getDefaultFinancial();
   }
 };
 
-const getAnalytics = async (period = 'daily', adminId) => {
+const getAnalytics = async (period = 'daily', cooperativeId) => {
   try {
-    return await analyticsLayer.getAnalytics(period, adminId);
+    return await analyticsLayer.getAnalytics(period, cooperativeId);
   } catch (error) {
-    logger.warn('Analytics failed', { error: error.message, adminId });
+    logger.warn('Analytics failed', { error: error.message, coopId: cooperativeId });
     return getDefaultAnalytics();
   }
 };
 
-const getDevices = async (adminId) => {
+const getDevices = async (cooperativeId) => {
   try {
-    return await deviceLayer.getDevices(adminId);
+    return await deviceLayer.getDevices(cooperativeId);
   } catch (error) {
-    logger.warn('Devices failed', { error: error.message, adminId });
+    logger.warn('Devices failed', { error: error.message, coopId: cooperativeId });
     return getDefaultDevices();
   }
 };
 
-const getAlerts = async (adminId) => {
+const getAlerts = async (cooperativeId) => {
   try {
-    return await alertLayer.getAlerts(adminId);
+    return await alertLayer.getAlerts(cooperativeId);
   } catch (error) {
-    logger.warn('Alerts failed', { error: error.message, adminId });
+    logger.warn('Alerts failed', { error: error.message, coopId: cooperativeId });
     return getDefaultAlerts();
   }
 };
 
-const getInventory = async (adminId) => {
+const getInventory = async (cooperativeId) => {
   try {
-    return await inventoryLayer.getInventory(adminId);
+    return await inventoryLayer.getInventory(cooperativeId);
   } catch (error) {
-    logger.warn('Inventory failed', { error: error.message, adminId });
+    logger.warn('Inventory failed', { error: error.message, coopId: cooperativeId });
     return getDefaultInventory();
   }
 };
 
-const getCompleteOverview = async (period = 'daily', adminId) => {
+const getCompleteOverview = async (period = 'daily', cooperativeId) => {
   try {
     const [summary, financial, analytics, devices, alerts, inventory] = await Promise.all([
-      getSummary(adminId),
-      getFinancial(adminId),
-      getAnalytics(period, adminId),
-      getDevices(adminId),
-      getAlerts(adminId),
-      getInventory(adminId)
+      getSummary(cooperativeId),
+      getFinancial(cooperativeId),
+      getAnalytics(period, cooperativeId),
+      getDevices(cooperativeId),
+      getAlerts(cooperativeId),
+      getInventory(cooperativeId)
     ]);
 
     return {
@@ -83,11 +84,10 @@ const getCompleteOverview = async (period = 'daily', adminId) => {
       inventory
     };
   } catch (error) {
-    logger.error('Overview failed', { error: error.message, adminId });
+    logger.error('Overview failed', { error: error.message, coopId: cooperativeId });
     throw error;
   }
 };
-
 // ✅ Defaults (Keep as is)
 const getDefaultSummary = () => ({
   milkToday: 0, milkYesterday: 0, milkThisWeek: 0, milkThisMonth: 0,
