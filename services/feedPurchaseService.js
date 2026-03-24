@@ -4,6 +4,7 @@ const Inventory = require('../models/inventory');
 const Farmer = require('../models/farmer');
 const Cooperative = require('../models/cooperative');
 const smsService = require('./smsService');
+const transactionService = require('./transactionService'); // ✅ IMPORT TRANSACTION SERVICE
 const logger = require('../utils/logger');
 
 const getFeedPurchaseFarmer = async (identifier, cooperativeId) => {
@@ -103,6 +104,9 @@ const purchaseFeed = async (data, session) => {
   const transactions = [];
   const smsItems = [];
 
+  // ✅ Use cooperative._id as branch_id for feed purchases
+  const branchId = cooperative._id.toString();
+
   for (const productData of products) {
     // ✅ FIXED: Validate required fields BEFORE database lookup
     const { productId, quantity, category, price } = productData;
@@ -120,7 +124,7 @@ const purchaseFeed = async (data, session) => {
     const product = await Inventory.findById(productId).session(session);
     if (!product) throw new Error(`Product not found: ${productId}`);
     
-    // ✅ FIXED: Use provided price/category from frontend (allows custom pricing)
+    // ✅ Use provided price/category from frontend (allows custom pricing)
     const unitPrice = Number(price);
     const cost = quantity * unitPrice;
     totalCost += cost;
@@ -132,13 +136,21 @@ const purchaseFeed = async (data, session) => {
       throw new Error(`Product ${product.name} not authorized`);
     }
 
+    // ✅ USE TRANSACTION SERVICE FUNCTIONS
+    const receiptNum = await transactionService.generateReceiptNum(session);
+    const serverSeqNum = await transactionService.generateServerSeqNum(session, branchId);
+    
+    // Generate proper idempotency key and QR hash
     const transactionId = new mongoose.Types.ObjectId();
-    const uniqueKey = `feed-${Date.now()}-${farmerId}-${productId}-${transactionId}`;
+    const idempotencyKey = `feed-${Date.now()}-${farmerId}-${productId}-${transactionId}`;
+    const qrHash = `FEED-${receiptNum}-${serverSeqNum}`; // Simple hash for feed (can enhance later)
 
     const transactionData = {
-      receipt_num: uniqueKey,
-      qr_hash: uniqueKey,
-      idempotency_key: uniqueKey,
+      // ✅ PROPER TRANSACTION SERVICE FIELDS
+      receipt_num: receiptNum,
+      server_seq_num: serverSeqNum,
+      qr_hash: qrHash,
+      idempotency_key: idempotencyKey,
       type: 'feed',
       quantity,
       cost,
@@ -147,8 +159,11 @@ const purchaseFeed = async (data, session) => {
       cooperativeId: cooperative._id,
       admin_id: adminId,
       status: 'completed',
-      category: category, // ✅ Store category
-      product_id: productId // ✅ Store product reference
+      category: category,
+      product_id: productId,
+      // ✅ Additional feed-specific fields
+      timestamp_server: new Date(),
+      timestamp_local: new Date()
     };
 
     const transaction = await Transaction.create([transactionData], { session });
@@ -166,10 +181,22 @@ const purchaseFeed = async (data, session) => {
   const balanceBefore = farmerBalanceInfo.milkBalance;
   const balanceAfter = balanceBefore - totalCost;
 
+  // ✅ DEDUCT FROM FARMER BALANCE (atomic operation)
+  if (balanceAfter < 0) {
+    throw new Error(`Insufficient balance. Available: KES ${balanceBefore.toLocaleString()}, Required: KES ${totalCost.toLocaleString()}`);
+  }
+
+  // Atomic balance deduction
+  await Farmer.findByIdAndUpdate(
+    farmerId,
+    { $inc: { balance: -totalCost } },
+    { session }
+  );
+
   // SMS (non-blocking)
   if (farmer.phone) {
     try {
-      const smsMessage = `🛒 ${cooperative.name}\nDear ${farmer.name},\n✅ Feed Purchase:\n${smsItems.join('\n')}\n💰 TOTAL: KES ${totalCost.toLocaleString()}\n💳 Balance: KES ${balanceAfter.toLocaleString()}`;
+      const smsMessage = `🛒 ${cooperative.name}\nDear ${farmer.name},\n✅ Feed Purchase:\n${smsItems.join('\n')}\n💰 TOTAL: KES ${totalCost.toLocaleString()}\n💳 New Balance: KES ${balanceAfter.toLocaleString()}`;
       await smsService.sendSMS(farmer.phone, smsMessage);
     } catch (smsError) {
       logger.warn('SMS failed but purchase completed', { 
@@ -185,7 +212,8 @@ const purchaseFeed = async (data, session) => {
     productsCount: products.length, 
     totalCost,
     balanceBefore,
-    balanceAfter
+    balanceAfter,
+    receiptNums: transactions.map(t => t.receipt_num)
   });
 
   return {
