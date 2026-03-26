@@ -4,7 +4,7 @@ const Inventory = require('../models/inventory');
 const Farmer = require('../models/farmer');
 const Cooperative = require('../models/cooperative');
 const smsService = require('./smsService');
-const transactionService = require('./transactionService'); // ✅ IMPORT TRANSACTION SERVICE
+const transactionService = require('./transactionService');
 const logger = require('../utils/logger');
 
 const getFeedPurchaseFarmer = async (identifier, cooperativeId) => {
@@ -108,7 +108,6 @@ const purchaseFeed = async (data, session) => {
   const branchId = cooperative._id.toString();
 
   for (const productData of products) {
-    // ✅ FIXED: Validate required fields BEFORE database lookup
     const { productId, quantity, category, price } = productData;
     
     if (!productId) throw new Error('Product ID is required');
@@ -124,7 +123,6 @@ const purchaseFeed = async (data, session) => {
     const product = await Inventory.findById(productId).session(session);
     if (!product) throw new Error(`Product not found: ${productId}`);
     
-    // ✅ Use provided price/category from frontend (allows custom pricing)
     const unitPrice = Number(price);
     const cost = quantity * unitPrice;
     totalCost += cost;
@@ -136,17 +134,15 @@ const purchaseFeed = async (data, session) => {
       throw new Error(`Product ${product.name} not authorized`);
     }
 
-    // ✅ USE TRANSACTION SERVICE FUNCTIONS
+    // ✅ USE TRANSACTION SERVICE FUNCTIONS - PROPER SEQUENTIAL NUMBERS
     const receiptNum = await transactionService.generateReceiptNum(session);
     const serverSeqNum = await transactionService.generateServerSeqNum(session, branchId);
     
-    // Generate proper idempotency key and QR hash
     const transactionId = new mongoose.Types.ObjectId();
     const idempotencyKey = `feed-${Date.now()}-${farmerId}-${productId}-${transactionId}`;
-    const qrHash = `FEED-${receiptNum}-${serverSeqNum}`; // Simple hash for feed (can enhance later)
+    const qrHash = `FEED-${receiptNum}-${serverSeqNum}`;
 
     const transactionData = {
-      // ✅ PROPER TRANSACTION SERVICE FIELDS
       receipt_num: receiptNum,
       server_seq_num: serverSeqNum,
       qr_hash: qrHash,
@@ -154,14 +150,13 @@ const purchaseFeed = async (data, session) => {
       type: 'feed',
       quantity,
       cost,
-      payout: 0, // feed purchases don't payout
+      payout: 0,
       farmer_id: farmerId,
       cooperativeId: cooperative._id,
       admin_id: adminId,
       status: 'completed',
       category: category,
       product_id: productId,
-      // ✅ Additional feed-specific fields
       timestamp_server: new Date(),
       timestamp_local: new Date()
     };
@@ -176,27 +171,18 @@ const purchaseFeed = async (data, session) => {
     smsItems.push(`${quantity} ${product.name} (${category})`);
   }
 
-  // Calculate balance (non-blocking)
+  // ✅ SHOW BALANCE FOR INFO ONLY - NO BLOCKING
   const farmerBalanceInfo = await getFeedPurchaseFarmer(farmer.farmer_code || farmer.phone, cooperative._id);
   const balanceBefore = farmerBalanceInfo.milkBalance;
   const balanceAfter = balanceBefore - totalCost;
 
-  // ✅ DEDUCT FROM FARMER BALANCE (atomic operation)
-  if (balanceAfter < 0) {
-    throw new Error(`Insufficient balance. Available: KES ${balanceBefore.toLocaleString()}, Required: KES ${totalCost.toLocaleString()}`);
-  }
-
-  // Atomic balance deduction
-  await Farmer.findByIdAndUpdate(
-    farmerId,
-    { $inc: { balance: -totalCost } },
-    { session }
-  );
+  // ✅ NO BALANCE UPDATE - LET IT GO NEGATIVE (Number field handles it)
+  // Farmers get feed regardless of balance!
 
   // SMS (non-blocking)
   if (farmer.phone) {
     try {
-      const smsMessage = `🛒 ${cooperative.name}\nDear ${farmer.name},\n✅ Feed Purchase:\n${smsItems.join('\n')}\n💰 TOTAL: KES ${totalCost.toLocaleString()}\n💳 New Balance: KES ${balanceAfter.toLocaleString()}`;
+      const smsMessage = `🛒 ${cooperative.name}\nDear ${farmer.name},\n✅ Feed Purchase:\n${smsItems.join('\n')}\n💰 TOTAL: KES ${totalCost.toLocaleString()}\n📊 Milk Balance: KES ${balanceAfter.toLocaleString()}`;
       await smsService.sendSMS(farmer.phone, smsMessage);
     } catch (smsError) {
       logger.warn('SMS failed but purchase completed', { 

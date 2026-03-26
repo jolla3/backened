@@ -221,6 +221,7 @@ const syncOfflineTransactions = async (transactions, adminId) => {
 };
 
 // Get Farmer History with Cooperative Scoping
+// Get Farmer History with Cooperative Scoping + CALCULATED BALANCE
 const getFarmerHistory = async (farmer_code, limit = 50, adminId) => {
   const farmer = await Farmer.findOne({ farmer_code });
   if (!farmer) {
@@ -233,6 +234,32 @@ const getFarmerHistory = async (farmer_code, limit = 50, adminId) => {
     throw new Error('Unauthorized: Farmer does not belong to your cooperative');
   }
 
+  const now = new Date();
+  const firstDayOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
+
+  // ✅ CALCULATE ACTUAL BALANCE FROM TRANSACTIONS (Milk Income - Feed Cost)
+  const balanceSummary = await Transaction.aggregate([
+    {
+      $match: {
+        farmer_id: farmer._id,
+        cooperativeId: cooperative._id,
+        timestamp_server: { $gte: firstDayOfMonth },
+        status: 'completed'
+      }
+    },
+    {
+      $group: {
+        _id: '$type',
+        totalAmount: { $sum: { $cond: [{ $eq: ['$type', 'milk'] }, '$payout', '$cost'] } }
+      }
+    }
+  ]);
+
+  const milkIncome = balanceSummary.find(b => b._id === 'milk')?.totalAmount || 0;
+  const feedCost = balanceSummary.find(b => b._id === 'feed')?.totalAmount || 0;
+  const calculatedBalance = milkIncome - feedCost;
+
+  // Get transaction history
   const history = await Transaction.find({ 
     farmer_id: farmer._id,
     cooperativeId: cooperative._id 
@@ -246,9 +273,16 @@ const getFarmerHistory = async (farmer_code, limit = 50, adminId) => {
     farmer: {
       code: farmer.farmer_code,
       name: farmer.name,
-      balance: farmer.balance
+      balance: calculatedBalance, // ✅ TRANSACTION-BASED BALANCE
+      milkIncome,
+      feedCost
     },
-    history
+    history,
+    balanceDetails: {
+      milkIncome,
+      feedCost,
+      calculatedBalance
+    }
   };
 };
 
