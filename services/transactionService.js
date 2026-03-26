@@ -72,6 +72,15 @@ const checkDailyFraudLimit = async (farmer_id, litres, session) => {
   return currentDailyTotal;
 };
 
+// ✅ HELPER: Get Cooperative by Admin ID (CONSISTENT)
+const getCooperativeByAdmin = async (adminId) => {
+  const cooperative = await Cooperative.findOne({ adminId: adminId });
+  if (!cooperative) {
+    throw new Error('Cooperative not found for this admin');
+  }
+  return cooperative;
+};
+
 // Record Milk Transaction with Cooperative Scoping
 const recordMilkTransaction = async (session, data) => {
   try {
@@ -180,14 +189,11 @@ const recordMilkTransaction = async (session, data) => {
   }
 };
 
-// Sync Offline Transactions with Cooperative Scoping
+// Sync Offline Transactions with Cooperative Scoping - FIXED
 const syncOfflineTransactions = async (transactions, adminId) => {
   try {
-    // Validate cooperative exists
-    const cooperative = await Cooperative.findById(adminId);
-    if (!cooperative) {
-      throw new Error('Cooperative not found');
-    }
+    // ✅ FIXED: Use helper
+    const cooperative = await getCooperativeByAdmin(adminId);
 
     const operations = transactions.map(tx => ({
       updateOne: {
@@ -220,24 +226,24 @@ const syncOfflineTransactions = async (transactions, adminId) => {
   }
 };
 
-// Get Farmer History with Cooperative Scoping
-// Get Farmer History with Cooperative Scoping + CALCULATED BALANCE
+// Get Farmer History with Cooperative Scoping - FIXED
 const getFarmerHistory = async (farmer_code, limit = 50, adminId) => {
   const farmer = await Farmer.findOne({ farmer_code });
   if (!farmer) {
     return { error: 'Farmer not found' };
   }
 
-  // Verify farmer belongs to admin's cooperative
-  const cooperative = await Cooperative.findById(adminId);
-  if (!cooperative || farmer.cooperativeId.toString() !== cooperative._id.toString()) {
+  // ✅ FIXED: Use helper
+  const cooperative = await getCooperativeByAdmin(adminId);
+  
+  if (farmer.cooperativeId.toString() !== cooperative._id.toString()) {
     throw new Error('Unauthorized: Farmer does not belong to your cooperative');
   }
 
   const now = new Date();
   const firstDayOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
 
-  // ✅ CALCULATE ACTUAL BALANCE FROM TRANSACTIONS (Milk Income - Feed Cost)
+  // ✅ CALCULATE ACTUAL BALANCE FROM TRANSACTIONS
   const balanceSummary = await Transaction.aggregate([
     {
       $match: {
@@ -259,7 +265,6 @@ const getFarmerHistory = async (farmer_code, limit = 50, adminId) => {
   const feedCost = balanceSummary.find(b => b._id === 'feed')?.totalAmount || 0;
   const calculatedBalance = milkIncome - feedCost;
 
-  // Get transaction history
   const history = await Transaction.find({ 
     farmer_id: farmer._id,
     cooperativeId: cooperative._id 
@@ -273,7 +278,7 @@ const getFarmerHistory = async (farmer_code, limit = 50, adminId) => {
     farmer: {
       code: farmer.farmer_code,
       name: farmer.name,
-      balance: calculatedBalance, // ✅ TRANSACTION-BASED BALANCE
+      balance: calculatedBalance,
       milkIncome,
       feedCost
     },
@@ -286,16 +291,13 @@ const getFarmerHistory = async (farmer_code, limit = 50, adminId) => {
   };
 };
 
-// Get All Transactions for Admin's Cooperative
+// Get All Transactions for Admin's Cooperative - FIXED
 const getAllTransactions = async (adminId, filters = {}) => {
-  const cooperative = await Cooperative.findById(adminId);
-  if (!cooperative) {
-    throw new Error('Cooperative not found for this admin');
-  }
+  // ✅ FIXED: Use helper
+  const cooperative = await getCooperativeByAdmin(adminId);
 
   const query = { cooperativeId: cooperative._id };
   
-  // Apply filters
   if (filters.farmerId) query.farmer_id = filters.farmerId;
   if (filters.porterId) query.porter_id = filters.porterId;
   if (filters.type) query.type = filters.type;
@@ -309,7 +311,7 @@ const getAllTransactions = async (adminId, filters = {}) => {
   return transactions;
 };
 
-// Get Transaction by ID with Cooperative Scoping
+// Get Transaction by ID with Cooperative Scoping - FIXED
 const getTransaction = async (transactionId, adminId) => {
   const transaction = await Transaction.findById(transactionId);
   
@@ -317,21 +319,20 @@ const getTransaction = async (transactionId, adminId) => {
     throw new Error('Transaction not found');
   }
 
-  // Verify transaction belongs to admin's cooperative
-  const cooperative = await Cooperative.findById(adminId);
-  if (!cooperative || transaction.cooperativeId.toString() !== cooperative._id.toString()) {
+  // ✅ FIXED: Use helper
+  const cooperative = await getCooperativeByAdmin(adminId);
+  
+  if (transaction.cooperativeId.toString() !== cooperative._id.toString()) {
     throw new Error('Unauthorized: Transaction does not belong to your cooperative');
   }
 
   return transaction;
 };
 
-// Get Transaction Summary for Admin's Cooperative
+// Get Transaction Summary for Admin's Cooperative - FIXED
 const getTransactionSummary = async (adminId, period = 'month') => {
-  const cooperative = await Cooperative.findById(adminId);
-  if (!cooperative) {
-    throw new Error('Cooperative not found for this admin');
-  }
+  // ✅ FIXED: Use helper
+  const cooperative = await getCooperativeByAdmin(adminId);
 
   let startDate;
   const now = new Date();
@@ -369,7 +370,7 @@ const getTransactionSummary = async (adminId, period = 'month') => {
   };
 };
 
-// Get Transactions by Farmer (Scoped to Cooperative)
+// Get Transactions by Farmer (Scoped to Cooperative) - FIXED
 const getTransactionsByFarmer = async (farmerId, adminId) => {
   const farmer = await Farmer.findById(farmerId);
   
@@ -377,9 +378,10 @@ const getTransactionsByFarmer = async (farmerId, adminId) => {
     throw new Error('Farmer not found');
   }
 
-  // Verify farmer belongs to admin's cooperative
-  const cooperative = await Cooperative.findById(adminId);
-  if (!cooperative || farmer.cooperativeId.toString() !== cooperative._id.toString()) {
+  // ✅ FIXED: Use helper
+  const cooperative = await getCooperativeByAdmin(adminId);
+  
+  if (farmer.cooperativeId.toString() !== cooperative._id.toString()) {
     throw new Error('Unauthorized: Farmer does not belong to your cooperative');
   }
 
@@ -392,7 +394,7 @@ const getTransactionsByFarmer = async (farmerId, adminId) => {
   return transactions;
 };
 
-// Get Transactions by Porter (Scoped to Cooperative)
+// Get Transactions by Porter (Scoped to Cooperative) - FIXED
 const getTransactionsByPorter = async (porterId, adminId) => {
   const porter = await Porter.findById(porterId);
   
@@ -400,9 +402,10 @@ const getTransactionsByPorter = async (porterId, adminId) => {
     throw new Error('Porter not found');
   }
 
-  // Verify porter belongs to admin's cooperative
-  const cooperative = await Cooperative.findById(adminId);
-  if (!cooperative || porter.cooperativeId.toString() !== cooperative._id.toString()) {
+  // ✅ FIXED: Use helper
+  const cooperative = await getCooperativeByAdmin(adminId);
+  
+  if (porter.cooperativeId.toString() !== cooperative._id.toString()) {
     throw new Error('Unauthorized: Porter does not belong to your cooperative');
   }
 
@@ -415,12 +418,10 @@ const getTransactionsByPorter = async (porterId, adminId) => {
   return transactions;
 };
 
-// Get Daily Summary for Admin's Cooperative
+// Get Daily Summary for Admin's Cooperative - FIXED
 const getDailySummary = async (adminId, date = new Date().toISOString().split('T')[0]) => {
-  const cooperative = await Cooperative.findById(adminId);
-  if (!cooperative) {
-    throw new Error('Cooperative not found for this admin');
-  }
+  // ✅ FIXED: Use helper
+  const cooperative = await getCooperativeByAdmin(adminId);
 
   const startDate = new Date(date);
   startDate.setHours(0, 0, 0, 0);
@@ -475,5 +476,6 @@ module.exports = {
   getDailySummary,
   generateReceiptNum,
   generateServerSeqNum,
-  checkDailyFraudLimit
+  checkDailyFraudLimit,
+  getCooperativeByAdmin // ✅ Export helper if needed elsewhere
 };
