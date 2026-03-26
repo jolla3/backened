@@ -127,6 +127,7 @@ const getAllFarmers = async (adminId) => {
 
 // Get Farmer Balance (with Cooperative Scoping)
 // Get Farmer History (Scoped to Cooperative) - USES TRANSACTION SERVICE
+// Get Farmer History (Scoped to Cooperative) - FIXED
 const getFarmerHistory = async (farmerId, adminId, limit = 50) => {
   const farmer = await Farmer.findById(farmerId);
   
@@ -140,13 +141,18 @@ const getFarmerHistory = async (farmerId, adminId, limit = 50) => {
     throw new Error('Unauthorized: Farmer does not belong to your cooperative');
   }
 
-  // ✅ USE TRANSACTION SERVICE - GETS CALCULATED BALANCE + HISTORY
+  // ✅ FIXED: Pass farmer.farmer_code instead of farmerId
   const result = await transactionService.getFarmerHistory(farmer.farmer_code, limit, adminId);
+  
+  if (result.error) {
+    throw new Error(result.error);
+  }
   
   return result;
 };
 
 // Get Farmer Balance (CALCULATED FROM TRANSACTIONS)
+// Get Farmer Balance (CALCULATED FROM TRANSACTIONS) - FIXED
 const getBalance = async (farmerId, adminId) => {
   const farmer = await Farmer.findById(farmerId);
   
@@ -160,7 +166,7 @@ const getBalance = async (farmerId, adminId) => {
     throw new Error('Unauthorized: Farmer does not belong to your cooperative');
   }
 
-  // ✅ USE TRANSACTION SERVICE FOR CALCULATED BALANCE
+  // ✅ FIXED: Pass farmer.farmer_code
   const result = await transactionService.getFarmerHistory(farmer.farmer_code, 1, adminId);
   
   if (result.error) {
@@ -171,7 +177,7 @@ const getBalance = async (farmerId, adminId) => {
     id: farmer._id,
     name: farmer.name,
     farmerCode: farmer.farmer_code,
-    balance: result.farmer.balance, // ✅ TRANSACTION CALCULATED
+    balance: result.farmer.balance,
     milkIncome: result.farmer.milkIncome,
     feedCost: result.farmer.feedCost,
     cooperativeId: farmer.cooperativeId
