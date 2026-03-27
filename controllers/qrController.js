@@ -1,3 +1,4 @@
+// controller/qrController.js
 const qrService = require('../services/qrService');
 const qrcode = require('qrcode');
 const logger = require('../utils/logger');

@@ -1,4 +1,3 @@
-// controllers/posController.js
 const { 
   recordMilkTransaction: recordMilkTxService, 
   getFarmerHistory: getFarmerHistoryService, 
@@ -10,7 +9,6 @@ const {
 } = require('../services/posService');
 const { milkTransactionSchema, farmerCodeSchema } = require('../validators/posValidator');
 const logger = require('../utils/logger');
-const Transaction = require('../models/transaction');
 
 // 1️⃣ Find Farmer by Code
 const findFarmerByCode = async (req, res) => {
@@ -33,18 +31,18 @@ const findFarmerByCode = async (req, res) => {
   }
 };
 
-// 2️⃣ Record Milk Transaction
+// 2️⃣ Record Milk Transaction + PRINT RECEIPT
 const recordMilkTransaction = async (req, res) => {
   let session = null;
   
   try {
-    // 1️⃣ Validation Layer
+    // 1️⃣ Validation
     const { error, value } = milkTransactionSchema.validate(req.body);
     if (error) {
       return res.status(400).json({ error: error.details[0].message });
     }
 
-    const { farmer_code, litres, porter_id, zone, device_seq_num, timestamp_local } = value;
+    const { farmer_code, litres, porter_id, zone, device_seq_num, timestamp_local, cooperativeId } = value;
     const device = req.device;
     const branch_id = req.branch_id;
 
@@ -56,53 +54,60 @@ const recordMilkTransaction = async (req, res) => {
       return res.status(403).json({ error: 'Device branch mismatch' });
     }
 
-    // 3️⃣ Start Session
+    // 3️⃣ Start Transaction Session
     session = await Transaction.startSession();
+    session.startTransaction();
     
-    let result;
-    
-    try {
-      // 4️⃣ Call Service (All business logic inside)
-      result = await recordMilkTxService(session, {
-        farmer_code,
-        litres,
-        porter_id,
-        zone,
-        device_id: device.uuid,
-        branch_id,
-        device_seq_num,
-        timestamp_local: timestamp_local ? new Date(timestamp_local) : new Date()
-      });
+    const result = await recordMilkTxService(session, {
+      farmer_code,
+      litres,
+      porter_id,
+      zone,
+      device_id: device.uuid,
+      branch_id,
+      device_seq_num,
+      timestamp_local: timestamp_local ? new Date(timestamp_local) : new Date(),
+      cooperativeId
+    });
 
-      // 5️⃣ Return Response (No Rate Exposed)
-      res.json({
-        success: true,
-        transaction: {
-          id: result.transaction._id,
-          receiptNum: result.receiptNum,
-          qr: result.qrUrl,
-          status: 'completed'
-        },
-        farmer: {
-          code: result.farmer_code,
-          name: result.farmer_name,
-          newBalance: result.newBalance
-        }
-      });
-    } catch (error) {
-      if (error.message.includes('limit')) {
-        return res.status(400).json({ error: error.message });
+    await session.commitTransaction();
+
+    // ✅ 4️⃣ FULL SUNMI POS RESPONSE WITH THERMAL RECEIPT
+    res.json({
+      success: true,
+      transaction: {
+        id: result.transaction._id,
+        receiptNum: result.receiptNum,
+        serverSeqNum: result.serverSeqNum,
+        qrUrl: result.qrUrl,
+        status: 'completed'
+      },
+      farmer: {
+        code: result.farmer_code,
+        name: result.farmer_name,
+        newBalance: result.newBalance
+      },
+      receipt: {
+        thermalData: result.thermalReceipt.thermalReceipt,  // 🔥 Print this on Sunmi
+        qrImage: result.thermalReceipt.qrImage,             // 📱 Show on screen
+        preview: result.receiptPreview,                     // 🐛 Debug text
+        receiptNum: result.receiptNum
       }
-      throw error;
-    }
+    });
+
   } catch (error) {
-    logger.error('Record milk failed', { error: error.message });
-    res.status(500).json({ error: error.message });
-  } finally {
-    // 6️⃣ Session Always Closed
     if (session) {
+      try { await session.abortTransaction(); } catch (e) {}
       session.endSession();
     }
+    
+    logger.error('Record milk failed', { error: error.message });
+    if (error.message.includes('limit') || error.message.includes('rate')) {
+      return res.status(400).json({ error: error.message });
+    }
+    res.status(500).json({ error: error.message });
+  } finally {
+    if (session) session.endSession();
   }
 };
 
@@ -116,22 +121,24 @@ const verifyTransaction = async (req, res) => {
       return res.status(404).json({ error: result.error || 'Transaction not found' });
     }
 
-    // Ensure rate is not in response (Service handles this, but we double check structure)
-    res.json({ success: true, verified: true, transaction: result.transaction });
+    res.json({ 
+      success: true, 
+      verified: true, 
+      transaction: result.transaction 
+    });
   } catch (error) {
     logger.error('Verify failed', { error: error.message });
     res.status(500).json({ error: error.message });
   }
 };
 
-// 4️⃣ Get Porter Performance
+// 4️⃣ Porter Performance
 const getPorterPerformance = async (req, res) => {
   try {
     const { porter_id } = req.params;
     const { period = 'today' } = req.query;
 
     const result = await getPorterPerformanceService(porter_id, period);
-
     if (result.error) {
       return res.status(404).json({ error: result.error });
     }
@@ -147,9 +154,7 @@ const getPorterPerformance = async (req, res) => {
 const getDailySummary = async (req, res) => {
   try {
     const { date = new Date().toISOString().split('T')[0] } = req.query;
-
     const result = await getDailySummaryService(date);
-
     res.json({ success: true, ...result });
   } catch (error) {
     logger.error('Summary failed', { error: error.message });
@@ -162,46 +167,33 @@ const syncOfflineTransactions = async (req, res) => {
   try {
     const { transactions } = req.body;
 
-    // 1️⃣ Size Protection
     if (!Array.isArray(transactions) || transactions.length === 0) {
       return res.status(400).json({ error: 'No transactions to sync' });
     }
-
     if (transactions.length > 1000) {
       return res.status(400).json({ error: 'Maximum 1000 transactions per sync' });
     }
 
     const result = await syncOfflineTxService(transactions);
-
-    res.json({
-      success: true,
-      synced: result.synced,
-      failed: result.failed
-    });
+    res.json({ success: true, synced: result.synced, failed: result.failed });
   } catch (error) {
     logger.error('Sync failed', { error: error.message });
     res.status(500).json({ error: error.message });
   }
 };
 
-// 7️⃣ Get Farmer History
+// 7️⃣ Farmer History
 const getFarmerHistory = async (req, res) => {
   try {
     const { farmer_code } = req.params;
     const { limit = 50 } = req.query;
 
     const result = await getFarmerHistoryService(farmer_code, parseInt(limit));
-
     if (result.error) {
       return res.status(404).json({ error: result.error });
     }
 
-    // Ensure history items do not contain rate (Service handles this)
-    res.json({
-      success: true,
-      farmer: result.farmer,
-      history: result.history
-    });
+    res.json({ success: true, farmer: result.farmer, history: result.history });
   } catch (error) {
     logger.error('History failed', { error: error.message });
     res.status(500).json({ error: error.message });
@@ -216,4 +208,4 @@ module.exports = {
   getDailySummary,
   syncOfflineTransactions,
   getFarmerHistory
-}
+};

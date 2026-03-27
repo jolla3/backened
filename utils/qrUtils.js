@@ -1,3 +1,4 @@
+// Utils/qrUtils.js
 const qrcode = require('qrcode');
 
 const generateQRCode = async (data) => {
