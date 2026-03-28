@@ -3,34 +3,22 @@ const Farmer = require('../models/farmer');
 const Porter = require('../models/porter');
 const RateVersion = require('../models/rateVersion');
 const Counter = require('../models/counter');
-const Cooperative = require('../models/cooperative');
 const receiptService = require('./receiptService');
 const { generateHMAC, generateQRUrl } = require('./qrService');
 const logger = require('../utils/logger');
 const FRAUD_CONFIG = require('../config/fraudConfig');
 
-// ✅ Get ACTIVE Rate Version
+// Get active rate version
 const getActiveRateVersion = async (cooperativeId, type = 'milk') => {
   const today = new Date();
   today.setHours(0, 0, 0, 0);
-
   const activeRate = await RateVersion.findOne({
     cooperativeId,
     type,
     effective_date: { $lte: today }
-  })
-    .sort({ effective_date: -1 })
-    .lean();
-
-  if (!activeRate) {
-    throw new Error(`No active ${type} rate found for today`);
-  }
-
-  return {
-    rate_version_id: activeRate._id,
-    rate: activeRate.rate,
-    effective_date: activeRate.effective_date
-  };
+  }).sort({ effective_date: -1 }).lean();
+  if (!activeRate) throw new Error(`No active ${type} rate found for today`);
+  return { rate_version_id: activeRate._id, rate: activeRate.rate, effective_date: activeRate.effective_date };
 };
 
 const generateReceiptNum = async (session) => {
@@ -38,15 +26,12 @@ const generateReceiptNum = async (session) => {
   const year = date.getFullYear();
   const month = String(date.getMonth() + 1).padStart(2, '0');
   const day = String(date.getDate()).padStart(2, '0');
-
   const dateKey = `${year}${month}${day}`;
-
   const counter = await Counter.findOneAndUpdate(
     { _id: `milk_receipt_seq_${dateKey}` },
     { $inc: { sequence: 1 } },
     { new: true, upsert: true, session }
   );
-
   return `REC-${year}${month}${day}-${String(counter.sequence).padStart(6, '0')}`;
 };
 
@@ -55,79 +40,48 @@ const generateServerSeqNum = async (session, branch_id) => {
   const year = date.getFullYear();
   const month = String(date.getMonth() + 1).padStart(2, '0');
   const day = String(date.getDate()).padStart(2, '0');
-
   const counter = await Counter.findOneAndUpdate(
     { _id: `server_tx_seq_${branch_id}_${year}${month}${day}` },
     { $inc: { sequence: 1 } },
     { new: true, upsert: true, session }
   );
-
   return `${branch_id}-${year}${month}${day}-${String(counter.sequence).padStart(6, '0')}`;
 };
 
 const checkDailyFraudLimit = async (farmer_id, litres, session) => {
-  const today = new Date();
-  today.setHours(0, 0, 0, 0);
-  const tomorrow = new Date(today);
-  tomorrow.setDate(tomorrow.getDate() + 1);
-
+  const today = new Date(); today.setHours(0,0,0,0);
+  const tomorrow = new Date(today); tomorrow.setDate(tomorrow.getDate() + 1);
   const transactions = await Transaction.find({
     farmer_id,
     timestamp_server: { $gte: today, $lt: tomorrow },
     type: 'milk'
   }).select('litres').session(session);
-
-  const currentDailyTotal = transactions.reduce((sum, tx) => sum + tx.litres, 0);
-
-  if (currentDailyTotal + litres > FRAUD_CONFIG.MAX_MILK_PER_DAY) {
+  const currentTotal = transactions.reduce((sum, tx) => sum + tx.litres, 0);
+  if (currentTotal + litres > FRAUD_CONFIG.MAX_MILK_PER_DAY) {
     throw new Error('Daily milk limit exceeded');
   }
-
-  return currentDailyTotal;
+  return currentTotal;
 };
 
-const getCooperativeByAdmin = async (adminId) => {
-  const cooperative = await Cooperative.findOne({ adminId });
-  if (!cooperative) {
-    throw new Error('Cooperative not found');
-  }
-  return cooperative;
-};
-
-// ✅ MAIN: Record Milk Transaction + Generate Receipt (with fallback)
+// MAIN: Record milk transaction
 const recordMilkTransaction = async (session, data) => {
   try {
-    const {
-      farmer_code, litres, porter_id, zone, device_id, farmer_id,
-      branch_id, device_seq_num, timestamp_local, cooperativeId
-    } = data;
-
-    // 1. Get active rate
+    const { farmer_code, litres, porter_id, zone, device_id, farmer_id, branch_id, device_seq_num, timestamp_local, cooperativeId } = data;
     const rateInfo = await getActiveRateVersion(cooperativeId);
     const payout = parseFloat((litres * rateInfo.rate).toFixed(2));
 
-    // 2. Fraud checks
     if (litres < FRAUD_CONFIG.MIN_MILK_THRESHOLD || litres > FRAUD_CONFIG.MAX_MILK_PER_TRANSACTION) {
       throw new Error(`Milk amount ${litres}L exceeds limits`);
     }
     await checkDailyFraudLimit(farmer_id, litres, session);
 
-    // 3. Generate numbers
     const receiptNum = await generateReceiptNum(session);
     const serverSeqNum = await generateServerSeqNum(session, branch_id);
     const idempotencyKey = `${device_id}-${device_seq_num}-${new Date().toISOString().split('T')[0]}`;
     const qrHash = generateHMAC(`${receiptNum}${serverSeqNum}`);
-
-    // 4. Signature
-    const signatureData = {
-      farmer_code, litres, payout, rate: rateInfo.rate,
-      rate_version_id: rateInfo.rate_version_id, receiptNum,
-      server_seq_num: serverSeqNum, porter_id, device_id, zone, branch_id,
-      timestamp: Date.now()
-    };
+    const signatureData = { farmer_code, litres, payout, rate: rateInfo.rate, rate_version_id: rateInfo.rate_version_id, receiptNum, server_seq_num: serverSeqNum, porter_id, device_id, zone, branch_id, timestamp: Date.now() };
     const digitalSignature = generateHMAC(signatureData);
 
-    // 5. Create transaction
     const transaction = await Transaction.create([{
       device_id, receipt_num: receiptNum, qr_hash: qrHash, status: 'completed',
       device_seq_num, server_seq_num: serverSeqNum,
@@ -138,39 +92,19 @@ const recordMilkTransaction = async (session, data) => {
       branch_id, cooperativeId
     }], { session });
 
-    // 6. Update balances
     await Farmer.findByIdAndUpdate(farmer_id, { $inc: { balance: payout } }, { session });
-    await Porter.findByIdAndUpdate(porter_id, {
-      $inc: { 'totals.litresCollected': litres, 'totals.transactionsCount': 1 }
-    }, { session });
+    await Porter.findByIdAndUpdate(porter_id, { $inc: { 'totals.litresCollected': litres, 'totals.transactionsCount': 1 } }, { session });
 
-    // ✅ 7. GENERATE RECEIPT – now passes session!
-    let thermalReceipt = null;
-    let receiptPreview = null;
+    let thermalReceipt;
     try {
-      thermalReceipt = await receiptService.generateThermalReceipt(transaction[0]._id, session); // session added
-      receiptPreview = thermalReceipt.previewText;
+      thermalReceipt = await receiptService.generateThermalReceipt(transaction[0]._id, session);
     } catch (receiptError) {
-      logger.error('❌ Receipt generation failed, but transaction saved', {
-        transactionId: transaction[0]._id,
-        error: receiptError.message
-      });
-      // Provide a minimal placeholder receipt (as Buffer)
+      logger.error('❌ Receipt generation failed, but transaction saved', { transactionId: transaction[0]._id, error: receiptError.message });
       const fallbackText = `RECEIPT #${receiptNum}\nMILK ${litres}L @ ${rateInfo.rate}/L = ${payout}\nTHANK YOU`;
-      thermalReceipt = {
-        thermalReceipt: Buffer.from(fallbackText),  // Ensure Buffer for printer
-        qrImage: null,
-        receiptNum,
-        previewText: fallbackText
-      };
-      receiptPreview = fallbackText;
+      thermalReceipt = { thermalReceipt: Buffer.from(fallbackText), qrImage: null, receiptNum, previewText: fallbackText };
     }
 
-    logger.info('✅ Milk transaction + receipt COMPLETE', {
-      transactionId: transaction[0]._id, receiptNum, serverSeqNum,
-      litres, payout, rate: rateInfo.rate
-    });
-
+    logger.info('✅ Milk transaction COMPLETE', { transactionId: transaction[0]._id, receiptNum, serverSeqNum, litres, payout, rate: rateInfo.rate });
     return {
       transaction: transaction[0],
       receiptNum,
@@ -179,23 +113,21 @@ const recordMilkTransaction = async (session, data) => {
       payout,
       farmer_code,
       thermalReceipt,
-      receiptPreview
+      receiptPreview: thermalReceipt.previewText
     };
-
   } catch (error) {
     logger.error('❌ Milk transaction failed', { error: error.message });
     throw error;
   }
 };
 
+// Sync offline transactions (uses cooperativeId directly)
 const syncOfflineTransactions = async (transactions, cooperativeId) => {
-  if (!cooperativeId) {
-    throw new Error('cooperativeId is required for sync');
-  }
+  if (!cooperativeId) throw new Error('cooperativeId is required for sync');
   const operations = transactions.map(tx => ({
     updateOne: {
       filter: { idempotency_key: tx.idempotency_key },
-      update: { $setOnInsert: { ...tx, cooperativeId } }, // use cooperativeId directly
+      update: { $setOnInsert: { ...tx, cooperativeId } },
       upsert: true
     }
   }));
@@ -203,26 +135,23 @@ const syncOfflineTransactions = async (transactions, cooperativeId) => {
   return { success: true, synced: results.upsertedCount, failed: 0 };
 };
 
-
-// ✅ Farmer History – expects cooperativeId
+// Farmer history – FIXED: convert both cooperative IDs to strings
 const getFarmerHistory = async (farmer_code, limit = 50, cooperativeId) => {
   try {
     const farmer = await Farmer.findOne({ farmer_code });
     if (!farmer) return { error: 'Farmer not found' };
 
-    if (farmer.cooperativeId.toString() !== cooperativeId) {
+    const farmerCoop = farmer.cooperativeId.toString();
+    const providedCoop = cooperativeId ? cooperativeId.toString() : null;
+    if (farmerCoop !== providedCoop) {
       return { error: 'Unauthorized: Farmer does not belong to your cooperative' };
     }
 
     const transactions = await Transaction.find({
       farmer_id: farmer._id,
-      cooperativeId
-    })
-    .sort({ timestamp_server: -1 })
-    .limit(limit)
-    .lean();
+      cooperativeId: farmerCoop
+    }).sort({ timestamp_server: -1 }).limit(limit).lean();
 
-    // ... balance calculation as before ...
     let balance = 0, milkIncome = 0, feedCost = 0, totalLitres = 0, totalTransactions = 0;
     transactions.forEach(t => {
       if (t.type === 'milk') {
@@ -263,7 +192,6 @@ const getFarmerHistory = async (farmer_code, limit = 50, cooperativeId) => {
   }
 };
 
-
 module.exports = {
   recordMilkTransaction,
   syncOfflineTransactions,
@@ -271,6 +199,5 @@ module.exports = {
   getActiveRateVersion,
   generateReceiptNum,
   generateServerSeqNum,
-  checkDailyFraudLimit,
-  getCooperativeByAdmin
+  checkDailyFraudLimit
 };
