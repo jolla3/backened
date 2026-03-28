@@ -5,44 +5,48 @@ const smsAnalyticsModule = require('../../analytics/smsAnalytics');
 const aiAdvisoryModule = require('../../analytics/aiAdvisory');
 const Cooperative = require('../../models/cooperative');
 const logger = require('../../utils/logger');
-
-const getIntelligenceLayer = async (cooperativeId) => {  // ✅ FIXED
+const getIntelligenceLayer = async (cooperativeId) => {
   try {
     const cooperative = await Cooperative.findById(cooperativeId);
     if (!cooperative) throw new Error('Cooperative not found');
 
     const intelligence = {
-      financialIntelligence: getDefaultFinancialIntelligence(),
+      financialIntelligence: {},
       alerts: [],
       recommendations: [],
-      predictions: { stockout: [], farmerDropout: [] },
-      sms: getDefaultSmsAnalytics(),
+      predictions: { stockout: [], farmerDropout: [], milkProduction: {} },
+      sms: {},
       aiAdvisory: []
     };
 
-    const modules = [
-      { name: 'financialIntelligence', fn: () => financialAnalytics.getFinancialIntelligence(cooperativeId) },
-      { name: 'alerts', fn: () => alertsAndRecommendations.getSmartAlerts(cooperativeId) },
-      { name: 'recommendations', fn: () => alertsAndRecommendations.getRecommendations(cooperativeId) },
-      { name: 'predictions.stockout', fn: () => predictiveAnalytics.predictStockout(cooperativeId) },
-      { name: 'predictions.farmerDropout', fn: () => predictiveAnalytics.predictFarmerDropout(cooperativeId) },
-      { name: 'sms', fn: () => smsAnalyticsModule.getSmsAnalytics(cooperativeId) },
-      { name: 'aiAdvisory', fn: () => aiAdvisoryModule.getAiAdvisory(cooperativeId) }
-    ];
+    const [
+      financial,
+      alerts,
+      recommendations,
+      stockoutPred,
+      dropoutPred,
+      milkProdPred,
+      sms,
+      advisory
+    ] = await Promise.allSettled([
+      financialAnalytics.getFinancialIntelligence(cooperativeId),
+      alertsAndRecommendations.getSmartAlerts(cooperativeId),
+      alertsAndRecommendations.getRecommendations(cooperativeId),
+      predictiveAnalytics.predictStockout(cooperativeId),
+      predictiveAnalytics.predictFarmerDropout(cooperativeId),
+      predictiveAnalytics.predictMilkProduction(cooperativeId),
+      smsAnalyticsModule.getSmsAnalytics(cooperativeId),
+      aiAdvisoryModule.getAiAdvisory(cooperativeId)
+    ]);
 
-    for (const module of modules) {
-      try {
-        const result = await module.fn();
-        if (module.name.includes('.')) {
-          const [parent, child] = module.name.split('.');
-          intelligence[parent][child] = result;
-        } else {
-          intelligence[module.name] = result;
-        }
-      } catch (error) {
-        logger.warn(`${module.name} failed`, { error: error.message, coopId: cooperativeId });
-      }
-    }
+    intelligence.financialIntelligence = financial.status === 'fulfilled' ? financial.value : getDefaultFinancial();
+    intelligence.alerts = alerts.status === 'fulfilled' ? alerts.value : [];
+    intelligence.recommendations = recommendations.status === 'fulfilled' ? recommendations.value : [];
+    intelligence.predictions.stockout = stockoutPred.status === 'fulfilled' ? stockoutPred.value : [];
+    intelligence.predictions.farmerDropout = dropoutPred.status === 'fulfilled' ? dropoutPred.value : [];
+    intelligence.predictions.milkProduction = milkProdPred.status === 'fulfilled' ? milkProdPred.value : {};
+    intelligence.sms = sms.status === 'fulfilled' ? sms.value : getDefaultSms();
+    intelligence.aiAdvisory = advisory.status === 'fulfilled' ? advisory.value : [];
 
     return intelligence;
   } catch (error) {
@@ -51,24 +55,21 @@ const getIntelligenceLayer = async (cooperativeId) => {  // ✅ FIXED
   }
 };
 
-const getDefaultFinancialIntelligence = () => ({
-  milkRevenue: 0, feedRevenue: 0, farmerDebtTotal: 0, expectedMilkPayout: 0, netCashFlow: 0, profitMargin: 0
+const getDefaultFinancial = () => ({
+  milkRevenue: 0, feedRevenue: 0, farmerDebtTotal: 0, netCashFlow: 0, profitMargin: 0,
 });
 
-const getDefaultSmsAnalytics = () => ({ 
-  smsSent: 0, 
-  smsFailed: 0, 
-  deliveryRate: '0%', 
-  receiptsVerifiedToday: 0 
+const getDefaultSms = () => ({
+  smsSent: 0, smsFailed: 0, deliveryRate: '0%', receiptsVerifiedToday: 0, dailyTrend: [],
 });
 
 const getDefaultIntelligenceLayer = () => ({
-  financialIntelligence: getDefaultFinancialIntelligence(),
+  financialIntelligence: getDefaultFinancial(),
   alerts: [],
   recommendations: [],
-  predictions: { stockout: [], farmerDropout: [] },
-  sms: getDefaultSmsAnalytics(),
-  aiAdvisory: []
+  predictions: { stockout: [], farmerDropout: [], milkProduction: {} },
+  sms: getDefaultSms(),
+  aiAdvisory: [],
 });
 
 module.exports = { getIntelligenceLayer };
