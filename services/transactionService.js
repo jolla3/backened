@@ -4,12 +4,12 @@ const Porter = require('../models/porter');
 const RateVersion = require('../models/rateVersion');
 const Counter = require('../models/counter');
 const Cooperative = require('../models/cooperative');
-const receiptService = require('./receiptService'); // ✅ NEW
+const receiptService = require('./receiptService');
 const { generateHMAC, generateQRUrl } = require('./qrService');
 const logger = require('../utils/logger');
 const FRAUD_CONFIG = require('../config/fraudConfig');
 
-// ✅ Get ACTIVE Rate Version (Sunday rate ignored until Sunday)
+// ✅ Get ACTIVE Rate Version
 const getActiveRateVersion = async (cooperativeId, type = 'milk') => {
   const today = new Date();
   today.setHours(0, 0, 0, 0);
@@ -94,7 +94,7 @@ const getCooperativeByAdmin = async (adminId) => {
   return cooperative;
 };
 
-// ✅ MAIN: Record Milk Transaction + Generate Receipt
+// ✅ MAIN: Record Milk Transaction + Generate Receipt (with fallback)
 const recordMilkTransaction = async (session, data) => {
   try {
     const {
@@ -102,7 +102,7 @@ const recordMilkTransaction = async (session, data) => {
       branch_id, device_seq_num, timestamp_local, cooperativeId
     } = data;
 
-    // 1. Get active rate (Sunday rate ignored)
+    // 1. Get active rate
     const rateInfo = await getActiveRateVersion(cooperativeId);
     const payout = parseFloat((litres * rateInfo.rate).toFixed(2));
 
@@ -144,8 +144,27 @@ const recordMilkTransaction = async (session, data) => {
       $inc: { 'totals.litresCollected': litres, 'totals.transactionsCount': 1 }
     }, { session });
 
-    // ✅ 7. GENERATE RECEIPT FOR SUNMI PRINTER
-    const thermalReceipt = await receiptService.generateThermalReceipt(transaction[0]._id);
+    // ✅ 7. GENERATE RECEIPT – now passes session!
+    let thermalReceipt = null;
+    let receiptPreview = null;
+    try {
+      thermalReceipt = await receiptService.generateThermalReceipt(transaction[0]._id, session); // session added
+      receiptPreview = thermalReceipt.previewText;
+    } catch (receiptError) {
+      logger.error('❌ Receipt generation failed, but transaction saved', {
+        transactionId: transaction[0]._id,
+        error: receiptError.message
+      });
+      // Provide a minimal placeholder receipt (as Buffer)
+      const fallbackText = `RECEIPT #${receiptNum}\nMILK ${litres}L @ ${rateInfo.rate}/L = ${payout}\nTHANK YOU`;
+      thermalReceipt = {
+        thermalReceipt: Buffer.from(fallbackText),  // Ensure Buffer for printer
+        qrImage: null,
+        receiptNum,
+        previewText: fallbackText
+      };
+      receiptPreview = fallbackText;
+    }
 
     logger.info('✅ Milk transaction + receipt COMPLETE', {
       transactionId: transaction[0]._id, receiptNum, serverSeqNum,
@@ -159,8 +178,8 @@ const recordMilkTransaction = async (session, data) => {
       qrUrl: generateQRUrl(receiptNum),
       payout,
       farmer_code,
-      thermalReceipt,        // ✅ Sunmi thermal print data
-      receiptPreview: thermalReceipt.previewText  // ✅ Debug text
+      thermalReceipt,
+      receiptPreview
     };
 
   } catch (error) {
@@ -169,7 +188,7 @@ const recordMilkTransaction = async (session, data) => {
   }
 };
 
-// Other functions (unchanged)
+// Sync offline transactions
 const syncOfflineTransactions = async (transactions, adminId) => {
   const cooperative = await getCooperativeByAdmin(adminId);
   const operations = transactions.map(tx => ({
@@ -183,45 +202,32 @@ const syncOfflineTransactions = async (transactions, adminId) => {
   return { success: true, synced: results.upsertedCount, failed: 0 };
 };
 
-
-// ✅ SUPER RICH DATA + REAL BALANCE CALCULATION
-const getFarmerHistory = async (farmer_code, limit = 50, adminId) => {
+// ✅ FARMER HISTORY – now accepts cooperativeId (instead of adminId)
+const getFarmerHistory = async (farmer_code, limit = 50, cooperativeId) => {
   try {
-    // Find farmer by code
     const farmer = await Farmer.findOne({ farmer_code });
     if (!farmer) return { error: 'Farmer not found' };
 
-    // Verify cooperative access
-    const cooperative = await getCooperativeByAdmin(adminId);
-    if (farmer.cooperativeId.toString() !== cooperative._id.toString()) {
+    if (farmer.cooperativeId.toString() !== cooperativeId) {
       return { error: 'Unauthorized: Farmer does not belong to your cooperative' };
     }
 
-    // ✅ GET ALL TRANSACTIONS + CALCULATE REAL BALANCE
     const transactions = await Transaction.find({
       farmer_id: farmer._id,
-      cooperativeId: cooperative._id
+      cooperativeId
     })
     .sort({ timestamp_server: -1 })
     .limit(limit)
     .lean();
 
-    // ✅ REAL BALANCE CALCULATION FROM TRANSACTIONS
-    let balance = 0;
-    let milkIncome = 0;
-    let feedCost = 0;
-    let totalLitres = 0;
-    let totalTransactions = 0;
-
+    let balance = 0, milkIncome = 0, feedCost = 0, totalLitres = 0, totalTransactions = 0;
     transactions.forEach(t => {
       if (t.type === 'milk') {
-        // MILK: +payout (income)
         const income = t.payout || 0;
         balance += income;
         milkIncome += income;
         totalLitres += t.litres || 0;
       } else if (t.type === 'feed') {
-        // FEED: -cost (expense)
         const expense = t.cost || 0;
         balance -= expense;
         feedCost += expense;
@@ -229,14 +235,13 @@ const getFarmerHistory = async (farmer_code, limit = 50, adminId) => {
       totalTransactions++;
     });
 
-    // ✅ RICH SUMMARY DATA
-    const summary = {
+    return {
       farmer: {
         id: farmer._id,
         name: farmer.name,
         code: farmer.farmer_code,
         phone: farmer.phone,
-        balance: balance,  // ✅ REAL CALCULATED BALANCE
+        balance,
         milkIncome,
         feedCost,
         totalLitres,
@@ -250,13 +255,10 @@ const getFarmerHistory = async (farmer_code, limit = 50, adminId) => {
         period: 'All Time'
       }
     };
-
-    return summary;
   } catch (error) {
     return { error: error.message };
   }
 };
-
 
 module.exports = {
   recordMilkTransaction,

@@ -1,20 +1,17 @@
+const mongoose = require('mongoose');
 const Transaction = require('../models/transaction');
 const Inventory = require('../models/inventory');
 const logger = require('../utils/logger');
 
-/**
- * Get top feed products by revenue in the last 30 days.
- * @param {number} limit - number of products to return
- * @param {string} cooperativeId - ObjectId of the cooperative
- */
 const getTopFeedProducts = async (limit = 5, cooperativeId) => {
+  const coopObjectId = new mongoose.Types.ObjectId(cooperativeId);
   const thirtyDaysAgo = new Date(Date.now() - 30 * 86400000);
 
   const topProducts = await Transaction.aggregate([
     {
       $match: {
         type: 'feed',
-        cooperativeId: new mongoose.Types.ObjectId(cooperativeId),
+        cooperativeId: coopObjectId,
         timestamp_server: { $gte: thirtyDaysAgo },
         product_id: { $exists: true, $ne: null },
       },
@@ -54,14 +51,11 @@ const getTopFeedProducts = async (limit = 5, cooperativeId) => {
   return topProducts;
 };
 
-/**
- * Get feed stock risk analysis (feed only) for all feed products.
- * @param {string} cooperativeId - ObjectId of the cooperative
- */
 const getFeedStockRisk = async (cooperativeId) => {
+  const coopObjectId = new mongoose.Types.ObjectId(cooperativeId);
   const products = await Inventory.find({
     category: 'feed',
-    cooperativeId: new mongoose.Types.ObjectId(cooperativeId),
+    cooperativeId: coopObjectId,
   }).lean();
 
   const riskAnalysis = [];
@@ -72,7 +66,7 @@ const getFeedStockRisk = async (cooperativeId) => {
       {
         $match: {
           type: 'feed',
-          cooperativeId: new mongoose.Types.ObjectId(cooperativeId),
+          cooperativeId: coopObjectId,
           product_id: product._id,
           timestamp_server: { $gte: thirtyDaysAgo },
         },
@@ -103,12 +97,8 @@ const getFeedStockRisk = async (cooperativeId) => {
   return riskAnalysis.sort((a, b) => a.daysUntilStockout - b.daysUntilStockout);
 };
 
-/**
- * Get feed sales trends (daily/weekly/monthly)
- * @param {string} period - 'daily', 'weekly', or 'monthly'
- * @param {string} cooperativeId - ObjectId of the cooperative
- */
 const getFeedSalesTrends = async (period = 'daily', cooperativeId) => {
+  const coopObjectId = new mongoose.Types.ObjectId(cooperativeId);
   const now = new Date();
   let startDate;
 
@@ -126,7 +116,7 @@ const getFeedSalesTrends = async (period = 'daily', cooperativeId) => {
     {
       $match: {
         type: 'feed',
-        cooperativeId: new mongoose.Types.ObjectId(cooperativeId),
+        cooperativeId: coopObjectId,
         timestamp_server: { $gte: startDate },
       },
     },
