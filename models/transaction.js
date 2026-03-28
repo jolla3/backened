@@ -107,6 +107,12 @@ const transactionSchema = new mongoose.Schema({
     
     index: true
   },
+  // Add this field to the schema
+product_id: {
+  type: mongoose.Schema.Types.ObjectId,
+  ref: 'Inventory',
+  index: true
+},
   cooperativeId: {
     type: mongoose.Schema.Types.ObjectId,
     ref: 'Cooperative',
