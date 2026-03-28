@@ -112,17 +112,45 @@ const deleteFarmer = async (farmerId, adminId) => {
 };
 
 // Get All Farmers for Admin's Cooperative
+// ✅ FIXED: getAllFarmers - Adds balance to ALL farmers (no filtering)
 const getAllFarmers = async (adminId) => {
   const cooperative = await Cooperative.findOne({ adminId: adminId });
   if (!cooperative) {
     throw new Error('Cooperative not found for this admin');
   }
 
+  // Get ALL farmers (exactly like before)
   const farmers = await Farmer.find({ cooperativeId: cooperative._id })
     .sort({ createdAt: -1 });
 
-  logger.info('Farmers retrieved', { count: farmers.length, cooperativeId: cooperative._id });
-  return farmers;
+  // Add balance to EVERY farmer using getFarmerHistory
+  for (let i = 0; i < farmers.length; i++) {
+    const farmer = farmers[i];
+    try {
+      const result = await transactionService.getFarmerHistory(
+        farmer.farmer_code, 
+        1,  // Minimal data
+        adminId
+      );
+      
+      if (!result.error) {
+        farmers[i] = {
+          ...farmer.toObject(),
+          balance: result.farmer.balance || 0  // ✅ ONLY balance added
+        };
+      }
+    } catch (error) {
+      // ✅ Keep farmer even if balance fails
+      console.error(`Balance failed for ${farmer.farmer_code}:`, error.message);
+    }
+  }
+
+  logger.info('Farmers retrieved', { 
+    count: farmers.length,  // ✅ Original count maintained
+    cooperativeId: cooperative._id 
+  });
+  
+  return farmers;  // ✅ ALL farmers with balance field
 };
 
 // ✅ FIXED: Remove fake balance calls, use transactionService directly
