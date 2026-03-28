@@ -14,83 +14,53 @@ const getInventory = async (cooperativeId) => {
     const thirtyDaysAgo = new Date(Date.now() - 30 * 86400000);
     const productIds = products.map(p => p._id);
 
-    // Sales data for last 30 days
-    const salesData = await Transaction.aggregate([
-      { $match: { type: 'feed', cooperativeId: cooperative._id, product_id: { $in: productIds }, timestamp_server: { $gte: thirtyDaysAgo } } },
-      { $group: { _id: '$product_id', totalQty: { $sum: '$quantity' }, totalRevenue: { $sum: '$cost' } } }
-    ]);
-    const salesMap = new Map(salesData.map(s => [s._id.toString(), { qty: s.totalQty, revenue: s.totalRevenue }]));
+// ... inside getInventory function
 
-    const lowStock = [];
-    const stockoutRisk = [];
-    const topRevenue = [];
+const salesData = await Transaction.aggregate([
+  { $match: { type: 'feed', cooperativeId: cooperative._id, timestamp_server: { $gte: thirtyDaysAgo } } },
+  { $group: { _id: { $ifNull: ['$product_id', null] }, totalQty: { $sum: '$quantity' }, totalRevenue: { $sum: '$cost' } } }
+]);
 
-    for (const product of products) {
-      const sales = salesMap.get(product._id.toString()) || { qty: 0, revenue: 0 };
-      const avgDailySales = sales.qty / 30;
-      const daysUntilStockout = avgDailySales > 0 ? Math.floor(product.stock / avgDailySales) : Infinity;
-      const thresholdRatio = product.threshold ? product.stock / product.threshold : 1;
-
-      // Low stock
-      if (product.stock <= product.threshold) {
-        lowStock.push({
-          _id: product._id,
-          product: product.name,
-          category: product.category,
-          currentStock: product.stock,
-          threshold: product.threshold,
-          thresholdRatio: thresholdRatio.toFixed(2),
-          avgDailySales: avgDailySales.toFixed(1),
-          daysUntilStockout: daysUntilStockout === Infinity ? 'N/A' : daysUntilStockout,
-          price: product.price,
-          unit: product.unit
-        });
-      }
-
-      // Stockout risk (≤7 days)
-      if (daysUntilStockout !== Infinity && daysUntilStockout <= 7) {
-        stockoutRisk.push({
-          _id: product._id,
-          product: product.name,
-          category: product.category,
-          currentStock: product.stock,
-          avgDailySales: Math.round(avgDailySales),
-          daysUntilStockout,
-          restockBy: new Date(Date.now() + daysUntilStockout * 86400000).toISOString().split('T')[0]
-        });
-      }
-
-      // Top revenue
-      if (sales.revenue > 0) {
-        topRevenue.push({
-          _id: product._id,
-          product: product.name,
-          category: product.category,
-          revenue: sales.revenue,
-          quantity: sales.qty,
-          price: product.price,
-          unit: product.unit
-        });
-      }
+const topRevenue = [];
+for (const sale of salesData) {
+  if (sale._id === null) {
+    // Unknown product
+    topRevenue.push({
+      _id: null,
+      product: 'Other feed sales (no product ID)',
+      category: 'Feed',
+      revenue: sale.totalRevenue,
+      quantity: sale.totalQty,
+      price: sale.totalRevenue / sale.totalQty,
+      unit: 'units'
+    });
+  } else {
+    const product = products.find(p => p._id.toString() === sale._id.toString());
+    if (product) {
+      topRevenue.push({
+        _id: product._id,
+        product: product.name,
+        category: product.category,
+        revenue: sale.totalRevenue,
+        quantity: sale.totalQty,
+        price: product.price,
+        unit: product.unit
+      });
     }
+  }
+}
 
-    // Sort lowStock by urgency (lowest threshold ratio first)
-    lowStock.sort((a, b) => parseFloat(a.thresholdRatio) - parseFloat(b.thresholdRatio));
-    // Sort stockoutRisk by days left (most urgent first)
-    stockoutRisk.sort((a, b) => a.daysUntilStockout - b.daysUntilStockout);
-    // Sort topRevenue descending
-    topRevenue.sort((a, b) => b.revenue - a.revenue);
+// Sort topRevenue by revenue descending
+topRevenue.sort((a, b) => b.revenue - a.revenue);
 
-    return {
-      lowStock,
-      stockoutRisk,
-      topRevenue: topRevenue.slice(0, 10),   // top 10 revenue items
-      summary: {
-        totalProducts: products.length,
-        lowStockCount: lowStock.length,
-        stockoutRiskCount: stockoutRisk.length
-      }
-    };
+// Return top 10, but if the first entry is "Other", you may still want to see it
+return {
+  lowStock,
+  stockoutRisk,
+  topRevenue: topRevenue.slice(0, 10),
+  summary: { totalProducts: products.length, lowStockCount: lowStock.length, stockoutRiskCount: stockoutRisk.length }
+};
+
   } catch (error) {
     logger.error('Inventory layer failed', { error: error.message, coopId: cooperativeId });
     return getDefaultInventory();
