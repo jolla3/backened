@@ -161,18 +161,15 @@ const getDailySummary = async (req, res) => {
   }
 };
 
-// 7️⃣ Farmer History (now passes cooperativeId)
 const getFarmerHistory = async (req, res) => {
   try {
     const { farmer_code } = req.params;
     const { limit = 50 } = req.query;
-    const cooperativeId = req.user?.cooperativeId;  // from JWT (porter)
-
+    const cooperativeId = req.user?.cooperativeId;   // from auth middleware
     const result = await getFarmerHistoryService(farmer_code, parseInt(limit), cooperativeId);
     if (result.error) {
       return res.status(404).json({ error: result.error });
     }
-
     res.json({ success: true, farmer: result.farmer, history: result.history });
   } catch (error) {
     logger.error('History failed', { error: error.message });

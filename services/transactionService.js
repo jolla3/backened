@@ -121,7 +121,7 @@ const recordMilkTransaction = async (session, data) => {
   }
 };
 
-// Sync offline transactions (uses cooperativeId directly)
+// Sync offline transactions
 const syncOfflineTransactions = async (transactions, cooperativeId) => {
   if (!cooperativeId) throw new Error('cooperativeId is required for sync');
   const operations = transactions.map(tx => ({
@@ -135,7 +135,7 @@ const syncOfflineTransactions = async (transactions, cooperativeId) => {
   return { success: true, synced: results.upsertedCount, failed: 0 };
 };
 
-// Farmer history – FIXED: convert both cooperative IDs to strings
+// Farmer history – **FIXED**: string comparison
 const getFarmerHistory = async (farmer_code, limit = 50, cooperativeId) => {
   try {
     const farmer = await Farmer.findOne({ farmer_code });
