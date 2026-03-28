@@ -13,14 +13,14 @@ const FRAUD_CONFIG = require('../config/fraudConfig');
 const getActiveRateVersion = async (cooperativeId, type = 'milk') => {
   const today = new Date();
   today.setHours(0, 0, 0, 0);
-  
+
   const activeRate = await RateVersion.findOne({
     cooperativeId,
     type,
     effective_date: { $lte: today }
   })
-  .sort({ effective_date: -1 })
-  .lean();
+    .sort({ effective_date: -1 })
+    .lean();
 
   if (!activeRate) {
     throw new Error(`No active ${type} rate found for today`);
@@ -38,15 +38,15 @@ const generateReceiptNum = async (session) => {
   const year = date.getFullYear();
   const month = String(date.getMonth() + 1).padStart(2, '0');
   const day = String(date.getDate()).padStart(2, '0');
-  
+
   const dateKey = `${year}${month}${day}`;
-  
+
   const counter = await Counter.findOneAndUpdate(
     { _id: `milk_receipt_seq_${dateKey}` },
     { $inc: { sequence: 1 } },
     { new: true, upsert: true, session }
   );
-  
+
   return `REC-${year}${month}${day}-${String(counter.sequence).padStart(6, '0')}`;
 };
 
@@ -55,13 +55,13 @@ const generateServerSeqNum = async (session, branch_id) => {
   const year = date.getFullYear();
   const month = String(date.getMonth() + 1).padStart(2, '0');
   const day = String(date.getDate()).padStart(2, '0');
-  
+
   const counter = await Counter.findOneAndUpdate(
     { _id: `server_tx_seq_${branch_id}_${year}${month}${day}` },
     { $inc: { sequence: 1 } },
     { new: true, upsert: true, session }
   );
-  
+
   return `${branch_id}-${year}${month}${day}-${String(counter.sequence).padStart(6, '0')}`;
 };
 
@@ -78,11 +78,11 @@ const checkDailyFraudLimit = async (farmer_id, litres, session) => {
   }).select('litres').session(session);
 
   const currentDailyTotal = transactions.reduce((sum, tx) => sum + tx.litres, 0);
-  
+
   if (currentDailyTotal + litres > FRAUD_CONFIG.MAX_MILK_PER_DAY) {
     throw new Error('Daily milk limit exceeded');
   }
-  
+
   return currentDailyTotal;
 };
 
@@ -97,9 +97,9 @@ const getCooperativeByAdmin = async (adminId) => {
 // ✅ MAIN: Record Milk Transaction + Generate Receipt
 const recordMilkTransaction = async (session, data) => {
   try {
-    const { 
-      farmer_code, litres, porter_id, zone, device_id, farmer_id, 
-      branch_id, device_seq_num, timestamp_local, cooperativeId 
+    const {
+      farmer_code, litres, porter_id, zone, device_id, farmer_id,
+      branch_id, device_seq_num, timestamp_local, cooperativeId
     } = data;
 
     // 1. Get active rate (Sunday rate ignored)
@@ -183,15 +183,80 @@ const syncOfflineTransactions = async (transactions, adminId) => {
   return { success: true, synced: results.upsertedCount, failed: 0 };
 };
 
+
+// ✅ SUPER RICH DATA + REAL BALANCE CALCULATION
 const getFarmerHistory = async (farmer_code, limit = 50, adminId) => {
-  const farmer = await Farmer.findOne({ farmer_code });
-  if (!farmer) return { error: 'Farmer not found' };
-  const cooperative = await getCooperativeByAdmin(adminId);
-  const history = await Transaction.find({ 
-    farmer_id: farmer._id, cooperativeId: cooperative._id 
-  }).sort({ timestamp_server: -1 }).limit(limit).lean();
-  return { farmer: { code: farmer.farmer_code, name: farmer.name, balance: farmer.balance }, history };
+  try {
+    // Find farmer by code
+    const farmer = await Farmer.findOne({ farmer_code });
+    if (!farmer) return { error: 'Farmer not found' };
+
+    // Verify cooperative access
+    const cooperative = await getCooperativeByAdmin(adminId);
+    if (farmer.cooperativeId.toString() !== cooperative._id.toString()) {
+      return { error: 'Unauthorized: Farmer does not belong to your cooperative' };
+    }
+
+    // ✅ GET ALL TRANSACTIONS + CALCULATE REAL BALANCE
+    const transactions = await Transaction.find({
+      farmer_id: farmer._id,
+      cooperativeId: cooperative._id
+    })
+    .sort({ timestamp_server: -1 })
+    .limit(limit)
+    .lean();
+
+    // ✅ REAL BALANCE CALCULATION FROM TRANSACTIONS
+    let balance = 0;
+    let milkIncome = 0;
+    let feedCost = 0;
+    let totalLitres = 0;
+    let totalTransactions = 0;
+
+    transactions.forEach(t => {
+      if (t.type === 'milk') {
+        // MILK: +payout (income)
+        const income = t.payout || 0;
+        balance += income;
+        milkIncome += income;
+        totalLitres += t.litres || 0;
+      } else if (t.type === 'feed') {
+        // FEED: -cost (expense)
+        const expense = t.cost || 0;
+        balance -= expense;
+        feedCost += expense;
+      }
+      totalTransactions++;
+    });
+
+    // ✅ RICH SUMMARY DATA
+    const summary = {
+      farmer: {
+        id: farmer._id,
+        name: farmer.name,
+        code: farmer.farmer_code,
+        phone: farmer.phone,
+        balance: balance,  // ✅ REAL CALCULATED BALANCE
+        milkIncome,
+        feedCost,
+        totalLitres,
+        totalTransactions,
+        netProfit: milkIncome - feedCost
+      },
+      transactions,
+      stats: {
+        milkTransactions: transactions.filter(t => t.type === 'milk').length,
+        feedTransactions: transactions.filter(t => t.type === 'feed').length,
+        period: 'All Time'
+      }
+    };
+
+    return summary;
+  } catch (error) {
+    return { error: error.message };
+  }
 };
+
 
 module.exports = {
   recordMilkTransaction,
