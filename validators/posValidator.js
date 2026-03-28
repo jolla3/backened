@@ -8,7 +8,7 @@ const milkTransactionSchema = Joi.object({
   device_seq_num: Joi.number().integer().min(0).required(),
   timestamp_local: Joi.date().iso().optional(),
   cooperativeId: Joi.string().required()
-}).unknown(true);   // ✅ Allows extra fields (e.g., idempotency_key)
+}).unknown(false);   // ✅ Allows extra fields (e.g., idempotency_key)
 
 const farmerCodeSchema = Joi.object({
   farmer_code: Joi.string().required()
