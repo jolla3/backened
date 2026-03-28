@@ -188,13 +188,14 @@ const recordMilkTransaction = async (session, data) => {
   }
 };
 
-// Sync offline transactions
-const syncOfflineTransactions = async (transactions, adminId) => {
-  const cooperative = await getCooperativeByAdmin(adminId);
+const syncOfflineTransactions = async (transactions, cooperativeId) => {
+  if (!cooperativeId) {
+    throw new Error('cooperativeId is required for sync');
+  }
   const operations = transactions.map(tx => ({
     updateOne: {
       filter: { idempotency_key: tx.idempotency_key },
-      update: { $setOnInsert: { ...tx, cooperativeId: cooperative._id } },
+      update: { $setOnInsert: { ...tx, cooperativeId } }, // use cooperativeId directly
       upsert: true
     }
   }));
@@ -202,7 +203,8 @@ const syncOfflineTransactions = async (transactions, adminId) => {
   return { success: true, synced: results.upsertedCount, failed: 0 };
 };
 
-// ✅ FARMER HISTORY – now accepts cooperativeId (instead of adminId)
+
+// ✅ Farmer History – expects cooperativeId
 const getFarmerHistory = async (farmer_code, limit = 50, cooperativeId) => {
   try {
     const farmer = await Farmer.findOne({ farmer_code });
@@ -220,6 +222,7 @@ const getFarmerHistory = async (farmer_code, limit = 50, cooperativeId) => {
     .limit(limit)
     .lean();
 
+    // ... balance calculation as before ...
     let balance = 0, milkIncome = 0, feedCost = 0, totalLitres = 0, totalTransactions = 0;
     transactions.forEach(t => {
       if (t.type === 'milk') {
@@ -259,6 +262,7 @@ const getFarmerHistory = async (farmer_code, limit = 50, cooperativeId) => {
     return { error: error.message };
   }
 };
+
 
 module.exports = {
   recordMilkTransaction,

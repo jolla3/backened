@@ -1,4 +1,3 @@
-// services/receiptService.js
 const Cooperative = require('../models/cooperative');
 const Farmer = require('../models/farmer');
 const Porter = require('../models/porter');
@@ -8,7 +7,7 @@ const logger = require('../utils/logger');
 
 class ReceiptPrinter {
     constructor() {
-        this.lineWidth = 32;
+        this.lineWidth = 32; // Sunmi thermal printer standard
     }
 
     formatLine(text, align = 'left', maxWidth = 32) {
@@ -23,30 +22,32 @@ class ReceiptPrinter {
         return text + pad.substring(0, maxWidth - text.length);
     }
 
-    // Accept either transaction object or transactionId
-    async generateThermalReceipt(transactionOrId) {
+    // ✅ Accept session, handle missing references safely
+    async generateThermalReceipt(transactionId, session = null) {
         try {
-            let transaction;
-            if (typeof transactionOrId === 'string') {
-                // Fetch from DB if ID provided
-                transaction = await Transaction.findById(transactionOrId)
-                    .populate('farmer_id', 'name farmer_code')
-                    .populate('porter_id', 'name')
-                    .populate('cooperativeId', 'name contact')
-                    .lean();
-                if (!transaction) {
-                    throw new Error('Transaction not found');
-                }
-            } else {
-                // Assume it's already a populated transaction object
-                transaction = transactionOrId;
-                // If not populated, we need to fetch required fields? But we can assume it's populated.
+            let query = Transaction.findById(transactionId)
+                .populate('farmer_id', 'name farmer_code')
+                .populate('porter_id', 'name')
+                .populate('cooperativeId', 'name contact')
+                .populate('rate_version_id', 'rate');
+
+            if (session) {
+                query = query.session(session);
             }
 
-            const cooperative = transaction.cooperativeId;
-            const farmer = transaction.farmer_id;
-            const porter = transaction.porter_id;
+            const transaction = await query.lean();
 
+            if (!transaction) {
+                throw new Error('Transaction not found');
+            }
+
+            // ✅ Safe extraction with fallbacks
+            const cooperative = transaction.cooperativeId || { name: 'Cooperative' };
+            const farmer = transaction.farmer_id || { name: 'Unknown', farmer_code: 'N/A' };
+            const porter = transaction.porter_id || { name: 'Direct' };
+            const rate = transaction.rate_version_id?.rate || 0;
+
+            // Generate QR data (use fallback if farmer_code missing)
             const qrData = `REC:${transaction.receipt_num}|F:${farmer.farmer_code}|L:${transaction.litres}|P:${transaction.payout}`;
             const qrImage = await generateQRCode(qrData);
 
@@ -67,14 +68,14 @@ class ReceiptPrinter {
                 `Farmer: ${farmer.name}`,
                 `Code: ${farmer.farmer_code}`,
                 '\x1b\x0a',
-                `Porter: ${porter ? porter.name : 'Direct'}`,
+                `Porter: ${porter.name}`,
                 '\x1b\x0a',
                 '='.repeat(this.lineWidth),
                 '\x1b\x0a',
                 this.formatLine('MILK DELIVERY', 'center'),
                 '\x1b\x0a',
                 `Litres: ${transaction.litres.toFixed(1)} L`,
-                `Rate: ${transaction.rate_version_id?.rate || 'N/A'}`,
+                `Rate: ${rate}`,
                 `Payout: KES ${transaction.payout.toFixed(2)}`,
                 '\x1b\x0a',
                 '='.repeat(this.lineWidth),
@@ -108,7 +109,7 @@ class ReceiptPrinter {
             };
 
         } catch (error) {
-            logger.error('Receipt generation failed', { error: error.message });
+            logger.error('Receipt generation failed', { transactionId, error: error.message });
             throw error;
         }
     }

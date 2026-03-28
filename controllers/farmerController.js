@@ -33,6 +33,7 @@ const createFarmer = async (req, res) => {
     res.status(400).json({ error: error.message });
   }
 };
+
 // Get Farmer by ID with Cooperative Scoping
 const getFarmer = async (req, res) => {
   try {

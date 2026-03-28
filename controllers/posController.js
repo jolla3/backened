@@ -161,32 +161,12 @@ const getDailySummary = async (req, res) => {
   }
 };
 
-// 6️⃣ Sync Offline Transactions
-const syncOfflineTransactions = async (req, res) => {
-  try {
-    const { transactions } = req.body;
-
-    if (!Array.isArray(transactions) || transactions.length === 0) {
-      return res.status(400).json({ error: 'No transactions to sync' });
-    }
-    if (transactions.length > 1000) {
-      return res.status(400).json({ error: 'Maximum 1000 transactions per sync' });
-    }
-
-    const result = await syncOfflineTxService(transactions);
-    res.json({ success: true, synced: result.synced, failed: result.failed });
-  } catch (error) {
-    logger.error('Sync failed', { error: error.message });
-    res.status(500).json({ error: error.message });
-  }
-};
-
 // 7️⃣ Farmer History (now passes cooperativeId)
 const getFarmerHistory = async (req, res) => {
   try {
     const { farmer_code } = req.params;
     const { limit = 50 } = req.query;
-    const cooperativeId = req.user?.cooperativeId; // Assumes auth middleware sets req.user
+    const cooperativeId = req.user?.cooperativeId;  // from JWT (porter)
 
     const result = await getFarmerHistoryService(farmer_code, parseInt(limit), cooperativeId);
     if (result.error) {
@@ -199,6 +179,28 @@ const getFarmerHistory = async (req, res) => {
     res.status(500).json({ error: error.message });
   }
 };
+
+// 6️⃣ Sync Offline Transactions (if you use this, pass cooperativeId)
+const syncOfflineTransactions = async (req, res) => {
+  try {
+    const { transactions } = req.body;
+    const cooperativeId = req.user?.cooperativeId; // or req.device.cooperativeId
+
+    if (!Array.isArray(transactions) || transactions.length === 0) {
+      return res.status(400).json({ error: 'No transactions to sync' });
+    }
+    if (transactions.length > 1000) {
+      return res.status(400).json({ error: 'Maximum 1000 transactions per sync' });
+    }
+
+    const result = await syncOfflineTxService(transactions, cooperativeId); // ← pass cooperativeId
+    res.json({ success: true, synced: result.synced, failed: result.failed });
+  } catch (error) {
+    logger.error('Sync failed', { error: error.message });
+    res.status(500).json({ error: error.message });
+  }
+};
+
 
 // 🆕 8️⃣ Get Farmers Collected by a Porter
 const getFarmersCollectedByPorter = async (req, res) => {
