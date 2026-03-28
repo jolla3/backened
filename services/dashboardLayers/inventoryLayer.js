@@ -1,3 +1,4 @@
+const mongoose = require('mongoose');  // ✅ Added
 const Inventory = require('../../models/inventory');
 const Cooperative = require('../../models/cooperative');
 const logger = require('../../utils/logger');

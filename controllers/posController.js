@@ -1,3 +1,4 @@
+const Transaction = require('../models/transaction');   // Add this line
 const { 
   recordMilkTransaction: recordMilkTxService, 
   getFarmerHistory: getFarmerHistoryService, 

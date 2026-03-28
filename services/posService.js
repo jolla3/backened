@@ -1,5 +1,5 @@
-const mongoose = require('mongoose');  // ✅ Added
-const crypto = require('crypto');     // ✅ Added for HMAC
+const mongoose = require('mongoose');
+const crypto = require('crypto');
 const TransactionService = require('./transactionService');
 const Farmer = require('../models/farmer');
 const Porter = require('../models/porter');
@@ -402,9 +402,9 @@ const getPerformanceChartData = async (params) => {
   // Build match stage
   const match = { type: 'milk' };
   if (entity === 'porter' && id) {
-    match.porter_id = mongoose.Types.ObjectId(id);
+    match.porter_id = new mongoose.Types.ObjectId(id);  // ✅ fixed: use 'new'
   } else if (entity === 'farmer' && id) {
-    match.farmer_id = mongoose.Types.ObjectId(id);
+    match.farmer_id = new mongoose.Types.ObjectId(id);  // ✅ fixed: use 'new'
   }
 
   // Date range
