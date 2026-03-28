@@ -4,38 +4,30 @@ const Farmer = require('../models/farmer');
 const Porter = require('../models/porter');
 const Cooperative = require('../models/cooperative');
 const RateVersion = require('../models/rateVersion');
-const Inventory = require('../models/inventory');  // optional
+const Inventory = require('../models/inventory');
 const logger = require('../utils/logger');
 
-/**
- * Generate a comprehensive monthly report for a cooperative.
- * @param {number} year - 4-digit year
- * @param {number} month - 1-12
- * @param {string} cooperativeId - ObjectId
- * @returns {Object} detailed report
- */
 const getMonthlyReport = async (year, month, cooperativeId) => {
-  // Validate cooperative
   const cooperative = await Cooperative.findById(cooperativeId).lean();
   if (!cooperative) throw new Error('Cooperative not found');
 
-  // Parse and validate month/year
   const y = parseInt(year);
   const m = parseInt(month);
   if (isNaN(y) || isNaN(m) || m < 1 || m > 12) {
     throw new Error('Invalid year or month');
   }
 
-  // Date range: start of month (00:00:00) to end of month (23:59:59.999)
   const startDate = new Date(y, m - 1, 1);
   const endDate = new Date(y, m, 0, 23, 59, 59, 999);
 
-  // ----- Helper to run aggregation pipelines -----
+  // Convert cooperativeId to ObjectId once (use new)
+  const coopObjectId = new mongoose.Types.ObjectId(cooperativeId);
+
   const runAgg = async (pipeline) => Transaction.aggregate(pipeline);
 
   // ========== 1. OVERVIEW ==========
   const overviewPipeline = [
-    { $match: { cooperativeId: mongoose.Types.ObjectId(cooperativeId), type: 'milk', timestamp_server: { $gte: startDate, $lte: endDate } } },
+    { $match: { cooperativeId: coopObjectId, type: 'milk', timestamp_server: { $gte: startDate, $lte: endDate } } },
     { $group: {
         _id: null,
         totalLitres: { $sum: '$litres' },
@@ -55,21 +47,18 @@ const getMonthlyReport = async (year, month, cooperativeId) => {
   const uniquePortersCount = overviewResult.uniquePorters?.length || 0;
   const zonesCount = overviewResult.zones?.length || 0;
 
-  // Farmers total and active
-  const allFarmersCount = await Farmer.countDocuments({ cooperativeId, isActive: true });
+  const allFarmersCount = await Farmer.countDocuments({ cooperativeId: coopObjectId, isActive: true });
   const farmersWithDeliveries = uniqueFarmersCount;
   const farmersWithoutDeliveries = allFarmersCount - farmersWithDeliveries;
 
-  // Averages
   const avgLitresPerTransaction = transactionCount ? totalLitres / transactionCount : 0;
   const avgPayoutPerTransaction = transactionCount ? totalPayout / transactionCount : 0;
   const avgLitresPerFarmer = farmersWithDeliveries ? totalLitres / farmersWithDeliveries : 0;
   const avgPayoutPerFarmer = farmersWithDeliveries ? totalPayout / farmersWithDeliveries : 0;
 
   // ========== 2. FINANCIAL BREAKDOWNS ==========
-  // 2a. Rate version usage
   const rateBreakdownPipeline = [
-    { $match: { cooperativeId: mongoose.Types.ObjectId(cooperativeId), type: 'milk', timestamp_server: { $gte: startDate, $lte: endDate } } },
+    { $match: { cooperativeId: coopObjectId, type: 'milk', timestamp_server: { $gte: startDate, $lte: endDate } } },
     { $lookup: { from: 'rateversions', localField: 'rate_version_id', foreignField: '_id', as: 'rateInfo' } },
     { $unwind: { path: '$rateInfo', preserveNullAndEmptyArrays: true } },
     { $group: {
@@ -92,9 +81,8 @@ const getMonthlyReport = async (year, month, cooperativeId) => {
   ];
   const rateBreakdown = await runAgg(rateBreakdownPipeline);
 
-  // 2b. Payout by week (week numbers of the month)
   const weeklyPipeline = [
-    { $match: { cooperativeId: mongoose.Types.ObjectId(cooperativeId), type: 'milk', timestamp_server: { $gte: startDate, $lte: endDate } } },
+    { $match: { cooperativeId: coopObjectId, type: 'milk', timestamp_server: { $gte: startDate, $lte: endDate } } },
     { $group: {
         _id: { week: { $week: '$timestamp_server' } },
         totalPayout: { $sum: '$payout' },
@@ -107,9 +95,8 @@ const getMonthlyReport = async (year, month, cooperativeId) => {
   ];
   const weekly = await runAgg(weeklyPipeline);
 
-  // 2c. Payout by zone
   const zonePipeline = [
-    { $match: { cooperativeId: mongoose.Types.ObjectId(cooperativeId), type: 'milk', timestamp_server: { $gte: startDate, $lte: endDate } } },
+    { $match: { cooperativeId: coopObjectId, type: 'milk', timestamp_server: { $gte: startDate, $lte: endDate } } },
     { $group: {
         _id: '$zone',
         totalPayout: { $sum: '$payout' },
@@ -122,9 +109,8 @@ const getMonthlyReport = async (year, month, cooperativeId) => {
   ];
   const zoneBreakdown = await runAgg(zonePipeline);
 
-  // 2d. Payout by porter (top 10)
   const porterPipeline = [
-    { $match: { cooperativeId: mongoose.Types.ObjectId(cooperativeId), type: 'milk', timestamp_server: { $gte: startDate, $lte: endDate } } },
+    { $match: { cooperativeId: coopObjectId, type: 'milk', timestamp_server: { $gte: startDate, $lte: endDate } } },
     { $group: {
         _id: '$porter_id',
         totalPayout: { $sum: '$payout' },
@@ -149,9 +135,8 @@ const getMonthlyReport = async (year, month, cooperativeId) => {
   const topPorters = await runAgg(porterPipeline);
 
   // ========== 3. FARMER PERFORMANCE ==========
-  // Top farmers by volume
   const topFarmersPipeline = [
-    { $match: { cooperativeId: mongoose.Types.ObjectId(cooperativeId), type: 'milk', timestamp_server: { $gte: startDate, $lte: endDate } } },
+    { $match: { cooperativeId: coopObjectId, type: 'milk', timestamp_server: { $gte: startDate, $lte: endDate } } },
     { $group: {
         _id: '$farmer_id',
         totalLitres: { $sum: '$litres' },
@@ -176,9 +161,8 @@ const getMonthlyReport = async (year, month, cooperativeId) => {
   ];
   const topFarmersByVolume = await runAgg(topFarmersPipeline);
 
-  // Bottom farmers (by volume, among those who had deliveries)
   const bottomFarmersPipeline = [
-    { $match: { cooperativeId: mongoose.Types.ObjectId(cooperativeId), type: 'milk', timestamp_server: { $gte: startDate, $lte: endDate } } },
+    { $match: { cooperativeId: coopObjectId, type: 'milk', timestamp_server: { $gte: startDate, $lte: endDate } } },
     { $group: {
         _id: '$farmer_id',
         totalLitres: { $sum: '$litres' },
@@ -203,14 +187,12 @@ const getMonthlyReport = async (year, month, cooperativeId) => {
   ];
   const bottomFarmersByVolume = await runAgg(bottomFarmersPipeline);
 
-  // Farmers with no deliveries (optional – list IDs or count)
   const farmersWithDeliveriesIds = (await Farmer.distinct('_id', { _id: { $in: overviewResult.uniqueFarmers || [] } })).map(id => id.toString());
-  const farmersNoDeliveries = await Farmer.find({ cooperativeId, isActive: true, _id: { $nin: farmersWithDeliveriesIds } }).select('farmer_code name').limit(20).lean();
+  const farmersNoDeliveries = await Farmer.find({ cooperativeId: coopObjectId, isActive: true, _id: { $nin: farmersWithDeliveriesIds } }).select('farmer_code name').limit(20).lean();
 
   // ========== 4. PORTER PERFORMANCE ==========
-  // Porter zone coverage
   const zonePorterPipeline = [
-    { $match: { cooperativeId: mongoose.Types.ObjectId(cooperativeId), type: 'milk', timestamp_server: { $gte: startDate, $lte: endDate } } },
+    { $match: { cooperativeId: coopObjectId, type: 'milk', timestamp_server: { $gte: startDate, $lte: endDate } } },
     { $group: {
         _id: { zone: '$zone', porter: '$porter_id' },
         totalLitres: { $sum: '$litres' },
@@ -239,9 +221,8 @@ const getMonthlyReport = async (year, month, cooperativeId) => {
   ];
   const zoneCoverage = await runAgg(zonePorterPipeline);
 
-  // Porter summary stats (all porters)
   const porterStats = await Porter.aggregate([
-    { $match: { cooperativeId: mongoose.Types.ObjectId(cooperativeId), isActive: true } },
+    { $match: { cooperativeId: coopObjectId, isActive: true } },
     { $lookup: {
         from: 'transactions',
         let: { porterId: '$_id' },
@@ -266,10 +247,9 @@ const getMonthlyReport = async (year, month, cooperativeId) => {
   const avgLitresPerPorter = activePorters ? porterStats.reduce((sum, p) => sum + p.totalLitres, 0) / activePorters : 0;
   const avgPayoutPerPorter = activePorters ? porterStats.reduce((sum, p) => sum + p.totalPayout, 0) / activePorters : 0;
 
-  // ========== 5. INVENTORY & FEED SALES (if any) ==========
-  // Only if there are feed transactions
+  // ========== 5. INVENTORY & FEED SALES ==========
   const feedTransactions = await Transaction.find({
-    cooperativeId,
+    cooperativeId: coopObjectId,
     type: 'feed',
     timestamp_server: { $gte: startDate, $lte: endDate }
   }).lean();
@@ -278,7 +258,6 @@ const getMonthlyReport = async (year, month, cooperativeId) => {
   if (feedTransactions.length > 0) {
     const totalFeedQuantity = feedTransactions.reduce((sum, t) => sum + (t.quantity || 0), 0);
     const totalFeedCost = feedTransactions.reduce((sum, t) => sum + (t.cost || 0), 0);
-    // If you have inventory items with price, you could compute revenue, but for now just costs.
     inventorySummary = {
       feedTransactionsCount: feedTransactions.length,
       totalFeedQuantity,
@@ -288,9 +267,8 @@ const getMonthlyReport = async (year, month, cooperativeId) => {
   }
 
   // ========== 6. TRENDS & COMPARISONS ==========
-  // Daily breakdown
   const dailyPipeline = [
-    { $match: { cooperativeId: mongoose.Types.ObjectId(cooperativeId), type: 'milk', timestamp_server: { $gte: startDate, $lte: endDate } } },
+    { $match: { cooperativeId: coopObjectId, type: 'milk', timestamp_server: { $gte: startDate, $lte: endDate } } },
     { $group: {
         _id: { $dateToString: { format: '%Y-%m-%d', date: '$timestamp_server' } },
         litres: { $sum: '$litres' },
@@ -303,7 +281,6 @@ const getMonthlyReport = async (year, month, cooperativeId) => {
   ];
   const daily = await runAgg(dailyPipeline);
 
-  // Previous month comparison
   let prevMonthStart, prevMonthEnd;
   if (month === 1) {
     prevMonthStart = new Date(y - 1, 11, 1);
@@ -313,7 +290,7 @@ const getMonthlyReport = async (year, month, cooperativeId) => {
     prevMonthEnd = new Date(y, m - 1, 0, 23, 59, 59, 999);
   }
   const prevMonthAgg = await Transaction.aggregate([
-    { $match: { cooperativeId: mongoose.Types.ObjectId(cooperativeId), type: 'milk', timestamp_server: { $gte: prevMonthStart, $lte: prevMonthEnd } } },
+    { $match: { cooperativeId: coopObjectId, type: 'milk', timestamp_server: { $gte: prevMonthStart, $lte: prevMonthEnd } } },
     { $group: { _id: null, totalLitres: { $sum: '$litres' }, totalPayout: { $sum: '$payout' }, transactionCount: { $sum: 1 } } }
   ]);
   const prevMonth = prevMonthAgg[0] || { totalLitres: 0, totalPayout: 0, transactionCount: 0 };
@@ -327,7 +304,6 @@ const getMonthlyReport = async (year, month, cooperativeId) => {
     cooperative: {
       id: cooperative._id,
       name: cooperative.name,
-      // other cooperative fields if needed
     },
     period: {
       year: y,
@@ -351,7 +327,7 @@ const getMonthlyReport = async (year, month, cooperativeId) => {
     },
     financial: {
       totalPayout,
-      totalMilkValue: totalPayout, // if no deductions
+      totalMilkValue: totalPayout,
       averageRatePerLiter: totalLitres ? totalPayout / totalLitres : 0,
       rateBreakdown,
       weeklyBreakdown: weekly,
@@ -372,12 +348,12 @@ const getMonthlyReport = async (year, month, cooperativeId) => {
       }
     },
     porterPerformance: {
-      totalPorters: await Porter.countDocuments({ cooperativeId, isActive: true }),
+      totalPorters: await Porter.countDocuments({ cooperativeId: coopObjectId, isActive: true }),
       activePorters,
       averageLitresPerPorter: avgLitresPerPorter,
       averagePayoutPerPorter: avgPayoutPerPorter,
       zoneCoverage,
-      detailedPorterStats: porterStats // full list (maybe limit)
+      detailedPorterStats: porterStats
     },
     inventory: inventorySummary,
     trends: {
