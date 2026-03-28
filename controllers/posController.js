@@ -5,7 +5,9 @@ const {
   verifyTransaction: verifyTxService,
   findFarmerByCode: findFarmerService,
   getPorterPerformance: getPorterPerformanceService,
-  getDailySummary: getDailySummaryService
+  getDailySummary: getDailySummaryService,
+  getFarmersCollectedByPorter: getFarmersCollectedByPorterService,   // 🆕
+  getPerformanceChartData: getPerformanceChartDataService             // 🆕
 } = require('../services/posService');
 const { milkTransactionSchema, farmerCodeSchema } = require('../validators/posValidator');
 const logger = require('../utils/logger');
@@ -36,7 +38,6 @@ const recordMilkTransaction = async (req, res) => {
   let session = null;
   
   try {
-    // 1️⃣ Validation
     const { error, value } = milkTransactionSchema.validate(req.body);
     if (error) {
       return res.status(400).json({ error: error.details[0].message });
@@ -46,7 +47,6 @@ const recordMilkTransaction = async (req, res) => {
     const device = req.device;
     const branch_id = req.branch_id;
 
-    // 2️⃣ Device Validation
     if (device.revoked || !device.approved) {
       return res.status(403).json({ error: 'Device not authorized' });
     }
@@ -54,7 +54,6 @@ const recordMilkTransaction = async (req, res) => {
       return res.status(403).json({ error: 'Device branch mismatch' });
     }
 
-    // 3️⃣ Start Transaction Session
     session = await Transaction.startSession();
     session.startTransaction();
     
@@ -72,7 +71,6 @@ const recordMilkTransaction = async (req, res) => {
 
     await session.commitTransaction();
 
-    // ✅ 4️⃣ FULL SUNMI POS RESPONSE WITH THERMAL RECEIPT
     res.json({
       success: true,
       transaction: {
@@ -88,9 +86,9 @@ const recordMilkTransaction = async (req, res) => {
         newBalance: result.newBalance
       },
       receipt: {
-        thermalData: result.thermalReceipt.thermalReceipt,  // 🔥 Print this on Sunmi
-        qrImage: result.thermalReceipt.qrImage,             // 📱 Show on screen
-        preview: result.receiptPreview,                     // 🐛 Debug text
+        thermalData: result.thermalReceipt.thermalReceipt,
+        qrImage: result.thermalReceipt.qrImage,
+        preview: result.receiptPreview,
         receiptNum: result.receiptNum
       }
     });
@@ -132,7 +130,7 @@ const verifyTransaction = async (req, res) => {
   }
 };
 
-// 4️⃣ Porter Performance
+// 4️⃣ Porter Performance (basic stats)
 const getPorterPerformance = async (req, res) => {
   try {
     const { porter_id } = req.params;
@@ -200,6 +198,45 @@ const getFarmerHistory = async (req, res) => {
   }
 };
 
+// 🆕 8️⃣ Get Farmers Collected by a Porter
+const getFarmersCollectedByPorter = async (req, res) => {
+  try {
+    const { porter_id } = req.params;
+    const { startDate, endDate } = req.query;
+
+    const result = await getFarmersCollectedByPorterService(porter_id, startDate, endDate);
+    if (result.error) {
+      return res.status(404).json({ error: result.error });
+    }
+
+    res.json({ success: true, ...result });
+  } catch (error) {
+    logger.error('Get farmers collected by porter failed', { error: error.message });
+    res.status(500).json({ error: error.message });
+  }
+};
+
+// 🆕 9️⃣ Chart Data for Graphs
+const getPerformanceChartData = async (req, res) => {
+  try {
+    const { entity, id, period, metric, startDate, endDate } = req.query;
+
+    const result = await getPerformanceChartDataService({
+      entity,
+      id,
+      period,
+      metric,
+      startDate,
+      endDate
+    });
+
+    res.json({ success: true, ...result });
+  } catch (error) {
+    logger.error('Chart data failed', { error: error.message });
+    res.status(500).json({ error: error.message });
+  }
+};
+
 module.exports = {
   findFarmerByCode,
   recordMilkTransaction,
@@ -207,5 +244,7 @@ module.exports = {
   getPorterPerformance,
   getDailySummary,
   syncOfflineTransactions,
-  getFarmerHistory
+  getFarmerHistory,
+  getFarmersCollectedByPorter,   // 🆕
+  getPerformanceChartData         // 🆕
 };

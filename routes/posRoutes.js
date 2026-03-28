@@ -24,4 +24,8 @@ router.post('/sync', deviceMiddleware, posController.syncOfflineTransactions);
 // Farmer History
 router.get('/farmer/:farmer_code/history', posController.getFarmerHistory);
 
+router.get('/porters/:porter_id/farmers',posController.getFarmersCollectedByPorter);
+
+router.get('/chart-data', posController.getPerformanceChartData);
+
 module.exports = router;

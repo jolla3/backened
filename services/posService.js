@@ -6,16 +6,16 @@ const logger = require('../utils/logger');
 const FRAUD_CONFIG = require('../config/fraudConfig');
 
 // =============================================================================
-// IMPORT SERVICES (No duplication - use transactionService functions)
+// IMPORT SERVICES (No duplication – use transactionService functions)
 // =============================================================================
 const {
   recordMilkTransaction: recordMilkTxFromTransactionService,
   syncOfflineTransactions: syncOfflineFromTransactionService,
   getFarmerHistory: getFarmerHistoryFromTransactionService,
   getActiveRateVersion,
-  generateReceiptNum,        // ✅ Use from transactionService
-  generateServerSeqNum,      // ✅ Use from transactionService  
-  checkDailyFraudLimit       // ✅ Use from transactionService
+  generateReceiptNum,
+  generateServerSeqNum,
+  checkDailyFraudLimit
 } = TransactionService;
 
 // =============================================================================
@@ -29,7 +29,6 @@ const findFarmerByCode = async (farmer_code) => {
     return { error: 'Farmer not found' };
   }
 
-  // Get last milk delivery
   const lastTx = await Transaction.findOne({ 
     farmer_id: farmer._id,
     type: 'milk'
@@ -122,8 +121,8 @@ const recordMilkTransaction = async (session, data) => {
       farmer_code,
       farmer_name: farmerDetails.name,
       newBalance: parseFloat(farmerDetails.balance) + result.payout,
-      thermalReceipt: result.thermalReceipt,     // ✅ Sunmi thermal print
-      receiptPreview: result.receiptPreview      // ✅ Debug text
+      thermalReceipt: result.thermalReceipt,
+      receiptPreview: result.receiptPreview
     };
 
   } catch (error) {
@@ -147,7 +146,7 @@ const verifyTransaction = async (receiptNum) => {
     return { valid: false, error: 'Transaction not found' };
   }
 
-  // Quick signature verification
+  // Quick signature verification (assumes generateHMAC is available – add if needed)
   const signatureData = {
     receiptNum: transaction.receipt_num,
     farmer_code: transaction.farmer_id.farmer_code,
@@ -155,7 +154,6 @@ const verifyTransaction = async (receiptNum) => {
     payout: transaction.payout,
     timestamp: transaction.timestamp_server.getTime()
   };
-
   const expectedSignature = generateHMAC(signatureData);
   const isValid = expectedSignature === transaction.digital_signature;
 
@@ -183,7 +181,7 @@ const verifyTransaction = async (receiptNum) => {
 };
 
 // =============================================================================
-// 4️⃣ PORTER PERFORMANCE REPORT
+// 4️⃣ PORTER PERFORMANCE REPORT (Basic stats)
 // =============================================================================
 const getPorterPerformance = async (porter_id, period = 'today') => {
   logger.info('📊 POS: Porter performance', { porter_id, period });
@@ -267,15 +265,7 @@ const getDailySummary = async (date = new Date().toISOString().split('T')[0]) =>
 };
 
 // =============================================================================
-// 6️⃣ OFFLINE SYNC
-// =============================================================================
-const syncOfflineTransactions = async (transactions) => {
-  logger.info('🔄 POS: Syncing offline transactions', { count: transactions.length });
-  return await syncOfflineFromTransactionService(transactions, null);
-};
-
-// =============================================================================
-// 7️⃣ FARMER HISTORY
+// 6️⃣ FARMER HISTORY
 // =============================================================================
 const getFarmerHistory = async (farmer_code, limit = 50) => {
   logger.info('📋 POS: Farmer history', { farmer_code, limit });
@@ -283,19 +273,224 @@ const getFarmerHistory = async (farmer_code, limit = 50) => {
 };
 
 // =============================================================================
-// EXPORTS (Clean - No internal utils)
+// 7️⃣ OFFLINE SYNC
+// =============================================================================
+const syncOfflineTransactions = async (transactions) => {
+  logger.info('🔄 POS: Syncing offline transactions', { count: transactions.length });
+  return await syncOfflineFromTransactionService(transactions, null);
+};
+
+// =============================================================================
+// 🆕 8️⃣ GET FARMERS COLLECTED BY A PORTER (with details and totals)
+// =============================================================================
+const getFarmersCollectedByPorter = async (porter_id, startDate, endDate) => {
+  logger.info('👨‍🌾 POS: Farmers collected by porter', { porter_id, startDate, endDate });
+
+  // Validate porter exists
+  const porter = await Porter.findById(porter_id).lean();
+  if (!porter) {
+    return { error: 'Porter not found' };
+  }
+
+  // Build date filter
+  let dateFilter = {};
+  if (startDate && endDate) {
+    dateFilter = {
+      $gte: new Date(startDate),
+      $lt: new Date(endDate)
+    };
+  } else if (startDate) {
+    dateFilter = { $gte: new Date(startDate) };
+  } else if (endDate) {
+    dateFilter = { $lt: new Date(endDate) };
+  } else {
+    // Default to last 30 days if no dates provided
+    const defaultStart = new Date();
+    defaultStart.setDate(defaultStart.getDate() - 30);
+    dateFilter = { $gte: defaultStart };
+  }
+
+  // Aggregate transactions for this porter
+  const pipeline = [
+    {
+      $match: {
+        porter_id: porter._id,
+        type: 'milk',
+        timestamp_server: dateFilter
+      }
+    },
+    {
+      $group: {
+        _id: '$farmer_id',
+        totalLitres: { $sum: '$litres' },
+        transactionCount: { $sum: 1 },
+        totalPayout: { $sum: '$payout' },
+        lastTransaction: { $max: '$timestamp_server' },
+        firstTransaction: { $min: '$timestamp_server' }
+      }
+    },
+    {
+      $lookup: {
+        from: 'farmers',
+        localField: '_id',
+        foreignField: '_id',
+        as: 'farmerInfo'
+      }
+    },
+    { $unwind: { path: '$farmerInfo', preserveNullAndEmptyArrays: false } },
+    {
+      $project: {
+        farmer: {
+          id: '$farmerInfo._id',
+          code: '$farmerInfo.farmer_code',
+          name: '$farmerInfo.name',
+          phone: '$farmerInfo.phone',
+          branch: '$farmerInfo.branch_id',
+          location: '$farmerInfo.location',
+          balance: '$farmerInfo.balance'
+        },
+        totalLitres: 1,
+        transactionCount: 1,
+        totalPayout: 1,
+        lastTransaction: 1,
+        firstTransaction: 1
+      }
+    },
+    { $sort: { totalLitres: -1 } } // Most litres first
+  ];
+
+  const farmers = await Transaction.aggregate(pipeline);
+
+  return {
+    porter: { id: porter._id, name: porter.name, zones: porter.zones || [] },
+    dateRange: {
+      start: dateFilter.$gte ? dateFilter.$gte.toISOString() : null,
+      end: dateFilter.$lt ? dateFilter.$lt.toISOString() : null
+    },
+    farmers: farmers,
+    summary: {
+      totalFarmers: farmers.length,
+      totalLitres: farmers.reduce((sum, f) => sum + f.totalLitres, 0),
+      totalPayout: farmers.reduce((sum, f) => sum + f.totalPayout, 0),
+      totalTransactions: farmers.reduce((sum, f) => sum + f.transactionCount, 0)
+    }
+  };
+};
+
+// =============================================================================
+// 🆕 9️⃣ CHART DATA ENDPOINT – Returns time‑series for graphs
+// =============================================================================
+const getPerformanceChartData = async (params) => {
+  const { entity, id, period = 'day', metric = 'litres', startDate, endDate } = params;
+
+  logger.info('📊 POS: Chart data request', { entity, id, period, metric, startDate, endDate });
+
+  // Validate entity
+  if (!['porter', 'farmer', 'overall'].includes(entity)) {
+    throw new Error('Invalid entity. Must be porter, farmer, or overall');
+  }
+
+  // Build match stage
+  const match = { type: 'milk' };
+  if (entity === 'porter' && id) {
+    match.porter_id = mongoose.Types.ObjectId(id);
+  } else if (entity === 'farmer' && id) {
+    match.farmer_id = mongoose.Types.ObjectId(id);
+  }
+
+  // Date range
+  let start = startDate ? new Date(startDate) : new Date();
+  let end = endDate ? new Date(endDate) : new Date();
+  if (!startDate) start.setDate(start.getDate() - 30); // default last 30 days
+  if (!endDate) end.setHours(23, 59, 59, 999);
+
+  match.timestamp_server = { $gte: start, $lte: end };
+
+  // Determine grouping interval
+  let dateGroup;
+  if (period === 'day') {
+    dateGroup = {
+      year: { $year: '$timestamp_server' },
+      month: { $month: '$timestamp_server' },
+      day: { $dayOfMonth: '$timestamp_server' }
+    };
+  } else if (period === 'week') {
+    dateGroup = {
+      year: { $year: '$timestamp_server' },
+      week: { $week: '$timestamp_server' }
+    };
+  } else if (period === 'month') {
+    dateGroup = {
+      year: { $year: '$timestamp_server' },
+      month: { $month: '$timestamp_server' }
+    };
+  } else {
+    throw new Error('Period must be day, week, or month');
+  }
+
+  // Build group stage based on metric
+  let groupFields = { _id: dateGroup };
+  if (metric === 'litres') {
+    groupFields.total = { $sum: '$litres' };
+  } else if (metric === 'transactions') {
+    groupFields.total = { $sum: 1 };
+  } else if (metric === 'payout') {
+    groupFields.total = { $sum: '$payout' };
+  } else {
+    throw new Error('Metric must be litres, transactions, or payout');
+  }
+
+  const pipeline = [
+    { $match: match },
+    {
+      $group: groupFields
+    },
+    { $sort: { '_id': 1 } }
+  ];
+
+  const results = await Transaction.aggregate(pipeline);
+
+  // Format results into chart-friendly array
+  const chartData = results.map(item => {
+    let date;
+    if (period === 'day') {
+      date = new Date(item._id.year, item._id.month - 1, item._id.day);
+    } else if (period === 'week') {
+      // Approximate: first day of the week
+      date = new Date(item._id.year, 0, 1 + (item._id.week - 1) * 7);
+    } else {
+      date = new Date(item._id.year, item._id.month - 1, 1);
+    }
+    return {
+      date: date.toISOString().split('T')[0],
+      value: item.total
+    };
+  });
+
+  return {
+    entity,
+    id: id || null,
+    period,
+    metric,
+    dateRange: { start: start.toISOString(), end: end.toISOString() },
+    data: chartData
+  };
+};
+
+// =============================================================================
+// EXPORTS (All functions, clean and no duplication)
 // =============================================================================
 module.exports = {
-  // 🔥 CORE POS FUNCTIONS
+  // Core POS
   recordMilkTransaction,
   findFarmerByCode,
   verifyTransaction,
-  
-  // 📊 REPORTS
+  // Reports
   getPorterPerformance,
   getDailySummary,
   getFarmerHistory,
-  
-  // 🌐 OFFLINE
+  getFarmersCollectedByPorter,   // 🆕
+  getPerformanceChartData,        // 🆕
+  // Offline
   syncOfflineTransactions
 };

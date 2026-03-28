@@ -112,45 +112,45 @@ const deleteFarmer = async (farmerId, adminId) => {
 };
 
 // Get All Farmers for Admin's Cooperative
-// ✅ FIXED: getAllFarmers - Adds balance to ALL farmers (no filtering)
+// farmerService.js
+
+// Get All Farmers for Admin's Cooperative (with balance)
 const getAllFarmers = async (adminId) => {
   const cooperative = await Cooperative.findOne({ adminId: adminId });
   if (!cooperative) {
     throw new Error('Cooperative not found for this admin');
   }
 
-  // Get ALL farmers (exactly like before)
+  // Get all farmers for the cooperative
   const farmers = await Farmer.find({ cooperativeId: cooperative._id })
-    .sort({ createdAt: -1 });
+    .sort({ createdAt: -1 })
+    .lean(); // Use lean() to get plain objects for easier modification
 
-  // Add balance to EVERY farmer using getFarmerHistory
-  for (let i = 0; i < farmers.length; i++) {
-    const farmer = farmers[i];
-    try {
-      const result = await transactionService.getFarmerHistory(
-        farmer.farmer_code, 
-        1,  // Minimal data
-        adminId
-      );
-      
-      if (!result.error) {
-        farmers[i] = {
-          ...farmer.toObject(),
-          balance: result.farmer.balance || 0  // ✅ ONLY balance added
+  // Attach balance to each farmer using the getBalance function
+  const farmersWithBalance = await Promise.all(
+    farmers.map(async (farmer) => {
+      try {
+        const balanceData = await getBalance(farmer._id, adminId);
+        return {
+          ...farmer,
+          balance: balanceData.balance,
+          milkIncome: balanceData.milkIncome,
+          feedCost: balanceData.feedCost,
         };
+      } catch (error) {
+        console.error(`Failed to fetch balance for farmer ${farmer.farmer_code}:`, error.message);
+        // Return farmer with zero balance if error occurs (keep the farmer in the list)
+        return { ...farmer, balance: 0, milkIncome: 0, feedCost: 0 };
       }
-    } catch (error) {
-      // ✅ Keep farmer even if balance fails
-      console.error(`Balance failed for ${farmer.farmer_code}:`, error.message);
-    }
-  }
+    })
+  );
 
-  logger.info('Farmers retrieved', { 
-    count: farmers.length,  // ✅ Original count maintained
-    cooperativeId: cooperative._id 
+  logger.info('Farmers retrieved with balances', {
+    count: farmersWithBalance.length,
+    cooperativeId: cooperative._id,
   });
-  
-  return farmers;  // ✅ ALL farmers with balance field
+
+  return farmersWithBalance;
 };
 
 // ✅ FIXED: Remove fake balance calls, use transactionService directly
