@@ -2,24 +2,31 @@ const Transaction = require('../models/transaction');
 const Inventory = require('../models/inventory');
 const logger = require('../utils/logger');
 
-// ✅ FIXED: Added adminId, filtered by cooperative
 const getTopFeedProducts = async (limit = 5, adminId) => {
   const cooperative = await require('../models/cooperative').findById(adminId);
   if (!cooperative) throw new Error('Cooperative not found');
 
+  const thirtyDaysAgo = new Date(Date.now() - 30 * 86400000);
+
   const topProducts = await Transaction.aggregate([
-    { $match: { type: 'feed', cooperativeId: cooperative._id } },
+    {
+      $match: {
+        type: 'feed',
+        cooperativeId: cooperative._id,
+        timestamp_server: { $gte: thirtyDaysAgo }, // ✅ only last 30 days
+      },
+    },
     { $group: {
       _id: '$product_id',
       totalQuantity: { $sum: '$quantity' },
       totalCost: { $sum: '$cost' },
-      transactionCount: { $sum: 1 }
+      transactionCount: { $sum: 1 },
     }},
     { $lookup: {
       from: 'inventories',
       localField: '_id',
       foreignField: '_id',
-      as: 'product'
+      as: 'product',
     }},
     { $unwind: '$product' },
     { $project: {
@@ -29,15 +36,16 @@ const getTopFeedProducts = async (limit = 5, adminId) => {
       totalQuantity: 1,
       totalCost: 1,
       transactionCount: 1,
-      avgCostPerUnit: { $round: [{ $divide: ['$totalCost', '$totalQuantity'] }, 2] }
+      avgCostPerUnit: { $round: [{ $divide: ['$totalCost', '$totalQuantity'] }, 2] },
     }},
-    { $sort: { totalQuantity: -1 } },
-    { $limit: limit }
+    { $sort: { totalCost: -1 } }, // sort by revenue
+    { $limit: limit },
   ]);
 
   return topProducts;
 };
 
+// ... rest of functions unchanged (getFeedStockRisk, getFeedSalesTrends)
 // ✅ FIXED: Added adminId, filtered by cooperative
 const getFeedStockRisk = async (adminId) => {
   const cooperative = await require('../models/cooperative').findById(adminId);

@@ -1,24 +1,27 @@
 const Inventory = require('../../models/inventory');
-const Transaction = require('../../models/transaction');
 const Cooperative = require('../../models/cooperative');
 const logger = require('../../utils/logger');
-const feedAnalytics = require('../../analytics/feedAnalytics'); // the module with getTopFeedProducts, etc.
-const inventoryVelocity = require('../../analytics/inventoryVelocity'); // for velocity
+const feedAnalytics = require('../../analytics/feedAnalytics');
+const inventoryVelocity = require('../../analytics/inventoryVelocity');
 
 const getInventory = async (cooperativeId) => {
   try {
     const cooperative = await Cooperative.findById(cooperativeId);
     if (!cooperative) throw new Error('Cooperative not found');
 
-    // Get all products (excluding deleted)
+    // Get all products (excluding deleted) – used for total count
     const products = await Inventory.find({ cooperativeId: cooperative._id, stock: { $gt: -1 } }).lean();
 
-    // Get top revenue products using feedAnalytics
+    // 1. Top revenue products (last 30 days)
     const topRevenueProducts = await feedAnalytics.getTopFeedProducts(10, cooperativeId);
 
-    // Get stock risk using feedAnalytics (low stock)
+    // 2. Stock risk (low stock & stockout risk)
     const stockRisk = await feedAnalytics.getFeedStockRisk(cooperativeId);
-    // Filter those with riskLevel 'critical' or 'high' for stockout risk, and low stock separately
+
+    // 3. Inventory velocity (for future use)
+    const velocity = await inventoryVelocity.getInventoryVelocity(cooperativeId);
+
+    // Map stock risk to lowStock array (products below threshold)
     const lowStock = stockRisk
       .filter(item => item.currentStock <= item.threshold)
       .map(item => ({
@@ -29,9 +32,10 @@ const getInventory = async (cooperativeId) => {
         threshold: item.threshold,
         avgDailySales: item.avgDailySales,
         daysUntilStockout: item.daysUntilStockout,
-        unit: 'units' // could get from Inventory
+        unit: 'units', // optional; can be fetched from Inventory if needed
       }));
 
+    // Map stock risk to stockoutRisk (days ≤ 7)
     const stockoutRisk = stockRisk
       .filter(item => item.daysUntilStockout <= 7 && item.daysUntilStockout > 0)
       .map(item => ({
@@ -40,13 +44,10 @@ const getInventory = async (cooperativeId) => {
         currentStock: item.currentStock,
         avgDailySales: item.avgDailySales,
         daysUntilStockout: item.daysUntilStockout,
-        restockBy: new Date(Date.now() + item.daysUntilStockout * 86400000).toISOString().split('T')[0]
+        restockBy: new Date(Date.now() + item.daysUntilStockout * 86400000).toISOString().split('T')[0],
       }));
 
-    // Get inventory velocity
-    const velocity = await inventoryVelocity.getInventoryVelocity(cooperativeId);
-
-    // Combine top revenue products with inventory details (price, unit)
+    // Map top revenue products
     const topRevenue = topRevenueProducts.map(prod => ({
       _id: prod.productId,
       product: prod.productName,
@@ -54,7 +55,7 @@ const getInventory = async (cooperativeId) => {
       revenue: prod.totalCost,
       quantity: prod.totalQuantity,
       price: prod.avgCostPerUnit,
-      unit: 'units' // you might get from inventory if needed
+      unit: 'units',
     }));
 
     return {
@@ -65,8 +66,8 @@ const getInventory = async (cooperativeId) => {
       summary: {
         totalProducts: products.length,
         lowStockCount: lowStock.length,
-        stockoutRiskCount: stockoutRisk.length
-      }
+        stockoutRiskCount: stockoutRisk.length,
+      },
     };
   } catch (error) {
     logger.error('Inventory layer failed', { error: error.message, coopId: cooperativeId });
@@ -79,7 +80,7 @@ const getDefaultInventory = () => ({
   stockoutRisk: [],
   topRevenue: [],
   velocity: [],
-  summary: { totalProducts: 0, lowStockCount: 0, stockoutRiskCount: 0 }
+  summary: { totalProducts: 0, lowStockCount: 0, stockoutRiskCount: 0 },
 });
 
 module.exports = { getInventory };
