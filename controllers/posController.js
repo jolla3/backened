@@ -180,13 +180,14 @@ const syncOfflineTransactions = async (req, res) => {
   }
 };
 
-// 7️⃣ Farmer History
+// 7️⃣ Farmer History (now passes cooperativeId)
 const getFarmerHistory = async (req, res) => {
   try {
     const { farmer_code } = req.params;
     const { limit = 50 } = req.query;
+    const cooperativeId = req.user?.cooperativeId; // Assumes auth middleware sets req.user
 
-    const result = await getFarmerHistoryService(farmer_code, parseInt(limit));
+    const result = await getFarmerHistoryService(farmer_code, parseInt(limit), cooperativeId);
     if (result.error) {
       return res.status(404).json({ error: result.error });
     }

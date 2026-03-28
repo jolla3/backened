@@ -1,9 +1,18 @@
+const mongoose = require('mongoose');  // ✅ Added
+const crypto = require('crypto');     // ✅ Added for HMAC
 const TransactionService = require('./transactionService');
 const Farmer = require('../models/farmer');
 const Porter = require('../models/porter');
 const Transaction = require('../models/transaction');
 const logger = require('../utils/logger');
 const FRAUD_CONFIG = require('../config/fraudConfig');
+
+// Helper: generate HMAC for transaction verification
+function generateHMAC(data) {
+  const secret = process.env.HMAC_SECRET || 'default_secret_change_me';
+  const str = Object.values(data).join(':');
+  return crypto.createHmac('sha256', secret).update(str).digest('hex');
+}
 
 // =============================================================================
 // IMPORT SERVICES (No duplication – use transactionService functions)
@@ -146,7 +155,7 @@ const verifyTransaction = async (receiptNum) => {
     return { valid: false, error: 'Transaction not found' };
   }
 
-  // Quick signature verification (assumes generateHMAC is available – add if needed)
+  // Signature verification
   const signatureData = {
     receiptNum: transaction.receipt_num,
     farmer_code: transaction.farmer_id.farmer_code,
@@ -265,11 +274,11 @@ const getDailySummary = async (date = new Date().toISOString().split('T')[0]) =>
 };
 
 // =============================================================================
-// 6️⃣ FARMER HISTORY
+// 6️⃣ FARMER HISTORY (Now accepts cooperativeId)
 // =============================================================================
-const getFarmerHistory = async (farmer_code, limit = 50) => {
-  logger.info('📋 POS: Farmer history', { farmer_code, limit });
-  return await getFarmerHistoryFromTransactionService(farmer_code, limit, null);
+const getFarmerHistory = async (farmer_code, limit = 50, cooperativeId) => {
+  logger.info('📋 POS: Farmer history', { farmer_code, limit, cooperativeId });
+  return await getFarmerHistoryFromTransactionService(farmer_code, limit, cooperativeId);
 };
 
 // =============================================================================

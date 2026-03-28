@@ -9,34 +9,25 @@ const getInventory = async (cooperativeId) => {
     const cooperative = await Cooperative.findById(cooperativeId);
     if (!cooperative) throw new Error('Cooperative not found');
 
-    // Get all products (excluding deleted) – used for total count
-    const products = await Inventory.find({ cooperativeId: cooperative._id, stock: { $gt: -1 } }).lean();
+    // Get all active products (all categories)
+    const allProducts = await Inventory.find({ cooperativeId: cooperative._id, stock: { $gt: -1 } }).lean();
 
-    // 1. Top revenue products (last 30 days)
-    const topRevenueProducts = await feedAnalytics.getTopFeedProducts(10, cooperativeId);
-
-    // 2. Stock risk (low stock & stockout risk)
-    const stockRisk = await feedAnalytics.getFeedStockRisk(cooperativeId);
-
-    // 3. Inventory velocity (for future use)
-    const velocity = await inventoryVelocity.getInventoryVelocity(cooperativeId);
-
-    // Map stock risk to lowStock array (products below threshold)
-    const lowStock = stockRisk
-      .filter(item => item.currentStock <= item.threshold)
-      .map(item => ({
-        _id: item.productId,
-        product: item.productName,
-        category: 'Feed',
-        currentStock: item.currentStock,
-        threshold: item.threshold,
-        avgDailySales: item.avgDailySales,
-        daysUntilStockout: item.daysUntilStockout,
-        unit: 'units', // optional; can be fetched from Inventory if needed
+    // 1. Low stock: all products with stock <= threshold (any category)
+    const lowStock = allProducts
+      .filter(p => p.stock <= p.threshold)
+      .map(p => ({
+        _id: p._id,
+        product: p.name,
+        category: p.category,
+        currentStock: p.stock,
+        threshold: p.threshold,
+        unit: p.unit,
       }));
 
-    // Map stock risk to stockoutRisk (days ≤ 7)
-    const stockoutRisk = stockRisk
+    // 2. Stockout risk: only feed products with high velocity (≤7 days)
+    const stockoutRisk = await feedAnalytics.getFeedStockRisk(cooperativeId);
+    // stockoutRisk already contains feed products with daysUntilStockout <= 30, but we want only ≤7 days
+    const filteredStockoutRisk = (stockoutRisk || [])
       .filter(item => item.daysUntilStockout <= 7 && item.daysUntilStockout > 0)
       .map(item => ({
         _id: item.productId,
@@ -47,7 +38,8 @@ const getInventory = async (cooperativeId) => {
         restockBy: new Date(Date.now() + item.daysUntilStockout * 86400000).toISOString().split('T')[0],
       }));
 
-    // Map top revenue products
+    // 3. Top revenue products (last 30 days, feed only)
+    const topRevenueProducts = await feedAnalytics.getTopFeedProducts(10, cooperativeId);
     const topRevenue = topRevenueProducts.map(prod => ({
       _id: prod.productId,
       product: prod.productName,
@@ -58,15 +50,18 @@ const getInventory = async (cooperativeId) => {
       unit: 'units',
     }));
 
+    // 4. Inventory velocity (for future use)
+    const velocity = await inventoryVelocity.getInventoryVelocity(cooperativeId);
+
     return {
       lowStock,
-      stockoutRisk,
+      stockoutRisk: filteredStockoutRisk,
       topRevenue,
       velocity,
       summary: {
-        totalProducts: products.length,
+        totalProducts: allProducts.length,
         lowStockCount: lowStock.length,
-        stockoutRiskCount: stockoutRisk.length,
+        stockoutRiskCount: filteredStockoutRisk.length,
       },
     };
   } catch (error) {

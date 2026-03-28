@@ -1,16 +1,17 @@
 const Joi = require('joi');
 
 const milkTransactionSchema = Joi.object({
-  farmer_code: Joi.string().required().min(3).max(6),
-  litres: Joi.number().min(1).max(100).required(),
-  porter_id: Joi.string().hex().length(24).required(),
-  zone: Joi.string().required(),
-  device_seq_num: Joi.number().required(),
-  timestamp_local: Joi.date().optional()
+  farmer_code: Joi.string().required(),
+  litres: Joi.number().positive().required(),
+  porter_id: Joi.string().optional().allow(null),
+  zone: Joi.string().optional(),
+  device_seq_num: Joi.number().integer().min(0).required(),
+  timestamp_local: Joi.date().iso().optional(),
+  cooperativeId: Joi.string().required()   // ✅ Added
 });
 
 const farmerCodeSchema = Joi.object({
-  farmer_code: Joi.string().required().min(3).max(6)
+  farmer_code: Joi.string().required()
 });
 
 module.exports = {
