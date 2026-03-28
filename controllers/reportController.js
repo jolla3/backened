@@ -7,10 +7,8 @@ const { json2csv } = require('json2csv');
 const getMonthly = async (req, res) => {
   try {
     const cooperativeId = req.user.cooperativeId;
-    
     const year = parseInt(req.query.year) || new Date().getFullYear();
     const month = parseInt(req.query.month) || new Date().getMonth() + 1;
-    
     const report = await reportService.getMonthlyReport(year, month, cooperativeId);
     res.json(report);
   } catch (error) {
@@ -18,6 +16,7 @@ const getMonthly = async (req, res) => {
     res.status(400).json({ error: error.message });
   }
 };
+
 
 const exportCSV = async (req, res) => {
   try {
