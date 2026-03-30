@@ -58,65 +58,48 @@ const checkDailyFraudLimit = async (farmer_id, litres, session) => {
   }).select('litres').session(session);
   const currentTotal = transactions.reduce((sum, tx) => sum + tx.litres, 0);
   if (currentTotal + litres > FRAUD_CONFIG.MAX_MILK_PER_DAY) {
-    throw new Error('Daily milk limit exceeded');
+    throw new Error(`Daily milk limit exceeded. Max ${FRAUD_CONFIG.MAX_MILK_PER_DAY}L per day`);
   }
   return currentTotal;
 };
 
-// ✅ Helper: find existing transaction by idempotency key
-const findExistingByIdempotency = async (idempotencyKey) => {
-  const existing = await Transaction.findOne({ idempotency_key: idempotencyKey })
-    .populate('farmer_id', 'name farmer_code')
-    .populate('porter_id', 'name')
-    .lean();
-  return existing;
+// ✅ Generate a TRULY UNIQUE idempotency key
+const generateUniqueIdempotencyKey = (device_id, device_seq_num) => {
+  const now = new Date();
+  const timestamp = now.getTime(); // milliseconds
+  const random = Math.random().toString(36).substring(2, 10);
+  return `${device_id}-${device_seq_num}-${timestamp}-${random}`;
 };
 
-// MAIN: Record milk transaction with idempotency handling
+// MAIN: Record milk transaction – NO duplicate lookup, unique key every time
 const recordMilkTransaction = async (session, data) => {
-  const { farmer_code, litres, porter_id, zone, device_id, farmer_id, branch_id, device_seq_num, timestamp_local, cooperativeId } = data;
-
-  // Generate idempotency key early (same as before)
-  const idempotencyKey = `${device_id}-${device_seq_num}-${new Date().toISOString().split('T')[0]}`;
-
-  // Check for existing transaction with same idempotency key
-  const existingTx = await findExistingByIdempotency(idempotencyKey);
-  if (existingTx) {
-    logger.info('⚠️ Duplicate idempotency key – returning existing transaction', { idempotencyKey });
-    // Re-fetch with populated fields for receipt
-    const fullTx = await Transaction.findById(existingTx._id)
-      .populate('farmer_id', 'name farmer_code')
-      .populate('porter_id', 'name')
-      .populate('cooperativeId', 'name contact')
-      .populate('rate_version_id', 'rate')
-      .lean();
-    const thermalReceipt = await receiptService.generateThermalReceipt(fullTx._id, session);
-    return {
-      transaction: fullTx,
-      receiptNum: fullTx.receipt_num,
-      serverSeqNum: fullTx.server_seq_num,
-      qrUrl: generateQRUrl(fullTx.receipt_num),
-      payout: fullTx.payout,
-      farmer_code,
-      thermalReceipt,
-      receiptPreview: thermalReceipt.previewText
-    };
-  }
-
-  // Otherwise, proceed with new transaction
   try {
-    const rateInfo = await getActiveRateVersion(cooperativeId);
-    const payout = parseFloat((litres * rateInfo.rate).toFixed(2));
+    const { farmer_code, litres, porter_id, zone, device_id, farmer_id, branch_id, device_seq_num, timestamp_local, cooperativeId } = data;
 
-    if (litres < FRAUD_CONFIG.MIN_MILK_THRESHOLD || litres > FRAUD_CONFIG.MAX_MILK_PER_TRANSACTION) {
-      throw new Error(`Milk amount ${litres}L exceeds limits`);
+    const litresNum = parseFloat(litres);
+    if (isNaN(litresNum) || litresNum < FRAUD_CONFIG.MIN_MILK_THRESHOLD) {
+      throw new Error(`Milk quantity must be at least ${FRAUD_CONFIG.MIN_MILK_THRESHOLD}L`);
     }
-    await checkDailyFraudLimit(farmer_id, litres, session);
+    if (litresNum > FRAUD_CONFIG.MAX_MILK_PER_TRANSACTION) {
+      throw new Error(`Milk quantity cannot exceed ${FRAUD_CONFIG.MAX_MILK_PER_TRANSACTION}L per transaction`);
+    }
+
+    const rateInfo = await getActiveRateVersion(cooperativeId);
+    const payout = parseFloat((litresNum * rateInfo.rate).toFixed(2));
+
+    await checkDailyFraudLimit(farmer_id, litresNum, session);
 
     const receiptNum = await generateReceiptNum(session);
     const serverSeqNum = await generateServerSeqNum(session, branch_id);
+    // ✅ Always unique
+    const idempotencyKey = generateUniqueIdempotencyKey(device_id, device_seq_num);
     const qrHash = generateHMAC(`${receiptNum}${serverSeqNum}`);
-    const signatureData = { farmer_code, litres, payout, rate: rateInfo.rate, rate_version_id: rateInfo.rate_version_id, receiptNum, server_seq_num: serverSeqNum, porter_id, device_id, zone, branch_id, timestamp: Date.now() };
+    const signatureData = {
+      farmer_code, litres: litresNum, payout, rate: rateInfo.rate,
+      rate_version_id: rateInfo.rate_version_id, receiptNum,
+      server_seq_num: serverSeqNum, porter_id, device_id, zone, branch_id,
+      timestamp: Date.now()
+    };
     const digitalSignature = generateHMAC(signatureData);
 
     const transaction = await Transaction.create([{
@@ -124,24 +107,26 @@ const recordMilkTransaction = async (session, data) => {
       device_seq_num, server_seq_num: serverSeqNum,
       timestamp_local: new Date(timestamp_local), timestamp_server: new Date(),
       digital_signature: digitalSignature, idempotency_key: idempotencyKey,
-      soft_delta: 0, type: 'milk', litres, quantity: 0, payout, cost: 0,
+      soft_delta: 0, type: 'milk', litres: litresNum, quantity: 0, payout, cost: 0,
       farmer_id, rate_version_id: rateInfo.rate_version_id, porter_id, zone,
       branch_id, cooperativeId
     }], { session });
 
     await Farmer.findByIdAndUpdate(farmer_id, { $inc: { balance: payout } }, { session });
-    await Porter.findByIdAndUpdate(porter_id, { $inc: { 'totals.litresCollected': litres, 'totals.transactionsCount': 1 } }, { session });
+    await Porter.findByIdAndUpdate(porter_id, {
+      $inc: { 'totals.litresCollected': litresNum, 'totals.transactionsCount': 1 }
+    }, { session });
 
     let thermalReceipt;
     try {
       thermalReceipt = await receiptService.generateThermalReceipt(transaction[0]._id, session);
     } catch (receiptError) {
       logger.error('❌ Receipt generation failed, but transaction saved', { transactionId: transaction[0]._id, error: receiptError.message });
-      const fallbackText = `RECEIPT #${receiptNum}\nMILK ${litres}L @ ${rateInfo.rate}/L = ${payout}\nTHANK YOU`;
+      const fallbackText = `RECEIPT #${receiptNum}\nMILK ${litresNum}L @ ${rateInfo.rate}/L = ${payout}\nTHANK YOU`;
       thermalReceipt = { thermalReceipt: Buffer.from(fallbackText), qrImage: null, receiptNum, previewText: fallbackText };
     }
 
-    logger.info('✅ Milk transaction COMPLETE', { transactionId: transaction[0]._id, receiptNum, serverSeqNum, litres, payout, rate: rateInfo.rate });
+    logger.info('✅ Milk transaction COMPLETE', { transactionId: transaction[0]._id, receiptNum, serverSeqNum, litres: litresNum, payout, rate: rateInfo.rate });
     return {
       transaction: transaction[0],
       receiptNum,
@@ -153,36 +138,12 @@ const recordMilkTransaction = async (session, data) => {
       receiptPreview: thermalReceipt.previewText
     };
   } catch (error) {
-    // If duplicate key error occurs despite the earlier check (race condition), fetch existing
-    if (error.code === 11000 && error.keyPattern?.idempotency_key) {
-      const existing = await findExistingByIdempotency(idempotencyKey);
-      if (existing) {
-        logger.info('⚠️ Duplicate key error – returning existing transaction (race condition)', { idempotencyKey });
-        const fullTx = await Transaction.findById(existing._id)
-          .populate('farmer_id', 'name farmer_code')
-          .populate('porter_id', 'name')
-          .populate('cooperativeId', 'name contact')
-          .populate('rate_version_id', 'rate')
-          .lean();
-        const thermalReceipt = await receiptService.generateThermalReceipt(fullTx._id, session);
-        return {
-          transaction: fullTx,
-          receiptNum: fullTx.receipt_num,
-          serverSeqNum: fullTx.server_seq_num,
-          qrUrl: generateQRUrl(fullTx.receipt_num),
-          payout: fullTx.payout,
-          farmer_code,
-          thermalReceipt,
-          receiptPreview: thermalReceipt.previewText
-        };
-      }
-    }
     logger.error('❌ Milk transaction failed', { error: error.message });
     throw error;
   }
 };
 
-// Sync offline transactions
+// Sync offline transactions (unchanged)
 const syncOfflineTransactions = async (transactions, cooperativeId) => {
   if (!cooperativeId) throw new Error('cooperativeId is required for sync');
   const operations = transactions.map(tx => ({
@@ -196,7 +157,7 @@ const syncOfflineTransactions = async (transactions, cooperativeId) => {
   return { success: true, synced: results.upsertedCount, failed: 0 };
 };
 
-// Farmer history – string comparison
+// Farmer history – string comparison (unchanged)
 const getFarmerHistory = async (farmer_code, limit = 50, cooperativeId) => {
   try {
     const farmer = await Farmer.findOne({ farmer_code });

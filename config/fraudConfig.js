@@ -1,5 +1,5 @@
-module.exports = {
-  MAX_MILK_PER_DAY: 5000,
-  MAX_MILK_PER_TRANSACTION: 200,
-  MIN_MILK_THRESHOLD: 1
-};
+  module.exports = {
+    MAX_MILK_PER_DAY: 500,
+    MAX_MILK_PER_TRANSACTION: 100,
+    MIN_MILK_THRESHOLD: 1
+  };
