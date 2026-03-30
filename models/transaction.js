@@ -47,12 +47,11 @@ const transactionSchema = new mongoose.Schema({
     type: String,
     
   },
-  idempotency_key: {
-    type: String,
-    
-    
-    index: true
-  },
+ idempotency_key: {
+  type: String,
+  unique: true,   // ← add this
+  index: true
+},
   soft_delta: {
     type: Number,
     default: 0
