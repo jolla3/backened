@@ -1,4 +1,4 @@
-const Transaction = require('../models/transaction');   // Add this line
+const Transaction = require('../models/transaction');   // needed for session
 const { 
   recordMilkTransaction: recordMilkTxService, 
   getFarmerHistory: getFarmerHistoryService, 
@@ -7,8 +7,8 @@ const {
   findFarmerByCode: findFarmerService,
   getPorterPerformance: getPorterPerformanceService,
   getDailySummary: getDailySummaryService,
-  getFarmersCollectedByPorter: getFarmersCollectedByPorterService,   // 🆕
-  getPerformanceChartData: getPerformanceChartDataService             // 🆕
+  getFarmersCollectedByPorter: getFarmersCollectedByPorterService,
+  getPerformanceChartData: getPerformanceChartDataService
 } = require('../services/posService');
 const { milkTransactionSchema, farmerCodeSchema } = require('../validators/posValidator');
 const logger = require('../utils/logger');
@@ -22,7 +22,6 @@ const findFarmerByCode = async (req, res) => {
     }
 
     const result = await findFarmerService(req.params.farmer_code);
-    
     if (result.error) {
       return res.status(404).json({ error: result.error });
     }
@@ -131,7 +130,7 @@ const verifyTransaction = async (req, res) => {
   }
 };
 
-// 4️⃣ Porter Performance (basic stats)
+// 4️⃣ Porter Performance
 const getPorterPerformance = async (req, res) => {
   try {
     const { porter_id } = req.params;
@@ -161,11 +160,17 @@ const getDailySummary = async (req, res) => {
   }
 };
 
+// 6️⃣ Farmer History (POS version)
 const getFarmerHistory = async (req, res) => {
   try {
     const { farmer_code } = req.params;
     const { limit = 50 } = req.query;
-    const cooperativeId = req.user?.cooperativeId;   // from auth middleware
+    const cooperativeId = req.user?.cooperativeId;   // from deviceMiddleware
+
+    if (!cooperativeId) {
+      return res.status(400).json({ error: 'Cooperative ID missing from token' });
+    }
+
     const result = await getFarmerHistoryService(farmer_code, parseInt(limit), cooperativeId);
     if (result.error) {
       return res.status(404).json({ error: result.error });
@@ -177,11 +182,11 @@ const getFarmerHistory = async (req, res) => {
   }
 };
 
-// 6️⃣ Sync Offline Transactions (if you use this, pass cooperativeId)
+// 7️⃣ Sync Offline Transactions
 const syncOfflineTransactions = async (req, res) => {
   try {
     const { transactions } = req.body;
-    const cooperativeId = req.user?.cooperativeId; // or req.device.cooperativeId
+    const cooperativeId = req.user?.cooperativeId;
 
     if (!Array.isArray(transactions) || transactions.length === 0) {
       return res.status(400).json({ error: 'No transactions to sync' });
@@ -190,7 +195,7 @@ const syncOfflineTransactions = async (req, res) => {
       return res.status(400).json({ error: 'Maximum 1000 transactions per sync' });
     }
 
-    const result = await syncOfflineTxService(transactions, cooperativeId); // ← pass cooperativeId
+    const result = await syncOfflineTxService(transactions, cooperativeId);
     res.json({ success: true, synced: result.synced, failed: result.failed });
   } catch (error) {
     logger.error('Sync failed', { error: error.message });
@@ -198,8 +203,7 @@ const syncOfflineTransactions = async (req, res) => {
   }
 };
 
-
-// 🆕 8️⃣ Get Farmers Collected by a Porter
+// 8️⃣ Get Farmers Collected by a Porter
 const getFarmersCollectedByPorter = async (req, res) => {
   try {
     const { porter_id } = req.params;
@@ -217,7 +221,7 @@ const getFarmersCollectedByPorter = async (req, res) => {
   }
 };
 
-// 🆕 9️⃣ Chart Data for Graphs
+// 9️⃣ Chart Data for Graphs
 const getPerformanceChartData = async (req, res) => {
   try {
     const { entity, id, period, metric, startDate, endDate } = req.query;
@@ -246,6 +250,6 @@ module.exports = {
   getDailySummary,
   syncOfflineTransactions,
   getFarmerHistory,
-  getFarmersCollectedByPorter,   // 🆕
-  getPerformanceChartData         // 🆕
+  getFarmersCollectedByPorter,
+  getPerformanceChartData
 };

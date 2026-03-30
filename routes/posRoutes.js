@@ -3,7 +3,7 @@ const router = express.Router();
 const posController = require('../controllers/posController');
 const deviceMiddleware = require('../middlewares/deviceMiddleware');
 
-// Farmer Lookup
+// Farmer Lookup (no auth needed for lookup)
 router.get('/farmer/:farmer_code', posController.findFarmerByCode);
 
 // Milk Transaction Recording (Requires Device Auth)
@@ -21,11 +21,10 @@ router.get('/summary', posController.getDailySummary);
 // Sync Offline Transactions (Requires Device Auth)
 router.post('/sync', deviceMiddleware, posController.syncOfflineTransactions);
 
-// Farmer History
-router.get('/farmer/:farmer_code/history', posController.getFarmerHistory);
+// Farmer History (✅ now uses deviceMiddleware to get req.user.cooperativeId)
+router.get('/farmer/:farmer_code/history', deviceMiddleware, posController.getFarmerHistory);
 
-router.get('/porters/:porter_id/farmers',posController.getFarmersCollectedByPorter);
-
+router.get('/porters/:porter_id/farmers', posController.getFarmersCollectedByPorter);
 router.get('/chart-data', posController.getPerformanceChartData);
 
 module.exports = router;
