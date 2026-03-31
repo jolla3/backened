@@ -2,53 +2,17 @@ const Transaction = require('../../models/transaction');
 const Farmer = require('../../models/farmer');
 const Cooperative = require('../../models/cooperative');
 const logger = require('../../utils/logger');
+const { getFinancialIntelligence } = require('../../analytics/financialAnalytics');
 
 const getFinancial = async (cooperativeId) => {
   try {
     const cooperative = await Cooperative.findById(cooperativeId);
     if (!cooperative) throw new Error('Cooperative not found');
 
-    const now = new Date();
-    const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
-    const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+    // 1. Get the detailed analytics (milk, feed, projections, break-even)
+    const analytics = await getFinancialIntelligence(cooperativeId);
 
-    // 1. Milk payout this month
-    const milkStats = await Transaction.aggregate([
-      {
-        $match: {
-          type: 'milk',
-          cooperativeId: cooperative._id,
-          timestamp_server: { $gte: startOfMonth }
-        }
-      },
-      {
-        $group: {
-          _id: null,
-          totalPayout: { $sum: { $ifNull: ['$payout', 0] } },
-          totalLitres: { $sum: { $ifNull: ['$litres', 0] } }
-        }
-      }
-    ]);
-
-    // 2. Feed revenue this month
-    const feedStats = await Transaction.aggregate([
-      {
-        $match: {
-          type: 'feed',
-          cooperativeId: cooperative._id,
-          timestamp_server: { $gte: startOfMonth }
-        }
-      },
-      {
-        $group: {
-          _id: null,
-          totalRevenue: { $sum: { $ifNull: ['$cost', 0] } },
-          totalQty: { $sum: { $ifNull: ['$quantity', 0] } }
-        }
-      }
-    ]);
-
-    // 3. Farmers with negative balance (debtors)
+    // 2. Get the list of farmers with negative balance (debtors)
     const debtors = await Farmer.find(
       { cooperativeId: cooperative._id, balance: { $lt: 0 } },
       'name farmer_code balance phone'
@@ -56,49 +20,28 @@ const getFinancial = async (cooperativeId) => {
 
     const totalDebt = debtors.reduce((sum, f) => sum + Math.abs(f.balance), 0);
 
-    // 4. Today's milk stats
-    const todayStats = await Transaction.aggregate([
-      {
-        $match: {
-          type: 'milk',
-          cooperativeId: cooperative._id,
-          timestamp_server: { $gte: startOfToday }
-        }
-      },
-      {
-        $group: {
-          _id: null,
-          totalPayout: { $sum: { $ifNull: ['$payout', 0] } },
-          totalLitres: { $sum: { $ifNull: ['$litres', 0] } }
-        }
-      }
-    ]);
-
-    const milkPayout = milkStats[0]?.totalPayout || 0;
-    const feedRevenue = feedStats[0]?.totalRevenue || 0;
-    const todayPayout = todayStats[0]?.totalPayout || 0;
-    const todayLitres = todayStats[0]?.totalLitres || 0;
-
-    const netCashFlow = feedRevenue - milkPayout;
-    const profitMargin = feedRevenue > 0 ? (netCashFlow / feedRevenue) * 100 : 0;
-    const hasRealData = feedRevenue > 0 || milkPayout > 0;
-
+    // 3. Combine everything
     return {
-      milkRevenue: Math.round(milkPayout),
-      feedRevenue: Math.round(feedRevenue),
-      netCashFlow: Math.round(netCashFlow),
-      profitMargin: hasRealData ? parseFloat(profitMargin.toFixed(1)) : null,
-      todayMilkPayout: Math.round(todayPayout),
-      todayMilkLitres: Math.round(todayLitres),
+      milkRevenue: analytics.milkRevenue,
+      milkLitres: analytics.milkLitres,
+      feedRevenue: analytics.feedRevenue,
+      feedQuantity: analytics.feedQuantity,
+      netCashFlow: analytics.netCashFlow,
+      profitMargin: analytics.profitMargin,
+      avgPricePerLiter: analytics.avgPricePerLiter,
+      todayMilkPayout: analytics.todayMilkPayout,
+      todayMilkLitres: analytics.todayMilkLitres,
+      cashFlowProjection: analytics.cashFlowProjection,
+      breakEvenAnalysis: analytics.breakEvenAnalysis,
       farmerDebtTotal: Math.round(totalDebt),
       farmerDebtList: debtors.map(f => ({
         id: f._id,
         name: f.name,
         code: f.farmer_code,
         balance: f.balance,
-        phone: f.phone
+        phone: f.phone,
       })),
-      hasRealData
+      hasRealData: analytics.milkRevenue > 0 || analytics.feedRevenue > 0,
     };
   } catch (error) {
     logger.error('Financial layer failed', { cooperativeId, error: error.message });
@@ -108,14 +51,19 @@ const getFinancial = async (cooperativeId) => {
 
 const getDefaultFinancial = () => ({
   milkRevenue: 0,
+  milkLitres: 0,
   feedRevenue: 0,
+  feedQuantity: 0,
   netCashFlow: 0,
   profitMargin: null,
+  avgPricePerLiter: 0,
   todayMilkPayout: 0,
   todayMilkLitres: 0,
+  cashFlowProjection: { expectedReceipts: 0, expectedPayouts: 0, netProjection: 0 },
+  breakEvenAnalysis: { milkPayout: 0, avgPricePerLiter: 0, litresNeeded: 0 },
   farmerDebtTotal: 0,
   farmerDebtList: [],
-  hasRealData: false
-})
+  hasRealData: false,
+});
 
 module.exports = { getFinancial };
