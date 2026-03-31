@@ -4,13 +4,35 @@ const Inventory = require('../models/inventory');
 const Cooperative = require('../models/cooperative');
 const logger = require('../utils/logger');
 
+// ========================== CONFIGURATION (via env) ==========================
+const ANOMALY_THRESHOLD = parseFloat(process.env.ANOMALY_THRESHOLD || '2.5');
+const SMOOTHING_ALPHA = parseFloat(process.env.SMOOTHING_ALPHA || '0.2');
+
+const STOCKOUT_WARNING_DAYS = parseInt(process.env.STOCKOUT_WARNING_DAYS || '14');
+const STOCKOUT_CRITICAL_DAYS = parseInt(process.env.STOCKOUT_CRITICAL_DAYS || '7');
+const STOCKOUT_ORDER_DAYS = parseInt(process.env.STOCKOUT_ORDER_DAYS || '14');
+
+const DROPOUT_DAYS_THRESHOLD_1 = parseInt(process.env.DROPOUT_DAYS_THRESHOLD_1 || '30');
+const DROPOUT_DAYS_THRESHOLD_2 = parseInt(process.env.DROPOUT_DAYS_THRESHOLD_2 || '60');
+const DROPOUT_DECLINE_THRESHOLD_1 = parseFloat(process.env.DROPOUT_DECLINE_THRESHOLD_1 || '15');
+const DROPOUT_DECLINE_THRESHOLD_2 = parseFloat(process.env.DROPOUT_DECLINE_THRESHOLD_2 || '30');
+const DROPOUT_DECLINE_THRESHOLD_3 = parseFloat(process.env.DROPOUT_DECLINE_THRESHOLD_3 || '50');
+const DROPOUT_DEBT_THRESHOLD_1 = parseFloat(process.env.DROPOUT_DEBT_THRESHOLD_1 || '2000');
+const DROPOUT_DEBT_THRESHOLD_2 = parseFloat(process.env.DROPOUT_DEBT_THRESHOLD_2 || '5000');
+const DROPOUT_PROBABILITY_SCALE = parseFloat(process.env.DROPOUT_PROBABILITY_SCALE || '10');
+
+const MILK_FORECAST_DAYS = parseInt(process.env.MILK_FORECAST_DAYS || '7');
+const MILK_FORECAST_LOWER_BOUND = parseFloat(process.env.MILK_FORECAST_LOWER_BOUND || '0.8');
+const MILK_FORECAST_UPPER_BOUND = parseFloat(process.env.MILK_FORECAST_UPPER_BOUND || '1.2');
+
+// ========================== HELPER FUNCTIONS ==========================
 /**
  * Exponential smoothing forecast
  * @param {Array} data - sorted by date ascending
- * @param {number} alpha - smoothing factor (0.2 recommended)
+ * @param {number} alpha - smoothing factor
  * @returns {number} forecast for next period
  */
-const exponentialSmoothing = (data, alpha = 0.2) => {
+const exponentialSmoothing = (data, alpha) => {
   if (!data.length) return 0;
   let forecast = data[0];
   for (let i = 1; i < data.length; i++) {
@@ -22,19 +44,23 @@ const exponentialSmoothing = (data, alpha = 0.2) => {
 /**
  * Z-score anomaly detection
  * @param {Array} values - numeric array
- * @param {number} threshold - usually 2 or 3
+ * @param {number} threshold - number of standard deviations
  * @returns {Array} indices of anomalous values
  */
-const findAnomalies = (values, threshold = 2.5) => {
+const findAnomalies = (values, threshold) => {
+  if (values.length < 2) return [];
   const mean = values.reduce((a, b) => a + b, 0) / values.length;
   const variance = values.reduce((a, b) => a + Math.pow(b - mean, 2), 0) / values.length;
   const std = Math.sqrt(variance);
+  if (std === 0) return [];
   return values.map((v, i) => (Math.abs(v - mean) / std > threshold) ? i : -1).filter(i => i !== -1);
 };
 
+// ========================== PUBLIC FUNCTIONS ==========================
+
 /**
  * Predict stockout risk for feed products
- * Uses 30‑day moving average and forecast
+ * Uses configurable thresholds for days until stockout.
  */
 const predictStockout = async (cooperativeId) => {
   const cooperative = await Cooperative.findById(cooperativeId);
@@ -66,18 +92,18 @@ const predictStockout = async (cooperativeId) => {
 
     const dailyValues = sales.map(s => s.dailyQty);
     const avgDailySales = dailyValues.length ? dailyValues.reduce((a, b) => a + b, 0) / dailyValues.length : 0;
-    const forecastDaily = avgDailySales > 0 ? exponentialSmoothing(dailyValues, 0.2) : avgDailySales;
+    const forecastDaily = avgDailySales > 0 ? exponentialSmoothing(dailyValues, SMOOTHING_ALPHA) : avgDailySales;
 
     const daysUntilStockout = forecastDaily > 0 ? Math.floor(product.stock / forecastDaily) : null;
-    if (daysUntilStockout !== null && daysUntilStockout <= 14) {
+    if (daysUntilStockout !== null && daysUntilStockout <= STOCKOUT_WARNING_DAYS) {
       predictions.push({
         product: product.name,
         currentStock: product.stock,
         avgDailySales: avgDailySales.toFixed(1),
         forecastDaily: forecastDaily.toFixed(1),
         daysUntilStockout,
-        risk: daysUntilStockout <= 7 ? 'critical' : 'high',
-        recommendation: `Order ${Math.ceil(forecastDaily * 14)} units to cover next 2 weeks`,
+        risk: daysUntilStockout <= STOCKOUT_CRITICAL_DAYS ? 'critical' : 'high',
+        recommendation: `Order ${Math.ceil(forecastDaily * STOCKOUT_ORDER_DAYS)} units to cover next ${STOCKOUT_ORDER_DAYS} days`,
         suggestedSupplier: product.supplier || 'main supplier',
       });
     }
@@ -87,7 +113,7 @@ const predictStockout = async (cooperativeId) => {
 };
 
 /**
- * Predict farmer dropout using logistic regression based on:
+ * Predict farmer dropout using configurable thresholds for:
  * - last delivery days
  * - recent milk decline percentage
  * - debt amount
@@ -129,23 +155,21 @@ const predictFarmerDropout = async (cooperativeId) => {
     const decline = farmer.previousLitres > 0
       ? ((farmer.previousLitres - farmer.recentLitres) / farmer.previousLitres) * 100
       : 0;
-    const debt = Math.abs(farmer.farmer.balance || 0) / 1000; // debt in thousands
+    const debt = Math.abs(farmer.farmer.balance || 0); // debt in actual currency
 
-    // Logistic function: probability = 1 / (1 + exp(-(b0 + b1*x1 + b2*x2 + b3*x3)))
-    // Simple linear combination for demo
+    // Logistic-like scoring using configurable thresholds
     let score = 0;
-    // daysSinceLast > 30 => +2, >60 => +4
-    if (daysSinceLast > 60) score += 4;
-    else if (daysSinceLast > 30) score += 2;
-    // decline > 50% => +3, >30% => +2, >15% => +1
-    if (decline > 50) score += 3;
-    else if (decline > 30) score += 2;
-    else if (decline > 15) score += 1;
-    // debt > 5K => +3, >2K => +1
-    if (debt > 5) score += 3;
-    else if (debt > 2) score += 1;
+    if (daysSinceLast > DROPOUT_DAYS_THRESHOLD_2) score += 4;
+    else if (daysSinceLast > DROPOUT_DAYS_THRESHOLD_1) score += 2;
 
-    const probability = Math.min(100, Math.max(0, score * 10)); // scale 0-100
+    if (decline > DROPOUT_DECLINE_THRESHOLD_3) score += 3;
+    else if (decline > DROPOUT_DECLINE_THRESHOLD_2) score += 2;
+    else if (decline > DROPOUT_DECLINE_THRESHOLD_1) score += 1;
+
+    if (debt > DROPOUT_DEBT_THRESHOLD_2) score += 3;
+    else if (debt > DROPOUT_DEBT_THRESHOLD_1) score += 1;
+
+    const probability = Math.min(100, Math.max(0, score * DROPOUT_PROBABILITY_SCALE));
 
     if (probability > 30) {
       risks.push({
@@ -170,8 +194,8 @@ const predictFarmerDropout = async (cooperativeId) => {
 };
 
 /**
- * Predict milk production trend for next 7 days
- * Returns forecasted daily litres with confidence intervals
+ * Predict milk production trend for next N days (configurable)
+ * Returns forecasted daily litres with confidence intervals.
  */
 const predictMilkProduction = async (cooperativeId) => {
   const cooperative = await Cooperative.findById(cooperativeId);
@@ -192,29 +216,32 @@ const predictMilkProduction = async (cooperativeId) => {
   const dailyLitres = last30Days.map(d => d.litres);
   if (dailyLitres.length < 7) return [];
 
-  // Simple exponential smoothing forecast for next 7 days
+  // Exponential smoothing forecast for MILK_FORECAST_DAYS
   let forecast = dailyLitres[dailyLitres.length - 1];
   const predictions = [];
-  const alpha = 0.2;
-  for (let i = 0; i < 7; i++) {
-    forecast = alpha * dailyLitres[dailyLitres.length - 1] + (1 - alpha) * forecast;
+  for (let i = 0; i < MILK_FORECAST_DAYS; i++) {
+    forecast = SMOOTHING_ALPHA * dailyLitres[dailyLitres.length - 1] + (1 - SMOOTHING_ALPHA) * forecast;
     predictions.push({
       day: i + 1,
       forecast: Math.round(forecast),
-      lowerBound: Math.max(0, Math.round(forecast * 0.8)),
-      upperBound: Math.round(forecast * 1.2),
+      lowerBound: Math.max(0, Math.round(forecast * MILK_FORECAST_LOWER_BOUND)),
+      upperBound: Math.round(forecast * MILK_FORECAST_UPPER_BOUND),
     });
   }
 
   // Detect anomalies in past 30 days
-  const anomalies = findAnomalies(dailyLitres);
+  const anomalies = findAnomalies(dailyLitres, ANOMALY_THRESHOLD);
   const anomalyDates = anomalies.map(idx => last30Days[idx]._id);
+
+  const trend = dailyLitres.length > 1
+    ? ((dailyLitres[dailyLitres.length-1] - dailyLitres[0]) / dailyLitres[0]) * 100
+    : 0;
 
   return {
     historical: last30Days.map(d => ({ date: d._id, litres: d.litres })),
     forecast: predictions,
     anomalies: anomalyDates,
-    trend: dailyLitres.length > 1 ? (dailyLitres[dailyLitres.length-1] - dailyLitres[0]) / dailyLitres[0] * 100 : 0,
+    trend,
   };
 };
 
