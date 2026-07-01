@@ -13,7 +13,7 @@ const sendSMS = async ({ to, message, from }) => {
       to,
       message,
       from: from || smsConfig.defaultSender
-    });
+    })
 
     logger.info('SMS Request', {
       url,

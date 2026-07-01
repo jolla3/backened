@@ -15,10 +15,10 @@ const userSchema = new mongoose.Schema({
     minlength: 6
   },
   role: {
-    type: String,
-    enum: ['admin', 'porter'],
-    default: 'porter'
-  },
+  type: String,
+  enum: ['superadmin', 'admin', 'porter'],
+  default: 'porter'
+},
   name: {
     type: String,
     required: true,

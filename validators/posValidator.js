@@ -17,4 +17,3 @@ const farmerCodeSchema = Joi.object({
 module.exports = {
   milkTransactionSchema,
   farmerCodeSchema
-};
