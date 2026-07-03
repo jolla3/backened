@@ -4,120 +4,108 @@ const Transaction = require('../models/transaction');
 const logger = require('../utils/logger');
 
 // Create Porter with Cooperative Scoping
-const createPorter = async (data, adminId) => {
-  const { cooperativeId, ...porterData } = data;
+const createPorter = async (data, cooperativeId) => {
+  const { cooperativeId: providedCoopId, ...porterData } = data;
+
+  // Use provided cooperativeId or the one from the token
+  const targetCooperativeId = providedCoopId || cooperativeId;
 
   // Validate cooperative exists
-  const cooperative = await Cooperative.findById(cooperativeId);
+  const cooperative = await Cooperative.findById(targetCooperativeId);
   if (!cooperative) {
     throw new Error('Cooperative not found');
   }
 
-  // Verify admin belongs to the cooperative
-  if (cooperative.adminId.toString() !== adminId) {
-    throw new Error('Unauthorized: Admin does not belong to this cooperative');
-  }
-
   const porter = await Porter.create({
     ...porterData,
-    cooperativeId
+    cooperativeId: targetCooperativeId
   });
 
-  logger.info('Porter created', { porterId: porter._id, cooperativeId });
+  logger.info('Porter created', { porterId: porter._id, cooperativeId: targetCooperativeId });
   return porter;
 };
 
 // Get Porter by ID (with Cooperative Scoping)
-const getPorter = async (porterId, adminId) => {
+const getPorter = async (porterId, cooperativeId) => {
   const porter = await Porter.findById(porterId);
   
   if (!porter) {
     throw new Error('Porter not found');
   }
 
-  // Verify porter belongs to admin's cooperative
-  const cooperative = await Cooperative.findOne({ adminId: adminId });
-  if (!cooperative || porter.cooperativeId.toString() !== cooperative._id.toString()) {
+  // Verify porter belongs to the cooperative using cooperativeId directly
+  if (porter.cooperativeId.toString() !== cooperativeId) {
     throw new Error('Unauthorized: Porter does not belong to your cooperative');
   }
 
   return porter;
 };
 
-// Get All Porters for Admin's Cooperative
-const getAllPorters = async (adminId) => {
-  const cooperative = await Cooperative.findOne({ adminId: adminId });
-  if (!cooperative) {
-    throw new Error('Cooperative not found for this admin');
-  }
-
-  const porters = await Porter.find({ cooperativeId: cooperative._id })
+// Get All Porters for Cooperative
+const getAllPorters = async (cooperativeId) => {
+  // Use cooperativeId directly - no need to find cooperative by adminId
+  const porters = await Porter.find({ cooperativeId })
     .sort({ createdAt: -1 });
 
-  logger.info('Porters retrieved', { count: porters.length, cooperativeId: cooperative._id });
+  logger.info('Porters retrieved', { count: porters.length, cooperativeId });
   return porters;
 };
 
 // Update Porter (with Cooperative Scoping)
-const updatePorter = async (porterId, data, adminId) => {
+const updatePorter = async (porterId, data, cooperativeId) => {
   const porter = await Porter.findById(porterId);
   
   if (!porter) {
     throw new Error('Porter not found');
   }
 
-  // Verify porter belongs to admin's cooperative
-  const cooperative = await Cooperative.findOne({ adminId: adminId });
-  if (!cooperative || porter.cooperativeId.toString() !== cooperative._id.toString()) {
+  // Verify porter belongs to the cooperative using cooperativeId directly
+  if (porter.cooperativeId.toString() !== cooperativeId) {
     throw new Error('Unauthorized: Cannot modify porters from other cooperatives');
   }
 
-  // FIX: Use returnDocument instead of new option
   const updatedPorter = await Porter.findByIdAndUpdate(
     porterId,
     { $set: data },
     { 
-      new: true, // Keep for backward compatibility, but returnDocument is preferred
-      returnDocument: 'after', // NEW: Returns the updated document
+      new: true,
       runValidators: true 
     }
   );
 
-  logger.info('Porter updated', { porterId, adminId });
+  logger.info('Porter updated', { porterId, cooperativeId });
   return updatedPorter;
 };
 
 // Delete Porter (with Cooperative Scoping)
-const deletePorter = async (porterId, adminId) => {
+const deletePorter = async (porterId, cooperativeId) => {
   const porter = await Porter.findById(porterId);
   
   if (!porter) {
     throw new Error('Porter not found');
   }
 
-  // Verify porter belongs to admin's cooperative
-  const cooperative = await Cooperative.findOne({ adminId: adminId });
-  if (!cooperative || porter.cooperativeId.toString() !== cooperative._id.toString()) {
+  // Verify porter belongs to the cooperative using cooperativeId directly
+  if (porter.cooperativeId.toString() !== cooperativeId) {
     throw new Error('Unauthorized: Cannot delete porters from other cooperatives');
   }
 
   await Porter.findByIdAndDelete(porterId);
 
-  logger.info('Porter deleted', { porterId, adminId });
+  logger.info('Porter deleted', { porterId, cooperativeId });
   return { message: 'Porter deleted successfully' };
 };
 
 // Get Porter Performance (with Cooperative Scoping)
-const getPerformance = async (porterId, adminId, period = 'monthly') => {
+const getPerformance = async (porterId, cooperativeId, period = 'monthly') => {
   const porter = await Porter.findById(porterId);
   
   if (!porter) {
     throw new Error('Porter not found');
   }
 
-  // Verify porter belongs to admin's cooperative
-  const cooperative = await Cooperative.findOne({ adminId: adminId });
-  if (!cooperative || porter.cooperativeId.toString() !== cooperative._id.toString()) {
+  // Verify porter belongs to the cooperative using cooperativeId directly
+  if (porter.cooperativeId.toString() !== cooperativeId) {
     throw new Error('Unauthorized: Cannot access performance data for porters from other cooperatives');
   }
 
@@ -126,17 +114,24 @@ const getPerformance = async (porterId, adminId, period = 'monthly') => {
   let startDate;
   
   if (period === 'daily') {
-    startDate = new Date(now.setHours(0, 0, 0));
+    startDate = new Date(now);
+    startDate.setHours(0, 0, 0, 0);
   } else if (period === 'weekly') {
-    startDate = new Date(now.setDate(now.getDate() - 7));
+    startDate = new Date(now);
+    startDate.setDate(startDate.getDate() - 7);
   } else if (period === 'monthly') {
-    startDate = new Date(now.setMonth(now.getMonth() - 1));
+    startDate = new Date(now);
+    startDate.setMonth(startDate.getMonth() - 1);
+  } else {
+    // Default to monthly
+    startDate = new Date(now);
+    startDate.setMonth(startDate.getMonth() - 1);
   }
 
   const performance = await Transaction.aggregate([
     { $match: { 
       device_id: porter.assigned_device_id,
-      cooperativeId: cooperative._id,
+      cooperativeId: cooperativeId,
       timestamp_server: { $gte: startDate }
     }},
     { $group: {

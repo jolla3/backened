@@ -2,43 +2,40 @@ const Farmer = require('../models/farmer');
 const Cooperative = require('../models/cooperative');
 const Transaction = require('../models/transaction');
 const logger = require('../utils/logger');
-const transactionService = require('./transactionService'); // ✅ ADD THIS
+const transactionService = require('./transactionService');
 
 // Create Farmer with Cooperative Scoping
-const createFarmer = async (data, adminId) => {
-  const { cooperativeId, ...farmerData } = data;
+const createFarmer = async (data, adminId, cooperativeId) => {
+  const { cooperativeId: providedCoopId, ...farmerData } = data;
+
+  // Use provided cooperativeId or the one from the token
+  const targetCooperativeId = providedCoopId || cooperativeId;
 
   // Validate cooperative exists
-  const cooperative = await Cooperative.findById(cooperativeId);
+  const cooperative = await Cooperative.findById(targetCooperativeId);
   if (!cooperative) {
     throw new Error('Cooperative not found');
   }
 
-  // Verify admin belongs to the cooperative
-  if (cooperative.adminId.toString() !== adminId) {
-    throw new Error('Unauthorized: Admin does not belong to this cooperative');
-  }
-
   const farmer = await Farmer.create({
     ...farmerData,
-    cooperativeId
+    cooperativeId: targetCooperativeId
   });
 
-  logger.info('Farmer created', { farmerId: farmer._id, cooperativeId });
+  logger.info('Farmer created', { farmerId: farmer._id, cooperativeId: targetCooperativeId });
   return farmer;
 };
 
 // Get Farmer by ID (with Cooperative Scoping)
-const getFarmer = async (farmerId, adminId) => {
+const getFarmer = async (farmerId, cooperativeId) => {
   const farmer = await Farmer.findById(farmerId);
   
   if (!farmer) {
     throw new Error('Farmer not found');
   }
 
-  // Verify farmer belongs to admin's cooperative
-  const cooperative = await Cooperative.findOne({ adminId: adminId });
-  if (!cooperative || farmer.cooperativeId.toString() !== cooperative._id.toString()) {
+  // Verify farmer belongs to the cooperative
+  if (farmer.cooperativeId.toString() !== cooperativeId) {
     throw new Error('Unauthorized: Farmer does not belong to your cooperative');
   }
 
@@ -46,16 +43,15 @@ const getFarmer = async (farmerId, adminId) => {
 };
 
 // Get Farmer by Code (with Cooperative Scoping)
-const getFarmerByCode = async (farmerCode, adminId) => {
+const getFarmerByCode = async (farmerCode, cooperativeId) => {
   const farmer = await Farmer.findOne({ farmer_code: farmerCode });
   
   if (!farmer) {
     throw new Error('Farmer not found');
   }
 
-  // Verify farmer belongs to admin's cooperative
-  const cooperative = await Cooperative.findOne({ adminId: adminId });
-  if (!cooperative || farmer.cooperativeId.toString() !== cooperative._id.toString()) {
+  // Verify farmer belongs to the cooperative
+  if (farmer.cooperativeId.toString() !== cooperativeId) {
     throw new Error('Unauthorized: Farmer does not belong to your cooperative');
   }
 
@@ -63,16 +59,15 @@ const getFarmerByCode = async (farmerCode, adminId) => {
 };
 
 // Update Farmer (with Cooperative Scoping)
-const updateFarmer = async (farmerId, data, adminId) => {
+const updateFarmer = async (farmerId, data, cooperativeId) => {
   const farmer = await Farmer.findById(farmerId);
   
   if (!farmer) {
     throw new Error('Farmer not found');
   }
 
-  // Verify farmer belongs to admin's cooperative
-  const cooperative = await Cooperative.findOne({ adminId: adminId });
-  if (!cooperative || farmer.cooperativeId.toString() !== cooperative._id.toString()) {
+  // Verify farmer belongs to the cooperative
+  if (farmer.cooperativeId.toString() !== cooperativeId) {
     throw new Error('Unauthorized: Cannot modify farmers from other cooperatives');
   }
 
@@ -82,39 +77,37 @@ const updateFarmer = async (farmerId, data, adminId) => {
     { new: true, runValidators: true }
   );
 
-  logger.info('Farmer updated', { farmerId, adminId });
+  logger.info('Farmer updated', { farmerId, cooperativeId });
   return updatedFarmer;
 };
 
 // Delete Farmer (with Cooperative Scoping)
-const deleteFarmer = async (farmerId, adminId) => {
+const deleteFarmer = async (farmerId, cooperativeId) => {
   const farmer = await Farmer.findById(farmerId);
   
   if (!farmer) {
     throw new Error('Farmer not found');
   }
 
-  // Verify farmer belongs to admin's cooperative
-  const cooperative = await Cooperative.findOne({ adminId: adminId });
-  if (!cooperative || farmer.cooperativeId.toString() !== cooperative._id.toString()) {
+  // Verify farmer belongs to the cooperative
+  if (farmer.cooperativeId.toString() !== cooperativeId) {
     throw new Error('Unauthorized: Cannot delete farmers from other cooperatives');
   }
 
   await Farmer.findByIdAndDelete(farmerId);
 
-  logger.info('Farmer deleted', { farmerId, adminId });
+  logger.info('Farmer deleted', { farmerId, cooperativeId });
   return { message: 'Farmer deleted successfully' };
 };
 
-const getAllFarmers = async (adminId) => {
-  const cooperative = await Cooperative.findOne({ adminId });
-  if (!cooperative) throw new Error('Cooperative not found for this admin');
-
-  const farmers = await Farmer.find({ cooperativeId: cooperative._id }).sort({ createdAt: -1 }).lean();
+const getAllFarmers = async (cooperativeId) => {
+  // No need to find cooperative by adminId - just use cooperativeId directly
+  const farmers = await Farmer.find({ cooperativeId }).sort({ createdAt: -1 }).lean();
+  
   const farmersWithBalance = await Promise.all(
     farmers.map(async (farmer) => {
       try {
-        const balanceData = await getBalance(farmer._id, adminId);
+        const balanceData = await getBalance(farmer._id, cooperativeId);
         return { ...farmer, ...balanceData };
       } catch (error) {
         logger.error(`Failed to fetch balance for farmer ${farmer.farmer_code || farmer._id}: ${error.message}`);
@@ -125,12 +118,12 @@ const getAllFarmers = async (adminId) => {
   return farmersWithBalance;
 };
 
-const getBalance = async (farmerId, adminId) => {
+const getBalance = async (farmerId, cooperativeId) => {
   const farmer = await Farmer.findById(farmerId);
   if (!farmer) throw new Error('Farmer not found');
 
-  const cooperative = await Cooperative.findOne({ adminId });
-  if (!cooperative || farmer.cooperativeId.toString() !== cooperative._id.toString()) {
+  // Verify farmer belongs to the cooperative
+  if (farmer.cooperativeId.toString() !== cooperativeId) {
     throw new Error('Unauthorized');
   }
 
@@ -163,11 +156,12 @@ const getBalance = async (farmerId, adminId) => {
   };
 };
 
-const updateBalance = async (farmerId, amount, adminId) => {
+const updateBalance = async (farmerId, amount, cooperativeId) => {
   const farmer = await Farmer.findById(farmerId);
   if (!farmer) throw new Error('Farmer not found');
-  const cooperative = await Cooperative.findOne({ adminId });
-  if (!cooperative || farmer.cooperativeId.toString() !== cooperative._id.toString()) {
+  
+  // Verify farmer belongs to the cooperative
+  if (farmer.cooperativeId.toString() !== cooperativeId) {
     throw new Error('Unauthorized');
   }
 
@@ -187,12 +181,12 @@ const updateBalance = async (farmerId, amount, adminId) => {
   }
 };
 
-const getFarmerHistory = async (farmerId, adminId, limit = 50) => {
+const getFarmerHistory = async (farmerId, cooperativeId, limit = 50) => {
   const farmer = await Farmer.findById(farmerId);
   if (!farmer) throw new Error('Farmer not found');
 
-  const cooperative = await Cooperative.findOne({ adminId });
-  if (!cooperative || farmer.cooperativeId.toString() !== cooperative._id.toString()) {
+  // Verify farmer belongs to the cooperative
+  if (farmer.cooperativeId.toString() !== cooperativeId) {
     throw new Error('Unauthorized: Farmer does not belong to your cooperative');
   }
 
@@ -209,7 +203,6 @@ const getFarmerHistory = async (farmerId, adminId, limit = 50) => {
   if (result.error) throw new Error(result.error);
   return result;
 };
-
 
 module.exports = {
   createFarmer,

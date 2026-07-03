@@ -61,13 +61,13 @@
   "jspdf-autotable": "^5.0.7",
   
     
+  "mongodb": "^7.4.0",
+  
+    
   "mongodb-memory-server": "^11.0.1",
   
     
   "mongoose": "^9.2.4",
-  
-    
-  "nodemon": "^3.1.14",
   
     
   "qrcode": "^1.5.4",
@@ -89,6 +89,13 @@
   
     
   "winston": "^3.19.0"
+  
+  },
+  
+  "devDependencies": {
+  
+    
+  "nodemon": "^3.1.14"
   
   }
 }
