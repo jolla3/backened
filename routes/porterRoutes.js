@@ -1,3 +1,4 @@
+// routes/porterRoutes.js
 const express = require('express');
 const router = express.Router();
 const {
@@ -6,15 +7,23 @@ const {
   getAllPorters,
   updatePorter,
   deletePorter,
-  getPerformance
+  getPerformance,
+  getSummary,
+  getTrends,
+  getFarmers
 } = require('../controllers/porterController');
 
-// All routes require authentication
+// ─── CRUD ──────────────────────────────────────────────
 router.post('/', createPorter);
 router.get('/', getAllPorters);
 router.get('/:id', getPorter);
-router.get('/:id/performance', getPerformance);
 router.put('/:id', updatePorter);
 router.delete('/:id', deletePorter);
+
+// ─── Performance ────────────────────────────────────────
+router.get('/:id/performance', getPerformance);       // legacy
+router.get('/:id/summary', getSummary);               // ✅ correct
+router.get('/:id/trends', getTrends);                 // ✅ correct
+router.get('/:id/farmers', getFarmers);               // ✅ correct
 
 module.exports = router;

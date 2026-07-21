@@ -4,29 +4,31 @@ const logger = require('../utils/logger');
 const register = async (req, res) => {
   try {
     const cooperativeId = req.user.cooperativeId;
-    const adminId = req.user.id;  // ✅ FIXED: Get from JWT (69a9b8041906e5cc2b40db84)
-    
-    const { deviceId, name, location, type, uuid, hardware_id } = req.body;
-    
-    const device = await deviceService.registerDevice({
-      deviceId,           // → uuid: deviceId
-      name, 
-      location, 
-      type, 
-      adminId,            // ✅ JWT user ID: "69a9b8041906e5cc2b40db84"
-      cooperativeId,      // ✅ JWT coop ID: "69b31bedf575f028cbd92a63"
-      uuid, 
+    const adminId = req.user.id;
+    const {
+      deviceId,      // from frontend (uuid)
+      deviceName,
+      osBuildId,
+      platform,
       hardware_id
+    } = req.body;
+
+    const device = await deviceService.registerDevice({
+      deviceId,
+      deviceName,
+      osBuildId,
+      platform,
+      hardware_id,
+      adminId,
+      cooperativeId
     });
-    
-    res.json(device);
+
+    res.status(201).json(device);
   } catch (error) {
-    logger.error('Device registration failed', { 
-      error: error.message, 
-      coopId: req.user?.cooperativeId,
-      adminId: req.user?.id,
-      body: req.body 
-    });
+    if (error.code === 11000) {
+      return res.status(409).json({ error: 'Device already registered' });
+    }
+    logger.error('Device registration failed', { error: error.message, stack: error.stack });
     res.status(400).json({ error: error.message });
   }
 };

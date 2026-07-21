@@ -11,6 +11,11 @@ const cooperativeSchema = new mongoose.Schema({
     unique: true,
     trim: true
   },
+  // ✅ Keep top-level county for simplicity (we'll also keep location.county for compatibility)
+  county: {
+    type: String,
+    trim: true
+  },
   location: {
     county: {
       type: String,
@@ -36,11 +41,15 @@ const cooperativeSchema = new mongoose.Schema({
       trim: true
     }
   },
-  // FIX: Made adminId optional for initial setup
+  // ✅ Add website field
+  website: {
+    type: String,
+    trim: true
+  },
   adminId: {
     type: mongoose.Schema.Types.ObjectId,
     ref: 'User',
-    required: false, // Changed from true to false
+    required: false,
     default: null
   },
   senderName: {
@@ -65,4 +74,5 @@ const cooperativeSchema = new mongoose.Schema({
 
 cooperativeSchema.index({ name: 1 });
 
-module.exports = mongoose.model('Cooperative', cooperativeSchema);
+const Cooperative = mongoose.models.Cooperative || mongoose.model('Cooperative', cooperativeSchema);
+module.exports = Cooperative;

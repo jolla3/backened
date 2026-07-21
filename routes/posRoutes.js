@@ -2,6 +2,7 @@ const express = require('express');
 const router = express.Router();
 const posController = require('../controllers/posController');
 const deviceMiddleware = require('../middlewares/deviceMiddleware');
+const { authMiddleware } = require('../middlewares/authMiddleware');
 
 // Farmer Lookup (no auth needed for lookup)
 router.get('/farmer/:farmer_code', posController.findFarmerByCode);
@@ -26,5 +27,8 @@ router.get('/farmer/:farmer_code/history', deviceMiddleware, posController.getFa
 
 router.get('/porters/:porter_id/farmers', posController.getFarmersCollectedByPorter);
 router.get('/chart-data', posController.getPerformanceChartData);
+router.get('/top-farmers', authMiddleware, posController.getTopFarmers);
+router.get('/zone-performance', authMiddleware, posController.getZonePerformance);
+router.get('/porter-ranking', authMiddleware, posController.getPorterRanking);
 
 module.exports = router;

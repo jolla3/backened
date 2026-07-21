@@ -1,99 +1,72 @@
+// analytics/lowPerformingFarmers.js
+const mongoose = require('mongoose');
 const Farmer = require('../models/farmer');
 const Transaction = require('../models/transaction');
+const Cooperative = require('../models/cooperative');
 const logger = require('../utils/logger');
 
-// ✅ FIXED: Added adminId, filtered by cooperative, optimized aggregation
-const getFarmersWithDebt = async (limit = 10, adminId) => {
-  const cooperative = await require('../models/cooperative').findById(adminId);
-  if (!cooperative) throw new Error('Cooperative not found');
+const getLowPerformingFarmers = async (cooperativeId, period = 'weekly') => {
+  try {
+    const cooperative = await Cooperative.findById(cooperativeId);
+    if (!cooperative) throw new Error('Cooperative not found');
 
-  const farmers = await Farmer.find({ 
-    cooperativeId: cooperative._id, 
-    balance: { $lt: 0 } 
-  })
-  .sort({ balance: 1 })
-  .limit(limit)
-  .select('name phone balance branch_id');
+    const now = new Date();
+    const currentStart = new Date(now);
+    if (period === 'daily') {
+      currentStart.setHours(0, 0, 0, 0);
+    } else if (period === 'weekly') {
+      currentStart.setDate(currentStart.getDate() - 7);
+    } else {
+      throw new Error('Invalid period. Use "daily" or "weekly".');
+    }
 
-  return farmers;
+    // Current period litres per farmer
+    const currentPeriod = await Transaction.aggregate([
+      { $match: { type: 'milk', cooperativeId, timestamp_server: { $gte: currentStart } } },
+      { $group: { _id: '$farmer_id', currentLitres: { $sum: '$litres' }, currentTx: { $sum: 1 } } }
+    ]);
+
+    // Rolling average over last 30 days (excluding current period)
+    const thirtyDaysAgo = new Date(currentStart);
+    thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
+    const rollingAvg = await Transaction.aggregate([
+      { $match: { type: 'milk', cooperativeId, timestamp_server: { $gte: thirtyDaysAgo, $lt: currentStart } } },
+      { $group: { _id: '$farmer_id', avgLitres: { $avg: '$litres' }, daysActive: { $addToSet: { $dateToString: { format: '%Y-%m-%d', date: '$timestamp_server' } } } } }
+    ]);
+
+    const avgMap = new Map();
+    for (const r of rollingAvg) {
+      avgMap.set(r._id.toString(), { avg: r.avgLitres || 0, days: r.daysActive?.length || 0 });
+    }
+
+    const lowPerformers = [];
+    for (const current of currentPeriod) {
+      const id = current._id.toString();
+      const avg = avgMap.get(id);
+      if (!avg || avg.days < 5) continue;
+      const expected = avg.avg * (period === 'daily' ? 1 : 7);
+      const dropPercent = expected > 0 ? ((expected - current.currentLitres) / expected) * 100 : 0;
+      if (dropPercent > 20) {
+        const farmer = await Farmer.findById(id);
+        if (farmer) {
+          lowPerformers.push({
+            farmerId: id,
+            farmerName: farmer.name,
+            farmerPhone: farmer.phone,
+            currentPeriodLitres: current.currentLitres,
+            expectedLitres: Math.round(expected),
+            dropPercent: parseFloat(dropPercent.toFixed(2)),
+            rollingAvg: Math.round(avg.avg)
+          });
+        }
+      }
+    }
+
+    return lowPerformers.sort((a, b) => b.dropPercent - a.dropPercent);
+  } catch (error) {
+    logger.error('LowPerformingFarmers failed', { error: error.message, cooperativeId });
+    return [];
+  }
 };
 
-const getTopFarmersByBalance = async (limit = 10, adminId) => {
-  const cooperative = await require('../models/cooperative').findById(adminId);
-  if (!cooperative) throw new Error('Cooperative not found');
-
-  const farmers = await Farmer.find({ 
-    cooperativeId: cooperative._id, 
-    balance: { $gte: 0 } 
-  })
-  .sort({ balance: -1 })
-  .limit(limit)
-  .select('name phone balance branch_id');
-
-  return farmers;
-};
-
-// ✅ FIXED: Replaced loop with Aggregation (Performance)
-const getFeedMilkImbalance = async (limit = 10, adminId) => {
-  const cooperative = await require('../models/cooperative').findById(adminId);
-  if (!cooperative) throw new Error('Cooperative not found');
-
-  const imbalanceList = await Transaction.aggregate([
-    { $match: { cooperativeId: cooperative._id } },
-    { $group: {
-      _id: '$farmer_id',
-      milkPayout: { $sum: { $cond: [{ $eq: ['$type', 'milk'] }, '$payout', 0] } },
-      milkLitres: { $sum: { $cond: [{ $eq: ['$type', 'milk'] }, '$litres', 0] } },
-      feedCost: { $sum: { $cond: [{ $eq: ['$type', 'feed'] }, '$cost', 0] } }
-    }},
-    { $lookup: {
-      from: 'farmers',
-      localField: '_id',
-      foreignField: '_id',
-      as: 'farmer'
-    }},
-    { $unwind: '$farmer' },
-    { $match: { 'farmer.cooperativeId': cooperative._id } },
-    { $project: {
-      farmerId: '$_id',
-      farmerName: '$farmer.name',
-      farmerPhone: '$farmer.phone',
-      milkLitres: '$milkLitres',
-      milkPayout: '$milkPayout',
-      feedCost: '$feedCost',
-      netBalance: { $subtract: ['$milkPayout', '$feedCost'] },
-      currentBalance: '$farmer.balance'
-    }},
-    { $match: { feedCost: { $gt: '$milkPayout' }, milkLitres: { $lt: 50 } } },
-    { $sort: { netBalance: 1 } },
-    { $limit: limit }
-  ]);
-
-  return imbalanceList;
-};
-
-const getFarmerTransactionHistory = async (farmerId, limit = 20, adminId) => {
-  const cooperative = await require('../models/cooperative').findById(adminId);
-  if (!cooperative) throw new Error('Cooperative not found');
-
-  // Verify farmer belongs to cooperative
-  const farmer = await Farmer.findOne({ _id: farmerId, cooperativeId: cooperative._id });
-  if (!farmer) throw new Error('Farmer not found or unauthorized');
-
-  const transactions = await Transaction.find({ 
-    farmer_id: farmerId,
-    cooperativeId: cooperative._id
-  })
-  .sort({ timestamp_server: -1 })
-  .limit(limit)
-  .populate('farmer_id', 'name phone');
-
-  return transactions;
-};
-
-module.exports = {
-  getFarmersWithDebt,
-  getTopFarmersByBalance,
-  getFeedMilkImbalance,
-  getFarmerTransactionHistory
-};
+module.exports = { getLowPerformingFarmers };

@@ -1,207 +1,251 @@
+// services/farmerService.js
+const mongoose = require('mongoose');
 const Farmer = require('../models/farmer');
-const Cooperative = require('../models/cooperative');
-const Transaction = require('../models/transaction');
+const Ledger = require('../models/ledger');
 const logger = require('../utils/logger');
 const transactionService = require('./transactionService');
 
-// Create Farmer with Cooperative Scoping
-const createFarmer = async (data, adminId, cooperativeId) => {
-  const { cooperativeId: providedCoopId, ...farmerData } = data;
+// ─── Helpers ──────────────────────────────────────────────────────
 
-  // Use provided cooperativeId or the one from the token
-  const targetCooperativeId = providedCoopId || cooperativeId;
+/**
+ * Convert a farmer document to a clean profile object (no Mongo IDs)
+ */
+const toProfile = (farmer) => ({
+  farmerCode: farmer.farmer_code,
+  name: farmer.name,
+  phone: farmer.phone,
+  location: farmer.location || '',
+  active: farmer.isActive !== false,
+  createdAt: farmer.createdAt,
+});
 
-  // Validate cooperative exists
-  const cooperative = await Cooperative.findById(targetCooperativeId);
-  if (!cooperative) {
-    throw new Error('Cooperative not found');
+/**
+ * Get all farmer balances in one aggregation (no N+1)
+ */
+const getAllBalances = async (cooperativeId) => {
+  const result = await Ledger.aggregate([
+    { $match: { cooperativeId: new mongoose.Types.ObjectId(cooperativeId) } },
+    { $sort: { timestamp: -1 } },
+    { $group: { _id: '$farmerId', balance: { $first: '$runningBalance' } } },
+  ]);
+  const map = new Map();
+  for (const r of result) {
+    map.set(r._id.toString(), r.balance);
   }
+  return map;
+};
 
+/**
+ * Get a single farmer's current balance from Ledger (fastest)
+ */
+const getBalanceForFarmer = async (farmerId, cooperativeId) => {
+  const result = await Ledger.findOne({
+    cooperativeId,
+    farmerId,
+  })
+    .sort({ timestamp: -1 })
+    .lean();
+  return result ? result.runningBalance : 0;
+};
+
+// ─── CRUD Operations ─────────────────────────────────────────────
+
+const createFarmer = async (data, cooperativeId) => {
+  const { cooperativeId: _, ...farmerData } = data;
   const farmer = await Farmer.create({
     ...farmerData,
-    cooperativeId: targetCooperativeId
+    cooperativeId,
   });
-
-  logger.info('Farmer created', { farmerId: farmer._id, cooperativeId: targetCooperativeId });
-  return farmer;
+  logger.info('Farmer created', { farmerCode: farmer.farmer_code, cooperativeId });
+  return toProfile(farmer);
 };
 
-// Get Farmer by ID (with Cooperative Scoping)
 const getFarmer = async (farmerId, cooperativeId) => {
   const farmer = await Farmer.findById(farmerId);
-  
-  if (!farmer) {
-    throw new Error('Farmer not found');
-  }
-
-  // Verify farmer belongs to the cooperative
+  if (!farmer) throw new Error('Farmer not found');
   if (farmer.cooperativeId.toString() !== cooperativeId) {
-    throw new Error('Unauthorized: Farmer does not belong to your cooperative');
+    throw new Error('Unauthorized');
   }
-
-  return farmer;
+  return toProfile(farmer);
 };
 
-// Get Farmer by Code (with Cooperative Scoping)
 const getFarmerByCode = async (farmerCode, cooperativeId) => {
   const farmer = await Farmer.findOne({ farmer_code: farmerCode });
-  
-  if (!farmer) {
-    throw new Error('Farmer not found');
-  }
-
-  // Verify farmer belongs to the cooperative
+  if (!farmer) throw new Error('Farmer not found');
   if (farmer.cooperativeId.toString() !== cooperativeId) {
-    throw new Error('Unauthorized: Farmer does not belong to your cooperative');
+    throw new Error('Unauthorized');
   }
-
-  return farmer;
+  return toProfile(farmer);
 };
 
-// Update Farmer (with Cooperative Scoping)
 const updateFarmer = async (farmerId, data, cooperativeId) => {
   const farmer = await Farmer.findById(farmerId);
-  
-  if (!farmer) {
-    throw new Error('Farmer not found');
-  }
-
-  // Verify farmer belongs to the cooperative
+  if (!farmer) throw new Error('Farmer not found');
   if (farmer.cooperativeId.toString() !== cooperativeId) {
-    throw new Error('Unauthorized: Cannot modify farmers from other cooperatives');
+    throw new Error('Unauthorized');
   }
 
-  const updatedFarmer = await Farmer.findByIdAndUpdate(
+  const updated = await Farmer.findByIdAndUpdate(
     farmerId,
     { $set: data },
     { new: true, runValidators: true }
   );
-
-  logger.info('Farmer updated', { farmerId, cooperativeId });
-  return updatedFarmer;
+  logger.info('Farmer updated', { farmerCode: updated.farmer_code, cooperativeId });
+  return toProfile(updated);
 };
 
-// Delete Farmer (with Cooperative Scoping)
 const deleteFarmer = async (farmerId, cooperativeId) => {
   const farmer = await Farmer.findById(farmerId);
-  
-  if (!farmer) {
-    throw new Error('Farmer not found');
-  }
-
-  // Verify farmer belongs to the cooperative
+  if (!farmer) throw new Error('Farmer not found');
   if (farmer.cooperativeId.toString() !== cooperativeId) {
-    throw new Error('Unauthorized: Cannot delete farmers from other cooperatives');
+    throw new Error('Unauthorized');
   }
-
   await Farmer.findByIdAndDelete(farmerId);
-
   logger.info('Farmer deleted', { farmerId, cooperativeId });
   return { message: 'Farmer deleted successfully' };
 };
 
+// ─── List farmers with balances (ONE aggregation) ──────────────
+
 const getAllFarmers = async (cooperativeId) => {
-  // No need to find cooperative by adminId - just use cooperativeId directly
-  const farmers = await Farmer.find({ cooperativeId }).sort({ createdAt: -1 }).lean();
-  
-  const farmersWithBalance = await Promise.all(
-    farmers.map(async (farmer) => {
-      try {
-        const balanceData = await getBalance(farmer._id, cooperativeId);
-        return { ...farmer, ...balanceData };
-      } catch (error) {
-        logger.error(`Failed to fetch balance for farmer ${farmer.farmer_code || farmer._id}: ${error.message}`);
-        return { ...farmer, balance: 0, milkIncome: 0, feedCost: 0 };
-      }
-    })
-  );
-  return farmersWithBalance;
+  const farmers = await Farmer.find({ cooperativeId })
+    .sort({ createdAt: -1 })
+    .lean();
+
+  const balanceMap = await getAllBalances(cooperativeId);
+
+  return farmers.map(f => {
+    const balance = balanceMap.get(f._id.toString()) || 0;
+    let status = 'SETTLED';
+    if (balance > 0) status = 'PAYABLE';
+    else if (balance < 0) status = 'OWES_COOPERATIVE';
+
+    return {
+      id: f._id, // ✅ Include ID for frontend
+      farmerCode: f.farmer_code,
+      name: f.name,
+      phone: f.phone,
+      location: f.location || '',
+      active: f.isActive !== false,
+      currentBalance: balance,
+      status,
+    };
+  });
 };
 
+// ─── Get single farmer's balance ────────────────────────────────
+
 const getBalance = async (farmerId, cooperativeId) => {
+  if (!farmerId) throw new Error('Farmer ID is required');
+
   const farmer = await Farmer.findById(farmerId);
   if (!farmer) throw new Error('Farmer not found');
-
-  // Verify farmer belongs to the cooperative
   if (farmer.cooperativeId.toString() !== cooperativeId) {
     throw new Error('Unauthorized');
   }
 
-  // Ensure farmer_code exists; if not, return zero
-  if (!farmer.farmer_code) {
-    logger.warn(`Farmer ${farmerId} has no farmer_code`);
-    return {
-      id: farmer._id,
-      name: farmer.name,
-      farmerCode: null,
-      balance: 0,
-      milkIncome: 0,
-      feedCost: 0,
-      totalLitres: 0,
-      totalTransactions: 0
-    };
-  }
+  const balance = await getBalanceForFarmer(farmerId, cooperativeId);
+  let status = 'SETTLED';
+  if (balance > 0) status = 'PAYABLE';
+  else if (balance < 0) status = 'OWES_COOPERATIVE';
 
-  const result = await transactionService.getFarmerHistory(farmer.farmer_code, 1000, farmer.cooperativeId);
-  if (result.error) throw new Error(result.error);
+  // Get lifetime metrics (from transactionService)
+  const history = await transactionService.getFarmerHistory(
+    farmer.farmer_code,
+    1,
+    cooperativeId
+  );
+
+  const summary = history.summary || {};
+
   return {
-    id: farmer._id,
-    name: farmer.name,
     farmerCode: farmer.farmer_code,
-    balance: result.farmer.balance,
-    milkIncome: result.farmer.milkIncome,
-    feedCost: result.farmer.feedCost,
-    totalLitres: result.farmer.totalLitres,
-    totalTransactions: result.farmer.totalTransactions
+    farmerName: farmer.name,
+    currentBalance: balance,
+    status,
+    milkIncome: summary.milkIncome || 0,
+    feedCost: summary.feedCost || 0,
+    lifetimeLitres: summary.lifetimeLitres || 0,
+    netEarnings: summary.netEarnings || 0,
+    deliveries: summary.deliveries || 0,
   };
 };
 
-const updateBalance = async (farmerId, amount, cooperativeId) => {
+// ─── Get farmer history ──────────────────────────────────────────
+
+const getFarmerHistory = async (farmerId, cooperativeId, limit = 50) => {
+  if (!farmerId) throw new Error('Farmer ID is required');
+
   const farmer = await Farmer.findById(farmerId);
   if (!farmer) throw new Error('Farmer not found');
-  
-  // Verify farmer belongs to the cooperative
   if (farmer.cooperativeId.toString() !== cooperativeId) {
     throw new Error('Unauthorized');
   }
 
-  const numericAmount = Number(amount);
-  const session = await Farmer.startSession();
-  session.startTransaction();
-  try {
-    farmer.balance += numericAmount;
-    await farmer.save({ session });
-    await session.commitTransaction();
-    return farmer;
-  } catch (error) {
-    await session.abortTransaction();
-    throw error;
-  } finally {
-    session.endSession();
-  }
-};
+  // Use transactionService to get the full history
+  const raw = await transactionService.getFarmerHistory(
+    farmer.farmer_code,
+    limit,
+    cooperativeId
+  );
+  if (raw.error) throw new Error(raw.error);
 
-const getFarmerHistory = async (farmerId, cooperativeId, limit = 50) => {
-  const farmer = await Farmer.findById(farmerId);
-  if (!farmer) throw new Error('Farmer not found');
+  const summary = raw.summary || {};
+  const transactions = raw.transactions || [];
+  const ledgerHistory = raw.ledgerHistory || [];
 
-  // Verify farmer belongs to the cooperative
-  if (farmer.cooperativeId.toString() !== cooperativeId) {
-    throw new Error('Unauthorized: Farmer does not belong to your cooperative');
-  }
+  const profile = {
+    farmerCode: farmer.farmer_code,
+    name: farmer.name,
+    phone: farmer.phone,
+    location: farmer.location || '',
+    active: farmer.isActive !== false,
+  };
 
-  // Ensure farmer_code exists; if not, return empty history
-  if (!farmer.farmer_code) {
-    return {
-      farmer: { id: farmer._id, name: farmer.name, code: null, phone: farmer.phone, balance: farmer.balance, milkIncome: 0, feedCost: 0, totalLitres: 0, totalTransactions: 0, netProfit: 0 },
-      transactions: [],
-      stats: { milkTransactions: 0, feedTransactions: 0, period: 'All Time' }
-    };
-  }
+  const financial = {
+    currentBalance: summary.currentBalance || 0,
+    status: summary.status || 'SETTLED',
+    lifetimeMilkIncome: summary.milkIncome || 0,
+    totalFeedPurchases: summary.feedCost || 0,
+    totalSettlements: summary.settlementDeductions || 0,
+    netEarnings: summary.netEarnings || 0,
+  };
 
-  const result = await transactionService.getFarmerHistory(farmer.farmer_code, limit, farmer.cooperativeId);
-  if (result.error) throw new Error(result.error);
-  return result;
+  const production = {
+    lifetimeLitres: summary.lifetimeLitres || 0,
+    deliveries: summary.deliveries || 0,
+    averageLitresPerDelivery: summary.averageLitresPerDelivery || 0,
+    firstDelivery: summary.firstDelivery,
+    lastDelivery: summary.lastDelivery,
+  };
+
+  const statement = ledgerHistory.map(entry => ({
+    date: entry.date,
+    type: entry.type,
+    amount: entry.amount,
+    balanceAfter: entry.balanceAfter,
+    description: entry.description || entry.reference || '',
+  }));
+
+  const cleanTransactions = transactions.map(t => ({
+    receipt: t.receipt || '',
+    date: t.date || t.timestamp_server,
+    event: t.event || (t.type === 'milk' ? 'Milk Delivery' : 'Feed Purchase'),
+    litres: t.litres || 0,
+    quantity: t.quantity || 0,
+    amount: t.amount || t.payout || t.cost || 0,
+    paymentMethod: t.paymentMethod || 'balance',
+    zone: t.zone || '',
+    porter: t.porter || '',
+  }));
+
+  return {
+    profile,
+    financial,
+    production,
+    statement: statement.slice(0, limit),
+    transactions: cleanTransactions.slice(0, limit),
+  };
 };
 
 module.exports = {
@@ -212,6 +256,5 @@ module.exports = {
   deleteFarmer,
   getAllFarmers,
   getBalance,
-  updateBalance,
-  getFarmerHistory
+  getFarmerHistory,
 };

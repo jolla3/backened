@@ -1,14 +1,12 @@
+// analytics/financialAnalytics.js
+const mongoose = require('mongoose');
 const Transaction = require('../models/transaction');
-const Farmer = require('../models/farmer');
+const Ledger = require('../models/ledger');
 const Cooperative = require('../models/cooperative');
 const logger = require('../utils/logger');
 
 /**
- * Get comprehensive financial intelligence for a cooperative.
- * All numbers are derived from actual transactions.
- *
- * @param {string} cooperativeId
- * @returns {Promise<Object>}
+ * Main financial intelligence – operations from Transactions, balances from Ledger.
  */
 const getFinancialIntelligence = async (cooperativeId) => {
   const cooperative = await Cooperative.findById(cooperativeId);
@@ -18,116 +16,152 @@ const getFinancialIntelligence = async (cooperativeId) => {
   const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
   const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate());
 
-  // 1. Milk statistics for the current month
-  const milkStats = await Transaction.aggregate([
-    {
-      $match: {
-        type: 'milk',
-        cooperativeId: cooperative._id,
-        timestamp_server: { $gte: startOfMonth }
-      }
-    },
-    {
-      $group: {
-        _id: null,
-        totalPayout: { $sum: { $ifNull: ['$payout', 0] } },
-        totalLitres: { $sum: { $ifNull: ['$litres', 0] } }
-      }
-    }
+  // Milk litres (month)
+  const milkLitresAgg = await Transaction.aggregate([
+    { $match: { type: 'milk', cooperativeId: cooperative._id, timestamp_server: { $gte: startOfMonth } } },
+    { $group: { _id: null, totalLitres: { $sum: '$litres' } } }
   ]);
+  const milkLitres = milkLitresAgg[0]?.totalLitres || 0;
 
-  // 2. Feed statistics for the current month
-  const feedStats = await Transaction.aggregate([
-    {
-      $match: {
-        type: 'feed',
-        cooperativeId: cooperative._id,
-        timestamp_server: { $gte: startOfMonth }
-      }
-    },
-    {
-      $group: {
-        _id: null,
-        totalRevenue: { $sum: { $ifNull: ['$cost', 0] } },
-        totalQuantity: { $sum: { $ifNull: ['$quantity', 0] } }
-      }
-    }
+  // Feed quantity (month)
+  const feedQuantityAgg = await Transaction.aggregate([
+    { $match: { type: 'feed', cooperativeId: cooperative._id, timestamp_server: { $gte: startOfMonth } } },
+    { $group: { _id: null, totalQuantity: { $sum: '$quantity' } } }
   ]);
+  const feedQuantity = feedQuantityAgg[0]?.totalQuantity || 0;
 
-  // 3. Today's milk statistics
+  // Feed revenue (month)
+  const feedRevenueAgg = await Transaction.aggregate([
+    { $match: { type: 'feed', cooperativeId: cooperative._id, timestamp_server: { $gte: startOfMonth } } },
+    { $group: { _id: null, totalRevenue: { $sum: '$cost' } } }
+  ]);
+  const feedRevenue = feedRevenueAgg[0]?.totalRevenue || 0;
+
+  // Feed revenue split by paymentMethod
+  const feedByPayment = await Transaction.aggregate([
+    { $match: { type: 'feed', cooperativeId: cooperative._id, timestamp_server: { $gte: startOfMonth } } },
+    { $group: { _id: '$paymentMethod', total: { $sum: '$cost' } } }
+  ]);
+  const feedRevenueCash = feedByPayment.find(f => f._id === 'cash')?.total || 0;
+  const feedRevenueBalance = feedByPayment.find(f => f._id === 'balance')?.total || 0;
+
+  // Milk value generated (sum of MILK_CREDIT this month) – historical
+  const milkValueAgg = await Ledger.aggregate([
+    { $match: { cooperativeId: cooperative._id, type: 'MILK_CREDIT', timestamp: { $gte: startOfMonth } } },
+    { $group: { _id: null, total: { $sum: '$amount' } } }
+  ]);
+  const milkValueGenerated = milkValueAgg[0]?.total || 0;
+
+  // Today's milk payout (operational)
   const todayStats = await Transaction.aggregate([
-    {
-      $match: {
-        type: 'milk',
-        cooperativeId: cooperative._id,
-        timestamp_server: { $gte: startOfToday }
-      }
-    },
-    {
-      $group: {
-        _id: null,
-        totalPayout: { $sum: { $ifNull: ['$payout', 0] } },
-        totalLitres: { $sum: { $ifNull: ['$litres', 0] } }
-      }
-    }
+    { $match: { type: 'milk', cooperativeId: cooperative._id, timestamp_server: { $gte: startOfToday } } },
+    { $group: { _id: null, totalPayout: { $sum: '$payout' }, totalLitres: { $sum: '$litres' } } }
+  ]);
+  const todayMilkPayout = todayStats[0]?.totalPayout || 0;
+  const todayMilkLitres = todayStats[0]?.totalLitres || 0;
+
+  // Current balances from latest Ledger runningBalance per farmer
+  const latestLedger = await Ledger.aggregate([
+    { $match: { cooperativeId: cooperative._id } },
+    { $sort: { timestamp: -1 } },
+    { $group: { _id: '$farmerId', runningBalance: { $first: '$runningBalance' } } }
   ]);
 
-  // 4. Extract numbers
-  const milkPayout = milkStats[0]?.totalPayout || 0;
-  const milkLitres = milkStats[0]?.totalLitres || 0;
-  const feedRevenue = feedStats[0]?.totalRevenue || 0;
-  const feedQuantity = feedStats[0]?.totalQuantity || 0;
-  const todayPayout = todayStats[0]?.totalPayout || 0;
-  const todayLitres = todayStats[0]?.totalLitres || 0;
+  let amountToPayFarmers = 0;
+  let amountFarmersOweCoop = 0;
+  let farmersToPay = 0;
+  let farmersOwingCoop = 0;
+  let farmersWithZero = 0;
 
-  // 5. Financial indicators
-  const netCashFlow = feedRevenue - milkPayout;               // profit from operations
-  const profitMargin = feedRevenue > 0 ? (netCashFlow / feedRevenue) * 100 : 0;
+  for (const entry of latestLedger) {
+    const bal = entry.runningBalance || 0;
+    if (bal > 0) {
+      amountToPayFarmers += bal;
+      farmersToPay++;
+    } else if (bal < 0) {
+      amountFarmersOweCoop += Math.abs(bal);
+      farmersOwingCoop++;
+    } else {
+      farmersWithZero++;
+    }
+  }
 
-  // 6. Average milk price (real)
-  const avgPricePerLiter = milkLitres > 0 ? milkPayout / milkLitres : 0;
-
-  // 7. Realistic cash flow projection: based on past month's milk payout pattern
-  //    We'll project that 70% of milk payout is due within 30 days (realistic)
-  const projectedPayout = milkPayout * 0.7;
-  const projectedCashFlow = feedRevenue - projectedPayout;
-
-  // 8. Break-even: we need actual fixed costs? There's no hardcoded data; we'll compute
-  //    the break-even litres based on the average milk price and the total feed revenue
-  //    (the revenue needed to cover the milk payout). This is a derived metric.
-  //    No hardcoded fixed costs – we'll use the milk payout as the cost to cover.
-  const breakEvenLitres = milkPayout > 0 && avgPricePerLiter > 0
-    ? milkPayout / avgPricePerLiter
-    : 0;
+  const avgPricePerLiter = milkLitres > 0 ? milkValueGenerated / milkLitres : 0;
 
   return {
-    // Core financials
-    milkRevenue: milkPayout,
     milkLitres,
+    milkValueGenerated,
     feedRevenue,
     feedQuantity,
-    netCashFlow,
-    profitMargin: parseFloat(profitMargin.toFixed(2)),
+    feedRevenueCash,
+    feedRevenueBalance,
+    todayMilkPayout,
+    todayMilkLitres,
+    amountToPayFarmers,
+    amountFarmersOweCoop,
+    farmersToPay,
+    farmersOwingCoop,
+    farmersWithZero,
     avgPricePerLiter: parseFloat(avgPricePerLiter.toFixed(2)),
-
-    // Today's snapshot
-    todayMilkPayout: todayPayout,
-    todayMilkLitres: todayLitres,
-
-    // Projections (based on real data)
-    cashFlowProjection: {
-      expectedReceipts: feedRevenue,
-      expectedPayouts: projectedPayout,
-      netProjection: projectedCashFlow,
-    },
-
-    // Break-even analysis (how many litres needed to cover milk payout)
-    breakEvenAnalysis: {
-      milkPayout,
-      avgPricePerLiter: avgPricePerLiter.toFixed(2),
-      litresNeeded: Math.ceil(breakEvenLitres),
-    },
+    hasRealData: milkLitres > 0 || feedRevenue > 0,
   };
 };
 
-module.exports = { getFinancialIntelligence };
+/**
+ * Get the latest runningBalance for every farmer.
+ */
+const getLatestBalances = async (cooperativeId) => {
+  const coopId = new mongoose.Types.ObjectId(cooperativeId);
+  const result = await Ledger.aggregate([
+    { $match: { cooperativeId: coopId } },
+    { $sort: { timestamp: -1 } },
+    { $group: { _id: '$farmerId', balance: { $first: '$runningBalance' } } }
+  ]);
+  const map = new Map();
+  for (const r of result) map.set(r._id.toString(), r.balance || 0);
+  return map;
+};
+
+/**
+ * Get lifetime ledger totals per farmer.
+ */
+const getFarmerLifetimeLedger = async (cooperativeId, farmerIds = null) => {
+  const coopId = new mongoose.Types.ObjectId(cooperativeId);
+  const match = { cooperativeId: coopId };
+  if (farmerIds && farmerIds.length) {
+    match.farmerId = { $in: farmerIds.map(id => new mongoose.Types.ObjectId(id)) };
+  }
+  const results = await Ledger.aggregate([
+    { $match: match },
+    {
+      $group: {
+        _id: '$farmerId',
+        milkCredits: { $sum: { $cond: [{ $eq: ['$type', 'MILK_CREDIT'] }, '$amount', 0] } },
+        feedDebits: { $sum: { $cond: [{ $eq: ['$type', 'FEED_DEBIT'] }, { $abs: '$amount' }, 0] } },
+        settlementDebits: { $sum: { $cond: [{ $eq: ['$type', 'SETTLEMENT_DEBIT'] }, { $abs: '$amount' }, 0] } },
+        bonuses: { $sum: { $cond: [{ $eq: ['$type', 'BONUS'] }, '$amount', 0] } },
+        penalties: { $sum: { $cond: [{ $eq: ['$type', 'PENALTY'] }, { $abs: '$amount' }, 0] } },
+        loans: { $sum: { $cond: [{ $eq: ['$type', 'LOAN'] }, { $abs: '$amount' }, 0] } },
+        interest: { $sum: { $cond: [{ $eq: ['$type', 'INTEREST'] }, { $abs: '$amount' }, 0] } },
+        manualAdjustments: { $sum: { $cond: [{ $eq: ['$type', 'MANUAL_ADJUSTMENT'] }, '$amount', 0] } }
+      }
+    }
+  ]);
+  const map = new Map();
+  for (const r of results) {
+    map.set(r._id.toString(), {
+      milkCredits: r.milkCredits || 0,
+      feedDebits: r.feedDebits || 0,
+      settlementDebits: r.settlementDebits || 0,
+      bonuses: r.bonuses || 0,
+      penalties: r.penalties || 0,
+      loans: r.loans || 0,
+      interest: r.interest || 0,
+      manualAdjustments: r.manualAdjustments || 0,
+      netValue: (r.milkCredits || 0) - (r.feedDebits || 0) - (r.settlementDebits || 0) - (r.penalties || 0) - (r.loans || 0) - (r.interest || 0) + (r.bonuses || 0) + (r.manualAdjustments || 0)
+    });
+  }
+  return map;
+};
+
+module.exports = { getFinancialIntelligence, getLatestBalances, getFarmerLifetimeLedger };

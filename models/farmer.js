@@ -29,26 +29,34 @@ const farmerSchema = new mongoose.Schema({
     required: true,
     index: true
   },
-  balance: {
-    type: Number,
-    default: 0
-  },
   isActive: {
     type: Boolean,
     default: true
   },
-  history: {
-    type: [mongoose.Schema.Types.ObjectId],
-    ref: 'Transaction',
-    default: []  // ✅ Initialize as empty array
+  currentBalance: {
+    type: Number,
+    default: 0
+  },
+  lastLedgerId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'Ledger'
   },
   createdAt: {
     type: Date,
     default: Date.now
-  }
+  },
+  zoneId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'Zone',
+    index: true,
+  },
+  zoneName: { type: String, trim: true }
 });
 
-// ✅ Only add indexes that are NOT already created by field definitions
+farmerSchema.index({ cooperativeId: 1, currentBalance: 1 });
 farmerSchema.index({ cooperativeId: 1, farmer_code: 1 });
 
-module.exports = mongoose.model('Farmer', farmerSchema);
+// ✅ Guard against OverwriteModelError
+const Farmer = mongoose.models.Farmer || mongoose.model('Farmer', farmerSchema);
+
+module.exports = Farmer;

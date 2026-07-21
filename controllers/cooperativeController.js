@@ -1,64 +1,45 @@
 const cooperativeService = require('../services/cooperativeService');
 const logger = require('../utils/logger');
 
-const getCooperative = async (req, res) => {
+/**
+ * GET /coop
+ * Returns the cooperative belonging to the authenticated user.
+ * Uses req.user.cooperativeId from JWT.
+ */
+const getProfile = async (req, res) => {
   try {
-    const coops = await cooperativeService.getCooperative();
-    res.json({ success: true, cooperatives: coops });
+    const cooperativeId = req.user.cooperativeId;
+    if (!cooperativeId) {
+      return res.status(400).json({ error: 'Cooperative ID missing from token' });
+    }
+    const profile = await cooperativeService.getProfile(cooperativeId);
+    res.json(profile);
   } catch (error) {
-    logger.error('Get cooperatives failed', { error: error.message });
-    res.status(500).json({ error: error.message });
+    logger.error('Get cooperative profile failed', { error: error.message });
+    res.status(404).json({ error: error.message });
   }
 };
 
-const setupCooperative = async (req, res) => {
+/**
+ * PUT /coop
+ * Updates the cooperative belonging to the authenticated user.
+ * Only SUPER_ADMIN can update (role check in routes).
+ */
+const updateProfile = async (req, res) => {
   try {
-    const { name, registrationNumber, location, contact } = req.body;
-
-    // FIX: Removed adminId validation
-    if (!name || !registrationNumber) {
-      return res.status(400).json({ error: 'Name and registration number are required' });
+    const cooperativeId = req.user.cooperativeId;
+    if (!cooperativeId) {
+      return res.status(400).json({ error: 'Cooperative ID missing from token' });
     }
-
-    const coop = await cooperativeService.setupCooperative({
-      name,
-      registrationNumber,
-      location,
-      contact
-    });
-
-    res.status(201).json({ success: true, cooperative: coop });
+    const profile = await cooperativeService.updateProfile(cooperativeId, req.body);
+    res.json(profile);
   } catch (error) {
-    logger.error('Setup cooperative failed', { error: error.message });
+    logger.error('Update cooperative profile failed', { error: error.message });
     res.status(400).json({ error: error.message });
   }
 };
 
-const updateCooperative = async (req, res) => {
-  try {
-    const coopId = req.params.id;
-    const { name, registrationNumber, location, contact } = req.body;
-
-    if (!coopId) {
-      return res.status(400).json({ error: 'Cooperative ID is required' });
-    }
-
-    const coop = await cooperativeService.updateCooperative(coopId, {
-      name,
-      registrationNumber,
-      location,
-      contact
-    });
-
-    res.json({ success: true, cooperative: coop });
-  } catch (error) {
-    logger.error('Update cooperative failed', { error: error.message });
-    res.status(500).json({ error: error.message });
-  }
-};
-
 module.exports = {
-  getCooperative,
-  setupCooperative,
-  updateCooperative
+  getProfile,
+  updateProfile,
 };

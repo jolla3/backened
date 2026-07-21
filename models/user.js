@@ -5,7 +5,7 @@ const userSchema = new mongoose.Schema({
   email: {
     type: String,
     required: true,
-    unique: true,
+    unique: true,        // ✅ This creates the index automatically
     lowercase: true,
     trim: true
   },
@@ -15,19 +15,19 @@ const userSchema = new mongoose.Schema({
     minlength: 6
   },
   role: {
-  type: String,
-  enum: ['superadmin', 'admin', 'porter'],
-  default: 'porter'
-},
+    type: String,
+    enum: ['SUPER_ADMIN', 'ADMIN', 'MANAGER', 'ACCOUNTANT'],
+    default: 'ADMIN'
+  },
   name: {
     type: String,
     required: true,
-    trim: true
+    trim: true  
   },
   cooperativeId: {
     type: mongoose.Schema.Types.ObjectId,
     ref: 'Cooperative',
-    default: null  // ✅ Make it optional for existing users
+    default: null
   },
   isActive: {
     type: Boolean,
@@ -43,12 +43,18 @@ const userSchema = new mongoose.Schema({
   }
 });
 
-// Instance method to compare password
 userSchema.methods.comparePassword = async function(candidatePassword) {
   return await bcrypt.compare(candidatePassword, this.password);
 };
 
-// Index for role and cooperative scoping
-userSchema.index({ role: 1, cooperativeId: 1 });
+// ─── Indexes ─────────────────────────────────────────────────
+// ❌ Remove this line – duplicate index:
+// userSchema.index({ email: 1 }, { unique: true });
 
-module.exports = mongoose.model('User', userSchema);
+// ✅ Keep only these additional indexes (compound and query-optimising)
+userSchema.index({ role: 1, cooperativeId: 1 });
+userSchema.index({ cooperativeId: 1, isActive: 1 });
+
+// Guard against OverwriteModelError
+const User = mongoose.models.User || mongoose.model('User', userSchema);
+module.exports = User;

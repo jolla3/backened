@@ -1,15 +1,15 @@
 const express = require('express');
 const router = express.Router();
-const { getCooperative, setupCooperative, updateCooperative } = require('../controllers/cooperativeController');
+const cooperativeController = require('../controllers/cooperativeController');
 const { authMiddleware, roleCheck } = require('../middlewares/authMiddleware');
 
-// Get cooperative details
-router.get('/', getCooperative);
+// All routes require authentication
+router.use(authMiddleware);
 
-// Setup cooperative (first time)
-router.post('/setup', setupCooperative);
+// ─── GET /coop – anyone authenticated can view their coop ──
+router.get('/', cooperativeController.getProfile);
 
-// Update cooperative details
-router.put('/',  updateCooperative);
+// ─── PUT /coop – only SUPER_ADMIN can update ──────────
+router.put('/', roleCheck('SUPER_ADMIN'), cooperativeController.updateProfile);
 
 module.exports = router;

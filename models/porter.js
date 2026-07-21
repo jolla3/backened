@@ -70,4 +70,7 @@ const porterSchema = new mongoose.Schema({
 porterSchema.index({ cooperativeId: 1, branch_id: 1 });
 porterSchema.index({ cooperativeId: 1, isActive: 1 });
 
-module.exports = mongoose.model('Porter', porterSchema);
+const Porter = mongoose.models.Porter || mongoose.model('Porter', porterSchema);
+module.exports = Porter;
+
+// module.exports = mongoose.model('Porter', porterSchema);

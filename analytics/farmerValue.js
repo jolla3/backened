@@ -1,96 +1,122 @@
+// analytics/farmerValue.js
+const mongoose = require('mongoose');
 const Farmer = require('../models/farmer');
+const { getFarmerLifetimeLedger, getLatestBalances } = require('./financialAnalytics');
 const Transaction = require('../models/transaction');
-const Cooperative = require('../models/cooperative');
 const logger = require('../utils/logger');
 
 const getFarmerValue = async (cooperativeId) => {
   try {
-    const cooperative = await Cooperative.findById(cooperativeId);
-    if (!cooperative) throw new Error('Cooperative not found');
+    const coopId = new mongoose.Types.ObjectId(cooperativeId);
 
-    const farmerValues = await Transaction.aggregate([
-      { $match: { cooperativeId: cooperative._id } },
+    const ledgerMap = await getFarmerLifetimeLedger(cooperativeId);
+    const balanceMap = await getLatestBalances(cooperativeId);
+
+    // Lifetime litres
+    const litresAgg = await Transaction.aggregate([
+      { $match: { type: 'milk', cooperativeId: coopId } },
+      { $group: { _id: '$farmer_id', totalLitres: { $sum: '$litres' } } }
+    ]);
+    const litresMap = new Map();
+    for (const r of litresAgg) litresMap.set(r._id.toString(), r.totalLitres || 0);
+
+    // First transaction (for months active)
+    const firstTxAgg = await Transaction.aggregate([
+      { $match: { type: 'milk', cooperativeId: coopId } },
+      { $group: { _id: '$farmer_id', firstTx: { $min: '$timestamp_server' } } }
+    ]);
+    const firstTxMap = new Map();
+    for (const r of firstTxAgg) firstTxMap.set(r._id.toString(), r.firstTx);
+
+    // Last delivery
+    const lastTxAgg = await Transaction.aggregate([
+      { $match: { type: 'milk', cooperativeId: coopId } },
+      { $group: { _id: '$farmer_id', lastTx: { $max: '$timestamp_server' } } }
+    ]);
+    const lastTxMap = new Map();
+    for (const r of lastTxAgg) lastTxMap.set(r._id.toString(), r.lastTx);
+
+    // Average daily litres (last 30 days)
+    const thirtyDaysAgo = new Date();
+    thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
+    const avgDailyAgg = await Transaction.aggregate([
+      {
+        $match: {
+          type: 'milk',
+          cooperativeId: coopId,
+          timestamp_server: { $gte: thirtyDaysAgo }
+        }
+      },
       {
         $group: {
           _id: '$farmer_id',
-          milkPayout: { $sum: { $cond: [{ $eq: ['$type', 'milk'] }, { $ifNull: ['$payout', 0] }, 0] } },
-          milkLitres: { $sum: { $cond: [{ $eq: ['$type', 'milk'] }, { $ifNull: ['$litres', 0] }, 0] } },
-          feedCost: { $sum: { $cond: [{ $eq: ['$type', 'feed'] }, { $ifNull: ['$cost', 0] }, 0] } },
-          transactionCount: { $sum: 1 },
-          lastTransaction: { $max: '$timestamp_server' }
-        }
-      },
-      {
-        $lookup: {
-          from: 'farmers',
-          localField: '_id',
-          foreignField: '_id',
-          as: 'farmer'
-        }
-      },
-      { $unwind: { path: '$farmer', preserveNullAndEmptyArrays: true } },
-      {
-        $project: {
-          farmerName: { $ifNull: ['$farmer.name', 'Unknown'] },
-          farmerCode: { $ifNull: ['$farmer.farmer_code', 'N/A'] },
-          lifetimeMilk: '$milkLitres',
-          lifetimePayout: '$milkPayout',
-          feedPurchased: '$feedCost',
-          netValue: { $subtract: ['$milkPayout', '$feedCost'] },
-          totalTransactions: '$transactionCount',
-          currentBalance: '$farmer.balance',
-          lastActivity: '$lastTransaction'
-        }
-      },
-      { $sort: { netValue: -1 } }
-    ]);
-
-    const now = new Date();
-    const result = farmerValues.map(item => {
-      const totalTransactions = item.totalTransactions || 0;
-      const lastActivityDays = item.lastActivity ? (now - new Date(item.lastActivity)) / 86400000 : 90;
-      
-      let tier = 'inactive';
-      let valueTier = '';
-      if (totalTransactions > 0) {
-        if (item.netValue > 50000) {
-          tier = 'high_value';
-          valueTier = 'High Value (Top 10%)';
-        } else if (item.netValue > 10000) {
-          tier = 'loyal';
-          valueTier = 'Loyal (Top 30%)';
-        } else if (item.netValue > 1000) {
-          tier = 'growing';
-          valueTier = 'Growing';
-        } else {
-          tier = 'new';
-          valueTier = 'New / Low';
+          avgDaily: { $avg: '$litres' },
+          daysActive: { $addToSet: { $dateToString: { format: '%Y-%m-%d', date: '$timestamp_server' } } }
         }
       }
+    ]);
+    const avgDailyMap = new Map();
+    for (const r of avgDailyAgg) {
+      avgDailyMap.set(r._id.toString(), {
+        avgDaily: r.avgDaily || 0,
+        daysActive: r.daysActive?.length || 0
+      });
+    }
 
-      // Activity status
-      let status = 'active';
-      if (lastActivityDays > 90) status = 'inactive';
-      else if (lastActivityDays > 30) status = 'dormant';
+    const allFarmerIds = Array.from(new Set([...ledgerMap.keys(), ...balanceMap.keys(), ...litresMap.keys()]));
+    const farmers = await Farmer.find({ _id: { $in: allFarmerIds } })
+      .select('name farmer_code')
+      .lean();
+    const farmerNameMap = new Map(farmers.map(f => [f._id.toString(), f]));
 
-      return {
-        farmer: item.farmerName,
-        code: item.farmerCode,
-        lifetimeMilk: Math.round(item.lifetimeMilk || 0),
-        lifetimePayout: Math.round(item.lifetimePayout || 0),
-        feedPurchased: Math.round(item.feedPurchased || 0),
-        netValue: Math.round(item.netValue || 0),
-        currentBalance: Math.round(item.currentBalance || 0),
+    const result = [];
+    for (const farmerId of allFarmerIds) {
+      const farmer = farmerNameMap.get(farmerId) || { name: 'Unknown', farmer_code: 'N/A' };
+      const ledger = ledgerMap.get(farmerId) || { milkCredits: 0, feedDebits: 0, netValue: 0 };
+      const balance = balanceMap.get(farmerId) || 0;
+      const lifetimeLitres = litresMap.get(farmerId) || 0;
+      const firstTx = firstTxMap.get(farmerId);
+      const lastTx = lastTxMap.get(farmerId);
+      const avgDaily = avgDailyMap.get(farmerId) || { avgDaily: 0, daysActive: 0 };
+
+      let monthsActive = 0;
+      if (firstTx) {
+        const diffDays = (Date.now() - new Date(firstTx)) / (1000 * 60 * 60 * 24);
+        monthsActive = Math.max(1, diffDays / 30);
+      }
+
+      const netValue = ledger.netValue || 0;
+      let valueTier = '';
+      if (netValue > 50000) valueTier = 'High Value (Top 10%)';
+      else if (netValue > 10000) valueTier = 'Loyal (Top 30%)';
+      else if (netValue > 1000) valueTier = 'Growing';
+      else if (netValue > 0) valueTier = 'New / Low';
+      else valueTier = 'Inactive';
+
+      const avgMonthlyEarnings = monthsActive > 0 ? (ledger.milkCredits || 0) / monthsActive : 0;
+
+      result.push({
+        farmer: farmer.name,
+        code: farmer.farmer_code,
+        lifetimeMilk: Math.round(lifetimeLitres),
+        lifetimeEarnings: Math.round(ledger.milkCredits || 0),
+        lifetimeFeedPurchased: Math.round(ledger.feedDebits || 0),
+        netValue: Math.round(netValue),
+        currentBalance: Math.round(balance),
         valueTier,
-        status,
-        totalTransactions,
-        lastActivity: item.lastActivity ? item.lastActivity.toISOString().split('T')[0] : 'Never'
-      };
-    });
+        status: 'active',
+        monthsActive: Math.round(monthsActive),
+        avgMonthlyLitres: lifetimeLitres > 0 && monthsActive > 0 ? Math.round(lifetimeLitres / monthsActive) : 0,
+        avgMonthlyEarnings: Math.round(avgMonthlyEarnings),
+        avgDailyLitres: Math.round(avgDaily.avgDaily),
+        daysActiveLast30: avgDaily.daysActive,
+        lastDelivery: lastTx ? new Date(lastTx).toISOString().split('T')[0] : 'Never'
+      });
+    }
 
-    return result;
+    return result.sort((a, b) => b.netValue - a.netValue);
   } catch (error) {
-    logger.error('FarmerValue failed', { error: error.message, coopId });
+    logger.error('FarmerValue failed', { error: error.message, cooperativeId });
     return [];
   }
 };
