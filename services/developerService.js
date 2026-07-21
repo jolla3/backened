@@ -1,11 +1,11 @@
 const mongoose = require('mongoose');
 const bcrypt = require('bcryptjs');
-const Cooperative = require('../models/Cooperative');
-const User = require('../models/User');
-const AuditLog = require('../models/AuditLog');
-const Farmer = require('../models/Farmer');
-const Porter = require('../models/Porter');
-const Transaction = require('../models/Transaction');
+const Cooperative = require('../models/cooperative');
+const User = require('../models/user');
+const AuditLog = require('../models/auditLog');
+const Farmer = require('../models/farmer');
+const Porter = require('../models/porter');
+const Transaction = require('../models/transaction');
 const logger = require('../utils/logger');
 
 // ─── Helpers ──────────────────────────────────────────────

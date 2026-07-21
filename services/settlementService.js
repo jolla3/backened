@@ -1,12 +1,12 @@
 // services/settlementService.js
 const mongoose = require('mongoose');
-const Farmer = require('../models/Farmer');
-const Ledger = require('../models/Ledger');
-const Settlement = require('../models/Settlement');
+const Farmer = require('../models/farmer');
+const Ledger = require('../models/ledger');
+const Settlement = require('../models/settlement');
 const SettlementBatch = require('../models/SettlementBatch');
 const Counter = require('../models/Counter');
-const Cooperative = require('../models/Cooperative');
-const AuditLog = require('../models/AuditLog');
+const Cooperative = require('../models/cooperative');
+const AuditLog = require('../models/auditLog');
 const logger = require('../utils/logger');
 
 // ─── Helpers ──────────────────────────────────────────────
