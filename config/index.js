@@ -6,5 +6,5 @@ module.exports = {
   HMAC_SECRET: process.env.HMAC_SECRET,
   SMS_API_KEY: process.env.SMS_API_KEY,
   PORT: process.env.PORT || 3000,
-  NODE_ENV: process.env.NODE_ENV || 'development'
+  NODE_ENV: process.env.NODE_ENV 
 };

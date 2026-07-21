@@ -36,9 +36,9 @@
 // };
 
 module.exports = {
-  baseUrl: process.env.SMS_BASE_URL || 'https://api.sandbox.africastalking.com/version1',
-  username: process.env.SMS_USERNAME || 'sandbox',
-  apiKey: process.env.SMS_API_KEY || 'atsk_6e0efd129486f98c7ccded33dd3b278cfe161471a6bac9833815d111404215debb9af58d',
+  baseUrl: process.env.SMS_BASE_URL ,
+  username: process.env.SMS_USERNAME ,
+  apiKey: process.env.SMS_API_KEY,
   defaultSender: process.env.SMS_SENDER ,
   retryConfig: {
     maxRetries: 3,
