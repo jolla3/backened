@@ -18,10 +18,10 @@ const registerSchema = Joi.object({
   email: Joi.string().email().required(),
   password: Joi.string().min(8).required(),
   name: Joi.string().min(2).required(),
-  role: Joi.string().valid('admin', 'porter').optional(),
+  role: Joi.string().valid('SUPER_ADMIN', 'ADMIN', 'MANAGER', 'ACCOUNTANT').optional(),
   cooperativeId: Joi.string().required()
 });
-
+  
 // Public login endpoint
 router.post('/login', validate(loginSchema), login);
 

@@ -1,4 +1,4 @@
-const Cooperative = require('../models/Cooperative');
+const Cooperative = require('../models/cooperative');
 const logger = require('../utils/logger');
 
 /**
