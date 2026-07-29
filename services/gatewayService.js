@@ -1,6 +1,6 @@
 const crypto = require('crypto');
 const SmsGateway = require('../models/SmsGateway');
-const Device = require('../models/Device');
+const Device = require('../models/device');
 const OutboundSms = require('../models/OutboundSms');
 const smsService = require('./smsService');
 const smsConfig = require('../config/smsConfig');
