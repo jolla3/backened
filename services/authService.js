@@ -110,7 +110,7 @@ const porterLogin = async (phone, pin) => {
     throw new Error('Cooperative is deactivated');
   }
 
-  const token = generateJWT(porter._id, 'porter', porter.phone, porter.cooperativeId);
+  const token = generateJWT(porter._id, porter.role, porter.phone, porter.cooperativeId);
 
   return {
     token,

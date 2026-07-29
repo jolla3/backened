@@ -1,3 +1,4 @@
+// controllers/deviceController.js
 const deviceService = require('../services/deviceService');
 const logger = require('../utils/logger');
 
@@ -6,11 +7,14 @@ const register = async (req, res) => {
     const cooperativeId = req.user.cooperativeId;
     const adminId = req.user.id;
     const {
-      deviceId,      // from frontend (uuid)
+      deviceId,
       deviceName,
       osBuildId,
       platform,
-      hardware_id
+      hardware_id,
+      deviceModel,
+      manufacturer,
+      androidVersion,
     } = req.body;
 
     const device = await deviceService.registerDevice({
@@ -19,8 +23,11 @@ const register = async (req, res) => {
       osBuildId,
       platform,
       hardware_id,
+      deviceModel,
+      manufacturer,
+      androidVersion,
       adminId,
-      cooperativeId
+      cooperativeId,
     });
 
     res.status(201).json(device);
@@ -36,13 +43,23 @@ const register = async (req, res) => {
 const approve = async (req, res) => {
   try {
     const cooperativeId = req.user.cooperativeId;
-    const device = await deviceService.approveDevice(req.params.id, cooperativeId);
-    res.json(device);
+    const audit = {
+      userId: req.user.id,
+      ip: req.ip || req.connection.remoteAddress,
+    };
+    const result = await deviceService.approveDevice(req.params.id, cooperativeId, audit);
+    res.json({
+      success: true,
+      device: result.device,
+      gateway: result.gateway,
+      secretToken: result.secretToken, // only on first approval
+    });
   } catch (error) {
     logger.error('Device approval failed', { error: error.message, coopId: req.user?.cooperativeId });
     res.status(400).json({ error: error.message });
   }
 };
+
 
 const revoke = async (req, res) => {
   try {

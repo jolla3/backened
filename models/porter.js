@@ -5,6 +5,8 @@ const porterSchema = new mongoose.Schema({
     type: String,
     trim: true
   },
+ role: { type: String, enum: ['porter'], default: 'porter' },
+ 
   phone: {
     type: String,
     trim: true,

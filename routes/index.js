@@ -22,7 +22,7 @@ const userRoutes = require('./userRoutes');
 const settlementRoutes = require('./settlementRoutes');
 const { authMiddleware, roleCheck } = require('../middlewares/authMiddleware');
 const developerRoutes = require('./developerRoutes');
-
+const gatewayRoutes = require('./gatewayRoutes');
 
 
 router.use('/dev', developerRoutes);
@@ -42,6 +42,8 @@ router.use('/feed', authMiddleware, feedPurchaseRoutes);
 router.use('/sync', syncRoutes);
 router.use('/qr', qrRoutes);
 router.use('/zones', zoneRoutes);
+
+router.use('/gateway', gatewayRoutes);
 // app.use('/api/monitoring', monitoringRoutes);
 router.use('/monitoring', monitoring);
 router.use('/settlements', settlementRoutes);

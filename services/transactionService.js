@@ -6,12 +6,15 @@ const Porter = require('../models/porter');
 const RateVersion = require('../models/rateVersion');
 const Counter = require('../models/counter');
 const Ledger = require('../models/ledger');
-const Zone = require('../models/zone'); // ✅ ADDED: Zone model for zone lookup
+const Zone = require('../models/zone');
 const receiptService = require('./receiptService');
 const qrService = require('./qrService');
 const logger = require('../utils/logger');
 const FRAUD_CONFIG = require('../config/fraudConfig');
 const { updateFarmerBalance } = require('../utils/ledgerUtils');
+const { formatMilkReceipt } = require('../utils/receiptFormatter');
+const Cooperative = require('../models/cooperative');
+const smsService = require('./smsService');
 
 // ── Helpers ─────────────────────────────────────────────
 
@@ -89,20 +92,33 @@ const recordMilkTransaction = async (data) => {
   const session = await mongoose.startSession();
   session.startTransaction();
 
+  let farmer;
+  let transaction;
+  let receiptNum;
+  let payout;
+  let newBalance;
+  let previousBalance;
+  let cooperativeId;
+  let farmer_id;
+  let ledgerEntry;
+
   try {
     const {
       farmer_code,
       litres,
       porter_id,
-      zone, // This is the zone ID from the dropdown
+      zone,
       device_id,
-      farmer_id,
+      farmer_id: fId,
       branch_id,
       device_seq_num,
       timestamp_local,
-      cooperativeId,
+      cooperativeId: coopId,
       userId,
     } = data;
+
+    cooperativeId = coopId;
+    farmer_id = fId;
 
     if (!userId) {
       throw new Error('User ID (userId) is required for ledger entry');
@@ -118,12 +134,12 @@ const recordMilkTransaction = async (data) => {
     }
 
     const rateInfo = await getActiveRateVersion(cooperativeId);
-    const payout = parseFloat((litresNum * rateInfo.rate).toFixed(2));
+    payout = parseFloat((litresNum * rateInfo.rate).toFixed(2));
 
     await checkDailyFraudLimit(farmer_id, litresNum);
 
     // ── 2. Generate numbers ────────────────────────────
-    const receiptNum = await generateReceiptNum();
+    receiptNum = await generateReceiptNum();
     const serverSeqNum = await generateServerSeqNum(branch_id);
 
     // ── 3. Build transaction ────────────────────────────
@@ -149,84 +165,87 @@ const recordMilkTransaction = async (data) => {
     const digitalSignature = qrService.generateHMAC(signatureData);
 
     // ── 4. Get farmer ──────────────────────────────────────
-    const farmer = await Farmer.findById(farmer_id).session(session);
+    farmer = await Farmer.findById(farmer_id).session(session);
     if (!farmer) {
       throw new Error('Farmer not found');
     }
-    const previousBalance = farmer.currentBalance || 0;
+    previousBalance = farmer.currentBalance || 0;
 
-    // ── 5. Resolve zone: zone is the ID from dropdown ──
+    // ── 5. Resolve zone ──────────────────────────────────
     let zoneId = null;
     let zoneName = '';
 
     if (zone) {
-      // zone is the ID from the dropdown
       const zoneDoc = await Zone.findById(zone).session(session);
       if (zoneDoc) {
         zoneId = zoneDoc._id;
         zoneName = zoneDoc.name;
       } else {
-        // Fallback: treat zone as a string name
         zoneName = zone;
       }
     } else {
-      // Fallback to farmer's zone
       zoneId = farmer.zoneId || null;
       zoneName = farmer.zoneName || '';
     }
 
     // ── 6. Create Transaction ──────────────────────────────
-    const [transaction] = await Transaction.create([{
-      device_id,
-      receipt_num: receiptNum,
-      qr_hash: qrHash,
-      status: 'completed',
-      device_seq_num,
-      server_seq_num: serverSeqNum,
-      timestamp_local: new Date(timestamp_local),
-      timestamp_server: new Date(),
-      digital_signature: digitalSignature,
-      idempotency_key: finalKey,
-      soft_delta: 0,
-      type: 'milk',
-      litres: litresNum,
-      quantity: 0,
-      payout,
-      cost: 0,
-      farmer_id,
-      rate_version_id: rateInfo.rate_version_id,
-      porter_id,
-      zone: zoneName || farmer.zoneName || zone || '',
-      zoneId: zoneId || farmer.zoneId || null,
-      branch_id,
-      cooperativeId,
-    }], { session });
-
-    // ── 7. Create Ledger Entry ────────────────────────────
-    const newBalance = previousBalance + payout;
-    const [ledgerEntry] = await Ledger.create([{
-      cooperativeId,
-      farmerId: farmer_id,
-      transactionId: transaction._id,
-      type: 'MILK_CREDIT',
-      amount: payout,
-      runningBalance: newBalance,
-      description: `Milk delivery ${receiptNum}`,
-      reference: receiptNum,
-      createdBy: userId,
-      metadata: {
-        litres: litresNum,
-        rate: rateInfo.rate,
-        rate_version_id: rateInfo.rate_version_id,
+    [transaction] = await Transaction.create(
+      [{
         device_id,
+        receipt_num: receiptNum,
+        qr_hash: qrHash,
+        status: 'completed',
+        device_seq_num,
+        server_seq_num: serverSeqNum,
+        timestamp_local: new Date(timestamp_local),
+        timestamp_server: new Date(),
+        digital_signature: digitalSignature,
+        idempotency_key: finalKey,
+        soft_delta: 0,
+        type: 'milk',
+        litres: litresNum,
+        quantity: 0,
+        payout,
+        cost: 0,
+        farmer_id,
+        rate_version_id: rateInfo.rate_version_id,
         porter_id,
         zone: zoneName || farmer.zoneName || zone || '',
         zoneId: zoneId || farmer.zoneId || null,
-      },
-      timestamp: new Date(),
-    }], { session });
+        branch_id,
+        cooperativeId,
+      }],
+      { session }
+    );
 
-    // ── 8. Update Farmer.currentBalance and lastLedgerId ──
+    // ── 7. Create Ledger Entry ────────────────────────────
+    newBalance = previousBalance + payout;
+    [ledgerEntry] = await Ledger.create(
+      [{
+        cooperativeId,
+        farmerId: farmer_id,
+        transactionId: transaction._id,
+        type: 'MILK_CREDIT',
+        amount: payout,
+        runningBalance: newBalance,
+        description: `Milk delivery ${receiptNum}`,
+        reference: receiptNum,
+        createdBy: userId,
+        metadata: {
+          litres: litresNum,
+          rate: rateInfo.rate,
+          rate_version_id: rateInfo.rate_version_id,
+          device_id,
+          porter_id,
+          zone: zoneName || farmer.zoneName || zone || '',
+          zoneId: zoneId || farmer.zoneId || null,
+        },
+        timestamp: new Date(),
+      }],
+      { session }
+    );
+
+    // ── 8. Update Farmer balance ──────────────────────────
     await updateFarmerBalance(farmer_id, newBalance, ledgerEntry._id);
 
     // ── 9. Update Porter totals ──────────────────────────
@@ -245,7 +264,54 @@ const recordMilkTransaction = async (data) => {
     await session.commitTransaction();
     session.endSession();
 
-    // ── 11. Generate QR and receipts (non‑critical) ──
+    // ── ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─
+    // Everything below is **outside** the transaction
+    // ── ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─
+
+    // ── 11. Get cooperative (for receipt) ──────────────
+    const cooperative = await Cooperative.findById(cooperativeId).lean();
+    if (!cooperative) {
+      throw new Error('Cooperative not found for receipt');
+    }
+
+    // ── 12. Build receipt using the formatter ──────────
+    const receipt = formatMilkReceipt({
+      cooperativeName: cooperative.name,
+      receiptNumber: receiptNum,
+      farmerName: farmer.name,
+      farmerCode: farmer.farmer_code || farmer.code,
+      litres: litresNum,
+      payout,
+      walletBalance: newBalance,
+      transactionDate: transaction.timestamp_server,
+    });
+
+    // ── 13. Send SMS ────────────────────────────────────
+    if (farmer.phone) {
+      try {
+        const smsResult = await smsService.sendSMS({
+          to: farmer.phone,
+          message: receipt.sms,
+          type: 'milk_receipt',
+          cooperativeId,
+          farmerId: farmer_id,
+        });
+        if (smsResult.queued) {
+          logger.info('Milk SMS queued', { jobId: smsResult.jobId, phone: farmer.phone });
+        } else {
+          logger.warn('Milk SMS queue returned unexpected result', { smsResult });
+        }
+      } catch (smsError) {
+        // SMS failure is logged but doesn't affect transaction
+        logger.error('SMS failed but transaction committed', {
+          phone: farmer.phone,
+          error: smsError.message,
+          stack: smsError.stack,
+        });
+      }
+    }
+
+    // ── 14. Generate QR (non‑critical) ──────────────────
     let qrImage = null;
     try {
       const qrResult = await qrService.generateQRForTransaction(transaction._id, cooperativeId);
@@ -254,54 +320,39 @@ const recordMilkTransaction = async (data) => {
       logger.warn('QR generation failed', { transactionId: transaction._id, error: err.message });
     }
 
-    let thermalReceipt;
-    try {
-      thermalReceipt = await receiptService.generateThermalReceipt(transaction._id, null);
-    } catch (err) {
-      logger.warn('Receipt generation failed', { transactionId: transaction._id, error: err.message });
-      const fallback = `RECEIPT #${receiptNum}\nMILK ${litresNum}L @ ${rateInfo.rate}/L = ${payout}\nTHANK YOU`;
-      thermalReceipt = {
-        thermalReceipt: Buffer.from(fallback),
-        qrImage: null,
-        receiptNum,
-        previewText: fallback,
-      };
-    }
-
     const updatedFarmer = await Farmer.findById(farmer_id).lean();
 
-    logger.info('✅ Milk transaction COMPLETE', {
+    logger.info('Milk transaction complete', {
       transactionId: transaction._id,
       receiptNum,
-      serverSeqNum,
       litres: litresNum,
       payout,
-      rate: rateInfo.rate,
       previousBalance,
       newBalance,
-      zoneId: zoneId || farmer.zoneId,
-      zone: zoneName || farmer.zoneName || zone,
     });
 
     return {
       transaction,
       receiptNum,
-      serverSeqNum,
+      serverSeqNum: transaction.server_seq_num,
       qrUrl: qrService.generateQRUrl(receiptNum),
       qrImage,
       payout,
-      farmer_code,
+      farmer_code: farmer.farmer_code || farmer.code,
       farmer_name: updatedFarmer.name,
       previousBalance,
       newBalance,
       ledgerEntry,
-      thermalReceipt,
-      receiptPreview: thermalReceipt.previewText,
+      receipt,
     };
+
   } catch (error) {
-    await session.abortTransaction();
+    if (session.inTransaction()) {
+      await session.abortTransaction();
+    }
     session.endSession();
-    logger.error('❌ Milk transaction failed', { error: error.message });
+
+    logger.error('Milk transaction failed', { error: error.message, stack: error.stack });
     throw error;
   }
 };

@@ -15,4 +15,7 @@ const deviceSchema = new mongoose.Schema({
   created_at: { type: Date, default: Date.now }
 });
 
-module.exports = mongoose.model('Device', deviceSchema);
+// ✅ Guard against OverwriteModelError
+const Device = mongoose.models.Device || mongoose.model('Device', deviceSchema);
+
+module.exports = Device;

@@ -12,7 +12,10 @@ const correlationMiddleware = require('./middlewares/correlationMiddleware');
 const logger = require('./utils/logger');
 const config = require('./config');
 
-const app = express()
+// ── Scheduler ──────────────────────────────────────────────
+const { startJobRecovery } = require('./scheduler/jobRecovery');
+
+const app = express();
 const server = http.createServer(app);
 
 // Initialize WebSocket
@@ -22,8 +25,10 @@ const io = initWebSocket(server);
 app.use(cors());
 app.use(helmet());
 app.use(compression());
-app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
+
+// ✅ Limit JSON payload to 1MB to prevent abuse
+app.use(express.json({ limit: '1mb' }));
+app.use(express.urlencoded({ extended: true, limit: '1mb' }));
 app.use(correlationMiddleware);
 
 // Routes
@@ -32,15 +37,20 @@ app.use('/api', routes);
 // Error handling
 app.use(errorMiddleware);
 
-// Start server
-const PORT = config.PORT 
+const PORT = config.PORT || 3000;
 
 const startServer = async () => {
   try {
+    // 1. Connect to MongoDB
     await connectDB();
-    
+    logger.info('MongoDB connected');
+
+    // 2. Start job recovery scheduler (synchronous call)
+    startJobRecovery();
+
+    // 3. Start HTTP server
     server.listen(PORT, () => {
-     console.log(`Server started on port ${PORT}`); 
+      logger.info(`Server started on port ${PORT}`);
     });
   } catch (error) {
     logger.error('Failed to start server', { error: error.message });
@@ -52,7 +62,9 @@ startServer();
 
 // Graceful shutdown
 process.on('SIGTERM', () => {
+  logger.info('SIGTERM received, shutting down gracefully');
   server.close(() => {
+    logger.info('Server closed');
     process.exit(0);
   });
 });

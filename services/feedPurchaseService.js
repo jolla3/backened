@@ -8,6 +8,7 @@ const smsService = require('./smsService');
 const transactionService = require('./transactionService');
 const logger = require('../utils/logger');
 const { updateFarmerBalance } = require('../utils/ledgerUtils');
+const { formatFeedReceipt } = require('../utils/receiptFormatter');
 
 // ── Helper ──────────────────────────────────────────────
 const getFeedPurchaseFarmer = async (identifier, cooperativeId) => {
@@ -84,7 +85,6 @@ const getFeedPurchaseFarmer = async (identifier, cooperativeId) => {
   };
 };
 
-// ── Main purchase function ──────────────────────────────
 const purchaseFeed = async (data, session) => {
   const { farmerId, products, adminId, cooperativeId, paymentMethod = 'balance' } = data;
 
@@ -110,7 +110,7 @@ const purchaseFeed = async (data, session) => {
 
   let totalCost = 0;
   const transactions = [];
-  const smsItems = [];
+  const receiptItems = [];
   const branchId = cooperative._id.toString();
 
   // ── Process each product ─────────────────────────────────
@@ -178,14 +178,21 @@ const purchaseFeed = async (data, session) => {
     product.stock -= quantity;
     await product.save({ session });
 
-    smsItems.push(`${quantity} x ${product.name} (${category}) @ KES ${unitPrice}`);
+    // ✅ Include category, preserve unit, unitPrice, lineTotal
+    receiptItems.push({
+      productName: product.name,
+      quantity,
+      unit: product.unit,
+      category,
+      unitPrice,
+      lineTotal: cost,
+    });
   }
 
   // ── Handle financial impact ────────────────────────────
   let balanceBefore = farmer.currentBalance || 0;
   let balanceAfter = balanceBefore;
 
-  // Get current running balance from last ledger
   const lastLedger = await Ledger.findOne({
     cooperativeId: cooperative._id,
     farmerId: farmer._id,
@@ -197,7 +204,6 @@ const purchaseFeed = async (data, session) => {
   const currentRunningBalance = lastLedger ? lastLedger.runningBalance : farmer.currentBalance;
 
   if (paymentMethod === 'balance') {
-    // ── Balance deduction ──────────────────────────────────
     const newRunningBalance = currentRunningBalance - totalCost;
 
     const [ledgerEntry] = await Ledger.create([{
@@ -229,14 +235,13 @@ const purchaseFeed = async (data, session) => {
       ledgerId: ledgerEntry._id
     });
   } else {
-    // ── Cash payment – no balance change ──────────────────
     const [ledgerEntry] = await Ledger.create([{
       cooperativeId: cooperative._id,
       farmerId: farmer._id,
       transactionId: transactions[0]?._id,
       type: 'FEED_CASH_SALE',
       amount: totalCost,
-      runningBalance: currentRunningBalance, // unchanged
+      runningBalance: currentRunningBalance,
       description: `Cash feed purchase - ${transactions.map(t => t.receipt_num).join(', ')}`,
       reference: transactions.map(t => t.receipt_num).join(','),
       createdBy: adminId,
@@ -247,7 +252,6 @@ const purchaseFeed = async (data, session) => {
       timestamp: new Date(),
     }], { session });
 
-    // Do NOT update farmer.currentBalance – it stays the same
     balanceBefore = currentRunningBalance;
     balanceAfter = currentRunningBalance;
 
@@ -259,46 +263,45 @@ const purchaseFeed = async (data, session) => {
     });
   }
 
-  // ── Send SMS ────────────────────────────────────────────
+  // ── Build receipt using the formatter ──
+  const receipt = formatFeedReceipt({
+    cooperativeName: cooperative.name,
+    receiptNumber: transactions[0].receipt_num,
+    farmerName: farmer.name,
+    farmerCode: farmer.farmer_code || farmer.code,   // ✅ fallback
+    paymentMethod,
+    items: receiptItems,                             // ✅ full data
+    total: totalCost,
+    walletBalance: balanceAfter,
+    transactionDate: new Date(),
+  });
+
+  // ── Send SMS ──
   if (farmer.phone) {
     try {
-      const paymentLabel = paymentMethod === 'balance' ? 'BALANCE' : 'CASH';
-      const itemsList = smsItems.join('\n');
+      const smsResult = await smsService.sendSMS({
+        to: farmer.phone,
+        message: receipt.sms,
+        type: 'feed_purchase',
+        cooperativeId: cooperative._id,
+        farmerId: farmer._id,
+      });
 
-      const smsMessage = [
-        cooperative.name.toUpperCase(),
-        'FEED PURCHASE RECEIPT',
-        '',
-        `Farmer: ${farmer.name}`,
-        `Payment: ${paymentLabel}`,
-        '',
-        itemsList,
-        '',
-        `TOTAL: KES ${totalCost.toLocaleString()}`,
-        `WALLET BALANCE: KES ${balanceAfter.toLocaleString()}`,
-        '',
-        'Thank you for your business!'
-      ].join('\n');
-
-      const smsResult = await smsService.sendSMS(farmer.phone, smsMessage);
-
-      if (smsResult.success) {
-        const messageId = smsResult.data?.SMSMessageData?.Recipients?.[0]?.messageId || null;
-        if (messageId) {
-          logger.info('Feed SMS sent', { phone: farmer.phone, farmer: farmer.name, messageId });
-        }
+      if (smsResult.queued) {
+        logger.info('Feed SMS queued', { jobId: smsResult.jobId, phone: farmer.phone });
       } else {
-        logger.warn('Feed SMS failed', { phone: farmer.phone, error: smsResult.error });
+        logger.warn('Feed SMS queue returned unexpected result', { smsResult });
       }
     } catch (smsError) {
-      logger.warn('SMS exception but purchase completed', {
+      console.error('🔥 SMS ERROR (feed):', smsError);
+      logger.error('SMS exception but purchase completed', {
         phone: farmer.phone,
-        error: smsError.message
+        error: smsError.message,
+        stack: smsError.stack,
       });
     }
   }
 
-  // Fetch updated farmer for response
   const updatedFarmer = await Farmer.findById(farmer._id).lean();
 
   logger.info('Feed purchase completed', {
@@ -326,7 +329,8 @@ const purchaseFeed = async (data, session) => {
       amount: totalCost,
       balanceAdjusted: paymentMethod === 'balance',
       newBalance: balanceAfter
-    }
+    },
+    receipt,
   };
 };
 

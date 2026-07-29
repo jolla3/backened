@@ -35,15 +35,23 @@
 //   }
 // };
 
+// config/smsConfig.js
 module.exports = {
-  baseUrl: process.env.SMS_BASE_URL ,
-  username: process.env.SMS_USERNAME ,
-  apiKey: process.env.SMS_API_KEY,
-  defaultSender: process.env.SMS_SENDER ,
-  retryConfig: {
-    maxRetries: 3,
-    initialDelay: 1000,
-    maxDelay: 10000,
-    backoffFactor: 2,
-  }
+  // Retry delays in seconds
+  RETRY_DELAYS: [30, 60, 120, 300],
+  MAX_RETRIES: 3,
+  PRIORITY: {
+    OTP: 100,
+    PASSWORD_RESET: 90,
+    MILK_RECEIPT: 80,
+    FEED_PURCHASE: 70,
+    MONTHLY_SUMMARY: 60,
+    GENERAL: 50,
+  },
+  // Gateway polling interval (seconds)
+  gatewayPollIntervalSeconds: 3,
+  // Minimum gateway app version required
+  minGatewayVersion: '1.0.0',
+  // Heartbeat stale threshold (minutes)
+  heartbeatStaleMinutes: 2,
 };
