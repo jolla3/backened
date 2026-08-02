@@ -3,7 +3,6 @@ const mongoose = require('mongoose');
 const farmerSchema = new mongoose.Schema({
   farmer_code: {
     type: String,
-    unique: true,
     trim: true
   },
   name: {

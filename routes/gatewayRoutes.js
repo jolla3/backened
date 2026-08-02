@@ -1,13 +1,18 @@
 const express = require('express');
 const router = express.Router();
 const gatewayController = require('../controllers/gatewayController');
+
+// ✅ authMiddleware exports an object → destructure
 const { authMiddleware } = require('../middlewares/authMiddleware');
+
+// ✅ gatewayAuth exports a function → import directly
 const gatewayAuth = require('../middlewares/gatewayAuth');
 
 // ─── Admin‑only endpoints ──────────────────────────────────
 router.post('/:gatewayId/rotate-token', authMiddleware, gatewayController.rotateToken);
-router.post('/:gatewayId/confirm-rotation', authMiddleware, gatewayController.confirmRotation); // ✅ new two‑phase confirmation
+router.post('/:gatewayId/confirm-rotation', authMiddleware, gatewayController.confirmRotation);
 router.get('/provision', authMiddleware, gatewayController.getProvisionData);
+router.post('/provision/confirm', authMiddleware, gatewayController.confirmProvision);
 router.post('/admin/retry/:jobId', authMiddleware, gatewayController.retryFailedJob);
 
 // ─── Gateway‑authenticated endpoints ──────────────────────

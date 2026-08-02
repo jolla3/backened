@@ -2,7 +2,44 @@ const gatewayService = require('../services/gatewayService');
 const smsConfig = require('../config/smsConfig');
 const logger = require('../utils/logger');
 
-// ─── Token rotation (two‑phase) ────────────────────────────
+// ─── Provisioning (Phase 1: prepare) ──────────────────────
+const getProvisionData = async (req, res) => {
+  res.set('Cache-Control', 'no-cache, no-store, must-revalidate');
+  res.set('Pragma', 'no-cache');
+  res.set('Expires', '0');
+  res.removeHeader('ETag');
+
+  try {
+    const deviceId = req.headers['x-device-id'];
+    if (!deviceId) {
+      return res.status(400).json({ error: 'X-Device-ID header required' });
+    }
+    const cooperativeId = req.user.cooperativeId;
+    const data = await gatewayService.prepareProvision(deviceId, cooperativeId);
+    res.json(data);
+  } catch (error) {
+    logger.error('Provision error', { error: error.message });
+    res.status(500).json({ error: error.message });
+  }
+};
+
+// ─── Provisioning (Phase 2: confirm) ──────────────────────
+const confirmProvision = async (req, res) => {
+  try {
+    const deviceId = req.headers['x-device-id'];
+    if (!deviceId) {
+      return res.status(400).json({ error: 'X-Device-ID header required' });
+    }
+    const cooperativeId = req.user.cooperativeId;
+    const gateway = await gatewayService.confirmProvision(deviceId, cooperativeId);
+    res.json({ success: true, gateway });
+  } catch (error) {
+    logger.error('Confirm provision failed', { error: error.message });
+    res.status(400).json({ error: error.message });
+  }
+};
+
+// ─── Token rotation ────────────────────────────────────────
 const rotateToken = async (req, res) => {
   try {
     const { gatewayId } = req.params;
@@ -26,40 +63,10 @@ const confirmRotation = async (req, res) => {
   }
 };
 
-// ─── Provisioning ──────────────────────────────────────────
-const getProvisionData = async (req, res) => {
-  // Disable caching
-  res.set('Cache-Control', 'no-cache, no-store, must-revalidate');
-  res.set('Pragma', 'no-cache');
-  res.set('Expires', '0');
-  res.removeHeader('ETag');
-
-  console.log('📨 PROVISION REQUEST HEADERS:');
-  console.log('  user-agent:', req.headers['user-agent']);
-  console.log('  origin:', req.headers['origin']);
-  console.log('  host:', req.headers['host']);
-  console.log('  x-device-id:', req.headers['x-device-id']);
-  console.log('  referer:', req.headers['referer']);
-  console.log('  authorization:', req.headers.authorization ? 'Present' : 'Missing');
-
-  try {
-    const deviceId = req.headers['x-device-id'];
-    if (!deviceId) {
-      return res.status(400).json({ error: 'X-Device-ID header required' });
-    }
-    const cooperativeId = req.user.cooperativeId;
-    const data = await gatewayService.getProvisionData(deviceId, cooperativeId);
-    res.json(data);
-  } catch (error) {
-    console.error('❌ Provision error:', error.message);
-    res.status(500).json({ error: error.message });
-  }
-};
-
 // ─── Heartbeat ─────────────────────────────────────────────
 const heartbeat = async (req, res) => {
   try {
-    const gatewayId = req.gateway.gatewayId; // UUID
+    const gatewayId = req.gateway.gatewayId;
     const data = req.body;
     const gateway = await gatewayService.processHeartbeat(gatewayId, data);
     res.json({ success: true, gateway });
@@ -72,7 +79,7 @@ const heartbeat = async (req, res) => {
 // ─── Jobs ──────────────────────────────────────────────────
 const claimJobs = async (req, res) => {
   try {
-    const gatewayId = req.gateway.gatewayId; // UUID
+    const gatewayId = req.gateway.gatewayId;
     const limit = parseInt(req.query.limit) || 10;
 
     const canPoll = await gatewayService.tryClaimPoll(gatewayId);
@@ -91,18 +98,11 @@ const claimJobs = async (req, res) => {
   }
 };
 
-// ✅ CRITICAL FIX: use req.gateway._id (ObjectId) instead of req.gateway.gatewayId
 const markSent = async (req, res) => {
   try {
     const { jobId } = req.params;
     const { providerResponse } = req.body;
-
-    const payloadSize = JSON.stringify(req.body).length;
-    if (payloadSize > 1024 * 1024) {
-      return res.status(413).json({ error: 'Payload too large' });
-    }
-
-    const gatewayObjectId = req.gateway._id; // Mongo ObjectId
+    const gatewayObjectId = req.gateway._id;
     const job = await gatewayService.markJobSent(jobId, gatewayObjectId, providerResponse);
     res.json({ success: true, job });
   } catch (error) {
@@ -111,18 +111,11 @@ const markSent = async (req, res) => {
   }
 };
 
-// ✅ CRITICAL FIX: use req.gateway._id
 const markFailed = async (req, res) => {
   try {
     const { jobId } = req.params;
     const { error: errorMsg, providerResponse } = req.body;
-
-    const payloadSize = JSON.stringify(req.body).length;
-    if (payloadSize > 1024 * 1024) {
-      return res.status(413).json({ error: 'Payload too large' });
-    }
-
-    const gatewayObjectId = req.gateway._id; // Mongo ObjectId
+    const gatewayObjectId = req.gateway._id;
     const job = await gatewayService.markJobFailed(jobId, gatewayObjectId, errorMsg, providerResponse);
     res.json({ success: true, job });
   } catch (error) {
@@ -157,6 +150,7 @@ module.exports = {
   rotateToken,
   confirmRotation,
   getProvisionData,
+  confirmProvision,
   heartbeat,
   claimJobs,
   markSent,
