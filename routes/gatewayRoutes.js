@@ -12,7 +12,7 @@ const gatewayAuth = require('../middlewares/gatewayAuth');
 router.post('/:gatewayId/rotate-token', authMiddleware, gatewayController.rotateToken);
 router.post('/:gatewayId/confirm-rotation', authMiddleware, gatewayController.confirmRotation);
 router.get('/provision', authMiddleware, gatewayController.getProvisionData);
-router.post('/provision/confirm', authMiddleware, gatewayController.confirmProvision);
+router.post('/provision/confirm', gatewayAuth, gatewayController.confirmProvision);
 router.post('/admin/retry/:jobId', authMiddleware, gatewayController.retryFailedJob);
 
 // ─── Gateway‑authenticated endpoints ──────────────────────
