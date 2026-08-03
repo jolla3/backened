@@ -26,12 +26,15 @@ const invalidateTokenCache = (gatewayId) => {
 // each a different cache key — would never be looked up a second time, so
 // the map would just grow. This sweeps everything expired on a fixed
 // schedule regardless of read pattern.
-setInterval(() => {
+const cacheCleanupTimer = setInterval(() => {
   const now = Date.now();
   for (const [key, value] of tokenCache) {
     if (value.expires <= now) tokenCache.delete(key);
   }
 }, 60000);
+// Doesn't keep the process alive on its own — otherwise any test, script,
+// migration, or CLI tool that merely imports this module would hang on exit.
+cacheCleanupTimer.unref();
 
 // ─── Gateway lifecycle ─────────────────────────────────────
 const ensureGatewayForDevice = async (device, audit = {}) => {
@@ -172,18 +175,41 @@ const confirmRotation = async (gatewayId, expectedVersion) => {
     );
   }
 
-  gateway.secretToken = gateway.stagedSecretToken;
-  gateway.plainSecret = gateway.stagedPlainSecret;
-  gateway.secretIssuedAt = gateway.stagedSecretIssuedAt;
-  gateway.secretVersion = gateway.stagedSecretVersion;
-  gateway.stagedSecretToken = null;
-  gateway.stagedPlainSecret = null;
-  gateway.stagedSecretIssuedAt = null;
-  gateway.stagedSecretVersion = null;
-  gateway.updatedAt = new Date();
-  await gateway.save();
+  // Atomic: the filter re-checks the exact staged token+version we just
+  // read. If another rotation lands between this findOne and this write,
+  // the filter no longer matches, findOneAndUpdate returns null, and we
+  // throw instead of silently overwriting live credentials with data that
+  // was already stale by the time we wrote it.
+  const updated = await SmsGateway.findOneAndUpdate(
+    {
+      gatewayId,
+      stagedSecretToken: gateway.stagedSecretToken,
+      stagedSecretVersion: gateway.stagedSecretVersion,
+    },
+    {
+      $set: {
+        secretToken: gateway.stagedSecretToken,
+        plainSecret: gateway.stagedPlainSecret,
+        secretIssuedAt: gateway.stagedSecretIssuedAt,
+        secretVersion: gateway.stagedSecretVersion,
+        updatedAt: new Date(),
+      },
+      $unset: {
+        stagedSecretToken: '',
+        stagedPlainSecret: '',
+        stagedSecretIssuedAt: '',
+        stagedSecretVersion: '',
+      },
+    },
+    { returnDocument: 'after' }
+  );
+
+  if (!updated) {
+    throw new Error('Confirm rotation failed — a newer rotation occurred concurrently, please retry');
+  }
+
   invalidateTokenCache(gatewayId);
-  return gateway;
+  return updated;
 };
 
 // ─── Provisioning (Two-Phase with State Machine) ──────────
@@ -221,7 +247,7 @@ const prepareProvision = async (deviceId, cooperativeId) => {
   // Mongo edit, a restored backup, a data migration, or a bug elsewhere.
   // Fail closed rather than handing back provisioning data scoped to the
   // wrong cooperative.
-  if (!gateway.cooperativeId.equals(cooperativeId)) {
+  if (String(gateway.cooperativeId) !== String(cooperativeId)) {
     logger.error('Cooperative mismatch during provisioning', {
       deviceId,
       gatewayCoop: gateway.cooperativeId,
@@ -330,7 +356,7 @@ const confirmProvision = async (deviceId, cooperativeId) => {
   const gateway = await SmsGateway.findOne({ deviceId: device._id });
   if (!gateway) throw new Error('Gateway not found');
 
-  if (!gateway.cooperativeId.equals(cooperativeId)) {
+  if (String(gateway.cooperativeId) !== String(cooperativeId)) {
     logger.error('Cooperative mismatch during confirm', {
       deviceId,
       gatewayCoop: gateway.cooperativeId,
@@ -416,7 +442,13 @@ const verifyGatewayToken = async (gatewayId, token) => {
     valid = false;
   }
 
-  tokenCache.set(cacheKey, { valid, expires: Date.now() + CACHE_TTL });
+  // Only cache successes. Negative caching here just means every distinct
+  // garbage token an attacker sends allocates a permanent-ish cache entry
+  // (until the sweep catches it) for no benefit — a failed check is cheap
+  // to redo, there's nothing worth remembering about it.
+  if (valid) {
+    tokenCache.set(cacheKey, { valid: true, expires: Date.now() + CACHE_TTL });
+  }
   return valid;
 };
 
@@ -463,41 +495,49 @@ const processHeartbeat = async (gatewayId, data = {}) => {
     status = 'degraded';
   }
 
-  if (gateway.deviceId && !gateway.cooperativeId.equals(gateway.deviceId.cooperativeId)) {
+  if (gateway.deviceId && String(gateway.cooperativeId) !== String(gateway.deviceId.cooperativeId)) {
     logger.error('Cooperative mismatch', { gatewayId, gatewayCoop: gateway.cooperativeId, deviceCoop: gateway.deviceId.cooperativeId });
     throw new Error('Cooperative mismatch');
   }
 
-  gateway.status = status;
-  gateway.appVersion = appVersion || gateway.appVersion;
-  gateway.lastHeartbeat = new Date();
-  gateway.batteryLevel = batteryLevel ?? gateway.batteryLevel;
-  gateway.networkType = networkType || gateway.networkType;
-  gateway.signalStrength = signalStrength ?? gateway.signalStrength;
-  gateway.isCharging = isCharging ?? gateway.isCharging;
-  gateway.simOperator = simOperator || gateway.simOperator;
-  gateway.simSerial = simSerial || gateway.simSerial;
-  gateway.androidVersion = androidVersion || gateway.androidVersion;
-  gateway.publicIp = publicIp || gateway.publicIp;
-  gateway.tunnelConnected = tunnelConnected ?? gateway.tunnelConnected;
-  gateway.lastSmsSentAt = lastSmsSentAt || gateway.lastSmsSentAt;
-  gateway.lastSmsFailedAt = lastSmsFailedAt || gateway.lastSmsFailedAt;
-  gateway.queueLength = queueLength ?? gateway.queueLength;
-  gateway.storageFree = storageFree ?? gateway.storageFree;
-  gateway.ramUsage = ramUsage ?? gateway.ramUsage;
-  gateway.batteryTemperature = batteryTemperature ?? gateway.batteryTemperature;
-  gateway.appState = appState || gateway.appState;
-  gateway.cloudflareTunnelVersion = cloudflareTunnelVersion || gateway.cloudflareTunnelVersion;
-  gateway.lastTunnelReconnect = lastTunnelReconnect || gateway.lastTunnelReconnect;
-  gateway.tunnelLatency = tunnelLatency ?? gateway.tunnelLatency;
-  gateway.updatedAt = new Date();
-  await gateway.save();
+  // Only include a field in $set when it would actually have changed
+  // something under the original mutate-then-save logic — Mongo leaves
+  // anything not present in $set untouched, which is exactly what the old
+  // `field = incoming ?? gateway.field` / `field = incoming || gateway.field`
+  // pattern was doing by hand. `??`-style fields (only null/undefined treated
+  // as "not provided") keep that exact guard; `||`-style fields (any falsy
+  // value treated as "not provided") keep theirs.
+  const set = { status, lastHeartbeat: new Date(), updatedAt: new Date() };
+  if (appVersion) set.appVersion = appVersion;
+  if (batteryLevel != null) set.batteryLevel = batteryLevel;
+  if (networkType) set.networkType = networkType;
+  if (signalStrength != null) set.signalStrength = signalStrength;
+  if (isCharging != null) set.isCharging = isCharging;
+  if (simOperator) set.simOperator = simOperator;
+  if (simSerial) set.simSerial = simSerial;
+  if (androidVersion) set.androidVersion = androidVersion;
+  if (publicIp) set.publicIp = publicIp;
+  if (tunnelConnected != null) set.tunnelConnected = tunnelConnected;
+  if (lastSmsSentAt) set.lastSmsSentAt = lastSmsSentAt;
+  if (lastSmsFailedAt) set.lastSmsFailedAt = lastSmsFailedAt;
+  if (queueLength != null) set.queueLength = queueLength;
+  if (storageFree != null) set.storageFree = storageFree;
+  if (ramUsage != null) set.ramUsage = ramUsage;
+  if (batteryTemperature != null) set.batteryTemperature = batteryTemperature;
+  if (appState) set.appState = appState;
+  if (cloudflareTunnelVersion) set.cloudflareTunnelVersion = cloudflareTunnelVersion;
+  if (lastTunnelReconnect) set.lastTunnelReconnect = lastTunnelReconnect;
+  if (tunnelLatency != null) set.tunnelLatency = tunnelLatency;
+
+  const updatedGateway = await SmsGateway.findOneAndUpdate(
+    { _id: gateway._id },
+    { $set: set },
+    { returnDocument: 'after' }
+  );
 
   // provisionState is intentionally never touched here — see the comment
   // block above prepareProvision for why. Only `status` reflects
-  // reachability; the old second .save() that flipped provisionState to
-  // 'online' has been removed entirely (also resolves the "two writes per
-  // heartbeat" issue — this is the only save() in this function now).
+  // reachability.
 
   // Best-effort only: the gateway's own state already committed above.
   // Not wrapped in a transaction — that requires a replica-set MongoDB
@@ -517,10 +557,8 @@ const processHeartbeat = async (gatewayId, data = {}) => {
     }
   }
 
-  return gateway;
+  return updatedGateway;
 };
-
-// ─── Atomic job claiming ───────────────────────────────────
 const tryClaimPoll = async (gatewayId) => {
   const pollInterval = smsConfig.gatewayPollIntervalSeconds || 3;
   const cutoff = new Date(Date.now() - pollInterval * 1000);
@@ -592,4 +630,4 @@ module.exports = {
   getGatewayStatus,
   markOffline,
   markOfflineIfStale,
-}
+};
