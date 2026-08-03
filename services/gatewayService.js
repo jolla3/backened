@@ -51,11 +51,6 @@ const ensureGatewayForDevice = async (device, audit = {}) => {
     if (gateway.status === 'revoked') {
       gateway.status = 'pending';
     }
-    // NOTE: re-approval after revocation intentionally does NOT touch
-    // provisionState/plainSecret here — revokeGatewayForDevice already
-    // cleared plainSecret and set provisionState:'revoked', so
-    // prepareProvision's generate-secret block (guarded on `!plainSecret`)
-    // will correctly issue a fresh secret on the device's next poll.
     gateway.updatedAt = new Date();
     await gateway.save();
     return { gateway, secretToken: null };
@@ -71,19 +66,6 @@ const ensureGatewayForDevice = async (device, audit = {}) => {
     secretIssuedAt: new Date(),
     secretVersion: 1,
     secretRetrievedAt: null,
-    // FIX: this used to be 'pending'. A plainSecret is generated and stored
-    // right here, in this same object — so the true state at this point is
-    // "secret has been issued", not "nothing has happened yet". Leaving it
-    // as 'pending' was a deadlock: prepareProvision only regenerates a
-    // secret when `!gateway.plainSecret` (never true here, since it's set
-    // above), and only *returns* a secret when provisionState is exactly
-    // 'secret_issued' — which this record would never reach on its own.
-    // A freshly-approved device would poll /gateway/provision forever and
-    // always get `secret: null` back, despite a valid secret sitting
-    // unused in this very document. Setting the initial state to
-    // 'secret_issued' here (matching the fact that a secret genuinely was
-    // just issued) is what makes prepareProvision's first poll actually
-    // hand it over.
     provisionState: 'secret_issued',
     cooperativeId: device.cooperativeId,
     deviceName: device.deviceName || null,
@@ -124,9 +106,6 @@ const revokeGatewayForDevice = async (deviceId) => {
 const rotateToken = async (gatewayId, audit = {}) => {
   const newSecret = generateSecret();
   const hashed = hashSecret(newSecret);
-  // Read current version first so the staged version increments correctly,
-  // then commit the stage atomically conditioned on the gateway not having
-  // been rotated/revoked out from under us in between.
   const existing = await SmsGateway.findOne({ gatewayId });
   if (!existing) throw new Error('Gateway not found');
   if (existing.status === 'revoked') throw new Error('Gateway is revoked');
@@ -136,7 +115,7 @@ const rotateToken = async (gatewayId, audit = {}) => {
     {
       gatewayId,
       status: { $ne: 'revoked' },
-      secretVersion: existing.secretVersion, // optimistic concurrency guard
+      secretVersion: existing.secretVersion,
     },
     {
       $set: {
@@ -164,22 +143,12 @@ const confirmRotation = async (gatewayId, expectedVersion) => {
   if (!gateway) throw new Error('Gateway not found');
   if (!gateway.stagedSecretToken) throw new Error('No staged token to confirm');
 
-  // Optional: if the caller tells us which version it actually received
-  // from rotateToken(), reject confirming a *different* (e.g. newer, from
-  // another rotation that happened in between) staged token. Backward
-  // compatible — omitting expectedVersion skips this check entirely, same
-  // behavior as before this existed.
   if (expectedVersion !== undefined && gateway.stagedSecretVersion !== expectedVersion) {
     throw new Error(
       `Staged secret version mismatch: expected ${expectedVersion}, found ${gateway.stagedSecretVersion}`
     );
   }
 
-  // Atomic: the filter re-checks the exact staged token+version we just
-  // read. If another rotation lands between this findOne and this write,
-  // the filter no longer matches, findOneAndUpdate returns null, and we
-  // throw instead of silently overwriting live credentials with data that
-  // was already stale by the time we wrote it.
   const updated = await SmsGateway.findOneAndUpdate(
     {
       gatewayId,
@@ -212,24 +181,7 @@ const confirmRotation = async (gatewayId, expectedVersion) => {
   return updated;
 };
 
-// ─── Provisioning (Two-Phase with State Machine) ──────────
-//
-// provisionState ∈ { pending, secret_issued, confirmed, revoked }
-// status         ∈ { pending, online, offline, degraded, needs_update, revoked }
-//
-// provisionState answers "has this device completed the provisioning
-// handshake?" — it is set exactly once by confirmProvision and never
-// touched again except by revocation. status answers "is it currently
-// reachable?" — only processHeartbeat/markOfflineIfStale/markOffline touch
-// it. Previously processHeartbeat also flipped provisionState to 'online'
-// on first successful heartbeat, which conflated the two questions (a
-// device could be "provisionState: online" yet the schema had no way to
-// distinguish that from a device that's merely reachable right now) and
-// meant a device that provisioned once but has been offline for a week
-// still reported provisionState:'online' — this is now handled entirely
-// by `status`, which markOfflineIfStale already flips back to 'offline'.
-
-// Phase 1: Prepare – return secret or state
+// ─── Provisioning (Two-Phase) ──────────────────────────────
 const prepareProvision = async (deviceId, cooperativeId) => {
   const device = await Device.findOne({ uuid: deviceId, cooperativeId });
   if (!device) {
@@ -241,12 +193,6 @@ const prepareProvision = async (deviceId, cooperativeId) => {
     return { approved: device.approved, revoked: device.revoked, provisioned: false, secret: null, gatewayId: null };
   }
 
-  // Same check processHeartbeat already enforces — prepareProvision was
-  // assuming gateway.cooperativeId and device.cooperativeId never drift
-  // apart, which holds under normal operation but not against a manual
-  // Mongo edit, a restored backup, a data migration, or a bug elsewhere.
-  // Fail closed rather than handing back provisioning data scoped to the
-  // wrong cooperative.
   if (String(gateway.cooperativeId) !== String(cooperativeId)) {
     logger.error('Cooperative mismatch during provisioning', {
       deviceId,
@@ -256,9 +202,6 @@ const prepareProvision = async (deviceId, cooperativeId) => {
     throw new Error('Cooperative mismatch between gateway and device');
   }
 
-  // Already confirmed -> provisioned. (No longer also checks 'online' —
-  // that was never a valid provisionState value going forward; status
-  // carries reachability instead.)
   if (gateway.provisionState === 'confirmed') {
     return {
       approved: device.approved,
@@ -270,11 +213,6 @@ const prepareProvision = async (deviceId, cooperativeId) => {
     };
   }
 
-  // Two cases land here: the current secret expired, or none was ever
-  // issued (not confirmed either way). Both are handled by the same atomic
-  // regenerate-in-place — merged into one round trip rather than returning
-  // an intermediate `expired` response and making the client poll again
-  // for the actual new secret.
   const now = Date.now();
   const isExpired =
     !!gateway.secretIssuedAt &&
@@ -285,10 +223,6 @@ const prepareProvision = async (deviceId, cooperativeId) => {
   if (isExpired || needsFreshSecret) {
     const secret = generateSecret();
     const hashed = hashSecret(secret);
-    // Guard: match on the exact secretIssuedAt we read (works whether it's
-    // a real timestamp being replaced or null in the needsFreshSecret-only
-    // case) plus provisionState, so two concurrent callers can't both win
-    // this write — only one findOneAndUpdate matches and regenerates.
     const updated = await SmsGateway.findOneAndUpdate(
       {
         _id: gateway._id,
@@ -307,13 +241,9 @@ const prepareProvision = async (deviceId, cooperativeId) => {
       },
       { returnDocument: 'after' }
     );
-    // If `updated` is null, a concurrent request won the race and already
-    // regenerated — re-fetch so we return *that* secret below instead of
-    // stale in-memory data.
     gateway = updated || (await SmsGateway.findOne({ _id: gateway._id }));
   }
 
-  // Return fresh secret if available and not retrieved
   if (gateway.plainSecret && !gateway.secretRetrievedAt && gateway.provisionState === 'secret_issued') {
     return {
       approved: device.approved,
@@ -325,7 +255,6 @@ const prepareProvision = async (deviceId, cooperativeId) => {
     };
   }
 
-  // Secret already retrieved but not confirmed – state: awaiting_confirmation
   if (gateway.secretRetrievedAt && gateway.provisionState === 'secret_issued') {
     return {
       approved: device.approved,
@@ -338,7 +267,6 @@ const prepareProvision = async (deviceId, cooperativeId) => {
     };
   }
 
-  // Fallback: not ready
   return {
     approved: device.approved,
     revoked: device.revoked,
@@ -349,18 +277,18 @@ const prepareProvision = async (deviceId, cooperativeId) => {
 };
 
 // Phase 2: Confirm – client has stored the secret
-const confirmProvision = async (deviceId, cooperativeId) => {
-  const device = await Device.findOne({ uuid: deviceId, cooperativeId });
-  if (!device) throw new Error('Device not found');
+const confirmProvision = async (gateway) => {
+  // gateway must be the Mongoose document, with deviceId populated
+  if (!gateway) throw new Error('Gateway not provided');
+  const device = gateway.deviceId;
+  if (!device) throw new Error('Device not found in gateway');
 
-  const gateway = await SmsGateway.findOne({ deviceId: device._id });
-  if (!gateway) throw new Error('Gateway not found');
-
-  if (String(gateway.cooperativeId) !== String(cooperativeId)) {
+  // Cooperative mismatch check
+  if (String(gateway.cooperativeId) !== String(device.cooperativeId)) {
     logger.error('Cooperative mismatch during confirm', {
-      deviceId,
+      gatewayId: gateway.gatewayId,
       gatewayCoop: gateway.cooperativeId,
-      requestCoop: cooperativeId,
+      deviceCoop: device.cooperativeId,
     });
     throw new Error('Cooperative mismatch between gateway and device');
   }
@@ -377,6 +305,7 @@ const confirmProvision = async (deviceId, cooperativeId) => {
     throw new Error('Secret already consumed');
   }
 
+  // Atomic update using the gateway's own _id and conditions
   const updated = await SmsGateway.findOneAndUpdate(
     {
       _id: gateway._id,
@@ -389,12 +318,6 @@ const confirmProvision = async (deviceId, cooperativeId) => {
         plainSecret: null,
         secretRetrievedAt: new Date(),
         provisionState: 'confirmed',
-        // FIX: was 'online'. Confirmation only means the handshake is
-        // complete — the device hasn't sent a single heartbeat yet at
-        // this point, so calling it 'online' is misleading. It starts
-        // 'offline' and processHeartbeat flips it to 'online' on the
-        // device's first real heartbeat, same as any other reachability
-        // change from here on.
         status: 'offline',
         updatedAt: new Date(),
       },
@@ -403,10 +326,13 @@ const confirmProvision = async (deviceId, cooperativeId) => {
   );
 
   if (!updated) throw new Error('Provision confirmation failed – secret already consumed');
-  logger.info('Gateway provision confirmed', { deviceId, gatewayId: gateway.gatewayId });
+
+  // Invalidate token cache (stale entries for this gateway)
+  invalidateTokenCache(gateway.gatewayId);
+
+  logger.info('Gateway provision confirmed', { deviceId: device.uuid, gatewayId: gateway.gatewayId });
   return { success: true, provisioned: true };
 };
-
 // ─── Legacy compatibility ──────────────────────────────────
 const getProvisionData = async (deviceId, cooperativeId) => {
   return prepareProvision(deviceId, cooperativeId);
@@ -414,8 +340,6 @@ const getProvisionData = async (deviceId, cooperativeId) => {
 
 // ─── Token verification (with cache) ──────────────────────
 const verifyGatewayToken = async (gatewayId, token) => {
-  // Reject obviously-garbage input before it ever touches the cache or a
-  // hashing call — a valid secret is always a 64-char hex string.
   if (typeof token !== 'string' || token.length !== 64) {
     return false;
   }
@@ -442,10 +366,6 @@ const verifyGatewayToken = async (gatewayId, token) => {
     valid = false;
   }
 
-  // Only cache successes. Negative caching here just means every distinct
-  // garbage token an attacker sends allocates a permanent-ish cache entry
-  // (until the sweep catches it) for no benefit — a failed check is cheap
-  // to redo, there's nothing worth remembering about it.
   if (valid) {
     tokenCache.set(cacheKey, { valid: true, expires: Date.now() + CACHE_TTL });
   }
@@ -500,13 +420,6 @@ const processHeartbeat = async (gatewayId, data = {}) => {
     throw new Error('Cooperative mismatch');
   }
 
-  // Only include a field in $set when it would actually have changed
-  // something under the original mutate-then-save logic — Mongo leaves
-  // anything not present in $set untouched, which is exactly what the old
-  // `field = incoming ?? gateway.field` / `field = incoming || gateway.field`
-  // pattern was doing by hand. `??`-style fields (only null/undefined treated
-  // as "not provided") keep that exact guard; `||`-style fields (any falsy
-  // value treated as "not provided") keep theirs.
   const set = { status, lastHeartbeat: new Date(), updatedAt: new Date() };
   if (appVersion) set.appVersion = appVersion;
   if (batteryLevel != null) set.batteryLevel = batteryLevel;
@@ -535,16 +448,6 @@ const processHeartbeat = async (gatewayId, data = {}) => {
     { returnDocument: 'after' }
   );
 
-  // provisionState is intentionally never touched here — see the comment
-  // block above prepareProvision for why. Only `status` reflects
-  // reachability.
-
-  // Best-effort only: the gateway's own state already committed above.
-  // Not wrapped in a transaction — that requires a replica-set MongoDB
-  // deployment, which isn't guaranteed here, and would turn a "nice to
-  // have" consistency improvement into a hard requirement. If this throws,
-  // the heartbeat has still done its real job; log and move on rather than
-  // surfacing a 400 to a device whose heartbeat actually succeeded.
   if (gateway.deviceId) {
     try {
       await Device.findByIdAndUpdate(gateway.deviceId._id, { last_seen: new Date() });
@@ -559,6 +462,7 @@ const processHeartbeat = async (gatewayId, data = {}) => {
 
   return updatedGateway;
 };
+
 const tryClaimPoll = async (gatewayId) => {
   const pollInterval = smsConfig.gatewayPollIntervalSeconds || 3;
   const cutoff = new Date(Date.now() - pollInterval * 1000);
@@ -594,13 +498,6 @@ const markOffline = async (gatewayId) => {
   );
 };
 
-// NOTE (unresolved, needs the scheduler file to confirm): this function is
-// correct on its own — it flips status (not provisionState, consistent
-// with the separation above) to 'offline' once lastHeartbeat is stale.
-// Whatever cron/interval is supposed to call this periodically (with a
-// cutoff — the review suggested ~15 minutes) isn't part of this file. If
-// nothing currently calls markOfflineIfStale on a schedule, a gateway that
-// goes dark will show its last real status forever instead of 'offline'.
 const markOfflineIfStale = async (cutoff) => {
   const result = await SmsGateway.updateMany(
     {

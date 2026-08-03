@@ -1,6 +1,7 @@
 const gatewayService = require('../services/gatewayService');
 const smsConfig = require('../config/smsConfig');
 const logger = require('../utils/logger');
+const { clearGatewayCache } = require('../cache/gatewayCache');
 
 // ─── Provisioning (Phase 1: prepare) ──────────────────────
 const getProvisionData = async (req, res) => {
@@ -24,17 +25,35 @@ const getProvisionData = async (req, res) => {
 };
 
 // ─── Provisioning (Phase 2: confirm) ──────────────────────
+
+// ─── Provisioning (Phase 2: confirm) ──────────────────────
 const confirmProvision = async (req, res) => {
   try {
-    const deviceId = req.headers['x-device-id'];
-    if (!deviceId) {
-      return res.status(400).json({ error: 'X-Device-ID header required' });
+    const gateway = req.gateway; // loaded by provisionAuth
+    if (!gateway) {
+      return res.status(401).json({ error: 'Gateway not authenticated' });
     }
-    const cooperativeId = req.user.cooperativeId;
-    const gateway = await gatewayService.confirmProvision(deviceId, cooperativeId);
-    res.json({ success: true, gateway });
+
+    const result = await gatewayService.confirmProvision(gateway);
+    clearGatewayCache(gateway.gatewayId);
+    res.json({ success: true, ...result });
   } catch (error) {
     logger.error('Confirm provision failed', { error: error.message });
+    res.status(400).json({ error: error.message });
+  }
+};
+
+// ─── Heartbeat ─────────────────────────────────────────────
+const heartbeat = async (req, res) => {
+  try {
+    const gatewayId = req.gateway.gatewayId;
+    const data = req.body;
+    await gatewayService.processHeartbeat(gatewayId, data);
+    // Invalidate cache so the next request fetches fresh gateway status
+    clearGatewayCache(gatewayId);
+    res.json({ success: true });
+  } catch (error) {
+    logger.error('Heartbeat failed', { error: error.message });
     res.status(400).json({ error: error.message });
   }
 };
@@ -56,6 +75,8 @@ const confirmRotation = async (req, res) => {
   try {
     const { gatewayId } = req.params;
     const gateway = await gatewayService.confirmRotation(gatewayId);
+    // Also clear the gateway cache because status may have changed
+    clearGatewayCache(gatewayId);
     res.json({ success: true, gateway });
   } catch (error) {
     logger.error('Confirm rotation failed', { error: error.message });
@@ -63,18 +84,6 @@ const confirmRotation = async (req, res) => {
   }
 };
 
-// ─── Heartbeat ─────────────────────────────────────────────
-const heartbeat = async (req, res) => {
-  try {
-    const gatewayId = req.gateway.gatewayId;
-    const data = req.body;
-    const gateway = await gatewayService.processHeartbeat(gatewayId, data);
-    res.json({ success: true, gateway });
-  } catch (error) {
-    logger.error('Heartbeat failed', { error: error.message });
-    res.status(400).json({ error: error.message });
-  }
-};
 
 // ─── Jobs ──────────────────────────────────────────────────
 const claimJobs = async (req, res) => {
