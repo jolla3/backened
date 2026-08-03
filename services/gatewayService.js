@@ -338,8 +338,9 @@ const getProvisionData = async (deviceId, cooperativeId) => {
   return prepareProvision(deviceId, cooperativeId);
 };
 
-// ─── Token verification (with cache) ──────────────────────
 const verifyGatewayToken = async (gatewayId, token) => {
+  // Reject obviously-garbage input before it ever touches the cache or a
+  // hashing call — a valid secret is always a 64-char hex string.
   if (typeof token !== 'string' || token.length !== 64) {
     return false;
   }
@@ -359,6 +360,15 @@ const verifyGatewayToken = async (gatewayId, token) => {
   if (gateway.status === 'revoked') return false;
 
   const hashedInput = hashSecret(token);
+  
+  // ─── DEBUG LOGGING ──────────────────────────────────────────
+  console.log('🔑 verifyGatewayToken');
+  console.log('  Incoming token    :', token);
+  console.log('  Hashed token      :', hashedInput);
+  console.log('  Stored hash       :', gateway.secretToken);
+  console.log('  Simple equality   :', hashedInput === gateway.secretToken);
+  // ──────────────────────────────────────────────────────────
+
   let valid = false;
   try {
     valid = crypto.timingSafeEqual(Buffer.from(gateway.secretToken), Buffer.from(hashedInput));
@@ -371,7 +381,6 @@ const verifyGatewayToken = async (gatewayId, token) => {
   }
   return valid;
 };
-
 // ─── Heartbeat & polling ───────────────────────────────────
 const processHeartbeat = async (gatewayId, data = {}) => {
   const {

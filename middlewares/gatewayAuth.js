@@ -52,30 +52,32 @@ const gatewayAuth = async (req, res, next) => {
 // ─── Provisioning middleware ──────────────────────────────
 const provisionAuth = async (req, res, next) => {
   const authHeader = req.headers.authorization;
+  const gatewayId = req.headers['x-gateway-id'];
+
+  // ─── DEBUG LOGGING ──────────────────────────────────────────
+  console.log('🔐 provisionAuth');
+  console.log('  Authorization header :', authHeader);
+  console.log('  X-Gateway-Id         :', gatewayId);
+  // ──────────────────────────────────────────────────────────
+
   if (!authHeader || !authHeader.startsWith('Bearer ')) {
     return res.status(401).json({ error: 'Missing or invalid Authorization header' });
   }
 
   const token = authHeader.split(' ')[1];
-  const gatewayId = req.headers['x-gateway-id'];
-
   if (!gatewayId) {
     return res.status(400).json({ error: 'X-Gateway-Id header is required' });
   }
 
-  // Fresh from DB – cache not used for provisioning
+  // Fetch fresh from DB – don't rely on cache for provisioning
   const gateway = await SmsGateway.findOne({ gatewayId }).populate('deviceId');
   if (!gateway) {
     return res.status(403).json({ error: 'Gateway not found' });
   }
 
-  // ✅ Check device revocation – but not approval or pending status
   const device = gateway.deviceId;
   if (!device) return res.status(403).json({ error: 'Device not found' });
   if (device.revoked) return res.status(403).json({ error: 'Device has been revoked' });
-
-  // Do NOT check device.approved – provisioning should still work for pending approval
-  // Do NOT check gateway.status – pending is allowed during provisioning
 
   const isValid = await gatewayService.verifyGatewayToken(gatewayId, token);
   if (!isValid) {
