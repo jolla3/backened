@@ -21,19 +21,13 @@ const invalidateTokenCache = (gatewayId) => {
   }
 };
 
-// Read-time eviction (in verifyGatewayToken) only cleans an entry when
-// that exact key is looked up again. A flood of distinct invalid tokens —
-// each a different cache key — would never be looked up a second time, so
-// the map would just grow. This sweeps everything expired on a fixed
-// schedule regardless of read pattern.
+// Read-time eviction + background sweep
 const cacheCleanupTimer = setInterval(() => {
   const now = Date.now();
   for (const [key, value] of tokenCache) {
     if (value.expires <= now) tokenCache.delete(key);
   }
 }, 60000);
-// Doesn't keep the process alive on its own — otherwise any test, script,
-// migration, or CLI tool that merely imports this module would hang on exit.
 cacheCleanupTimer.unref();
 
 // ─── Gateway lifecycle ─────────────────────────────────────
@@ -102,7 +96,7 @@ const revokeGatewayForDevice = async (deviceId) => {
   return gateway;
 };
 
-// ─── Token rotation (two‑phase, now atomic) ────────────────
+// ─── Token rotation (two‑phase, atomic) ────────────────────
 const rotateToken = async (gatewayId, audit = {}) => {
   const newSecret = generateSecret();
   const hashed = hashSecret(newSecret);
@@ -181,7 +175,9 @@ const confirmRotation = async (gatewayId, expectedVersion) => {
   return updated;
 };
 
-// ─── Provisioning (Two-Phase) ──────────────────────────────
+// ─── Provisioning ──────────────────────────────────────────
+
+// Phase 1: Prepare – return secret or state
 const prepareProvision = async (deviceId, cooperativeId) => {
   const device = await Device.findOne({ uuid: deviceId, cooperativeId });
   if (!device) {
@@ -213,6 +209,31 @@ const prepareProvision = async (deviceId, cooperativeId) => {
     };
   }
 
+  // If we have a plain secret, ensure provisionState is 'secret_issued' and return it
+  if (gateway.plainSecret && !gateway.secretRetrievedAt) {
+    if (gateway.provisionState !== 'secret_issued') {
+      logger.info('Fixing provisionState to secret_issued for existing gateway', {
+        gatewayId: gateway.gatewayId,
+        oldState: gateway.provisionState,
+      });
+      const updated = await SmsGateway.findOneAndUpdate(
+        { _id: gateway._id, provisionState: { $ne: 'confirmed' } },
+        { $set: { provisionState: 'secret_issued', updatedAt: new Date() } },
+        { returnDocument: 'after' }
+      );
+      gateway = updated || gateway;
+    }
+    return {
+      approved: device.approved,
+      revoked: device.revoked,
+      provisioned: false,
+      secret: gateway.plainSecret,
+      gatewayId: gateway.gatewayId,
+      version: gateway.secretVersion || 1,
+    };
+  }
+
+  // Check expiration or missing secret
   const now = Date.now();
   const isExpired =
     !!gateway.secretIssuedAt &&
@@ -242,19 +263,19 @@ const prepareProvision = async (deviceId, cooperativeId) => {
       { returnDocument: 'after' }
     );
     gateway = updated || (await SmsGateway.findOne({ _id: gateway._id }));
+    if (gateway.plainSecret && !gateway.secretRetrievedAt) {
+      return {
+        approved: device.approved,
+        revoked: device.revoked,
+        provisioned: false,
+        secret: gateway.plainSecret,
+        gatewayId: gateway.gatewayId,
+        version: gateway.secretVersion || 1,
+      };
+    }
   }
 
-  if (gateway.plainSecret && !gateway.secretRetrievedAt && gateway.provisionState === 'secret_issued') {
-    return {
-      approved: device.approved,
-      revoked: device.revoked,
-      provisioned: false,
-      secret: gateway.plainSecret,
-      gatewayId: gateway.gatewayId,
-      version: gateway.secretVersion || 1,
-    };
-  }
-
+  // Secret already retrieved but not confirmed
   if (gateway.secretRetrievedAt && gateway.provisionState === 'secret_issued') {
     return {
       approved: device.approved,
@@ -267,6 +288,7 @@ const prepareProvision = async (deviceId, cooperativeId) => {
     };
   }
 
+  // Fallback
   return {
     approved: device.approved,
     revoked: device.revoked,
@@ -276,14 +298,14 @@ const prepareProvision = async (deviceId, cooperativeId) => {
   };
 };
 
-// Phase 2: Confirm – client has stored the secret
+// ─── Phase 2: Confirm – client has stored the secret ──────
+// ✅ FIXED: accepts gateway object (already loaded by provisionAuth)
+// Idempotent and handles concurrent requests gracefully.
 const confirmProvision = async (gateway) => {
-  // gateway must be the Mongoose document, with deviceId populated
   if (!gateway) throw new Error('Gateway not provided');
   const device = gateway.deviceId;
   if (!device) throw new Error('Device not found in gateway');
 
-  // Cooperative mismatch check
   if (String(gateway.cooperativeId) !== String(device.cooperativeId)) {
     logger.error('Cooperative mismatch during confirm', {
       gatewayId: gateway.gatewayId,
@@ -305,7 +327,7 @@ const confirmProvision = async (gateway) => {
     throw new Error('Secret already consumed');
   }
 
-  // Atomic update using the gateway's own _id and conditions
+  // Atomic update
   const updated = await SmsGateway.findOneAndUpdate(
     {
       _id: gateway._id,
@@ -325,32 +347,45 @@ const confirmProvision = async (gateway) => {
     { returnDocument: 'after' }
   );
 
-  if (!updated) throw new Error('Provision confirmation failed – secret already consumed');
+  if (updated) {
+    invalidateTokenCache(gateway.gatewayId);
+    logger.info('Gateway provision confirmed', { deviceId: device.uuid, gatewayId: gateway.gatewayId });
+    return { success: true, provisioned: true };
+  }
 
-  // Invalidate token cache (stale entries for this gateway)
-  invalidateTokenCache(gateway.gatewayId);
+  // Update failed – likely another concurrent request succeeded.
+  // Fetch fresh document and check if it's now confirmed.
+  const fresh = await SmsGateway.findById(gateway._id);
+  if (!fresh) throw new Error('Gateway disappeared during confirmation');
+  if (fresh.provisionState === 'confirmed') {
+    logger.info('Gateway already confirmed by concurrent request', { gatewayId: gateway.gatewayId });
+    return { success: true, provisioned: true };
+  }
 
-  logger.info('Gateway provision confirmed', { deviceId: device.uuid, gatewayId: gateway.gatewayId });
-  return { success: true, provisioned: true };
+  // If still not confirmed, throw appropriate error
+  if (fresh.provisionState !== 'secret_issued') {
+    throw new Error('No secret issued to confirm (state: ' + fresh.provisionState + ')');
+  }
+  if (!fresh.plainSecret) {
+    throw new Error('Secret already consumed without confirmation');
+  }
+
+  throw new Error('Provision confirmation failed – unexpected state');
 };
+
 // ─── Legacy compatibility ──────────────────────────────────
 const getProvisionData = async (deviceId, cooperativeId) => {
   return prepareProvision(deviceId, cooperativeId);
 };
 
+// ─── Token verification ────────────────────────────────────
 const verifyGatewayToken = async (gatewayId, token) => {
-  // Reject obviously-garbage input before it ever touches the cache or a
-  // hashing call — a valid secret is always a 64-char hex string.
-  if (typeof token !== 'string' || token.length !== 64) {
-    return false;
-  }
+  if (typeof token !== 'string' || token.length !== 64) return false;
 
   const cacheKey = `${gatewayId}:${token}`;
   const cached = tokenCache.get(cacheKey);
   if (cached) {
-    if (cached.expires > Date.now()) {
-      return cached.valid;
-    }
+    if (cached.expires > Date.now()) return cached.valid;
     tokenCache.delete(cacheKey);
   }
 
@@ -360,15 +395,6 @@ const verifyGatewayToken = async (gatewayId, token) => {
   if (gateway.status === 'revoked') return false;
 
   const hashedInput = hashSecret(token);
-  
-  // ─── DEBUG LOGGING ──────────────────────────────────────────
-  console.log('🔑 verifyGatewayToken');
-  console.log('  Incoming token    :', token);
-  console.log('  Hashed token      :', hashedInput);
-  console.log('  Stored hash       :', gateway.secretToken);
-  console.log('  Simple equality   :', hashedInput === gateway.secretToken);
-  // ──────────────────────────────────────────────────────────
-
   let valid = false;
   try {
     valid = crypto.timingSafeEqual(Buffer.from(gateway.secretToken), Buffer.from(hashedInput));
@@ -381,6 +407,7 @@ const verifyGatewayToken = async (gatewayId, token) => {
   }
   return valid;
 };
+
 // ─── Heartbeat & polling ───────────────────────────────────
 const processHeartbeat = async (gatewayId, data = {}) => {
   const {
@@ -515,7 +542,7 @@ const markOfflineIfStale = async (cutoff) => {
     },
     { $set: { status: 'offline', updatedAt: new Date() } }
   );
-  return result;
+  return result; // returns WriteResult with modifiedCount
 };
 
 module.exports = {

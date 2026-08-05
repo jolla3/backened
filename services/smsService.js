@@ -171,6 +171,7 @@ const markFailed = async (jobId, gatewayId, error, providerResponse) => {
 
 /**
  * Recover stuck processing jobs (run by scheduler).
+ * Returns WriteResult with modifiedCount.
  */
 const recoverStuckJobs = async (olderThanMinutes = 5) => {
   const cutoff = new Date(Date.now() - olderThanMinutes * 60 * 1000);
@@ -244,6 +245,7 @@ const sendFeedTransactionNotification = async ({
   });
 };
 
+// ─── Export all ──────────────────────────────────────────
 module.exports = {
   queueSMS,
   claimJobs,

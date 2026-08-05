@@ -25,14 +25,18 @@ const getProvisionData = async (req, res) => {
 };
 
 // ─── Provisioning (Phase 2: confirm) ──────────────────────
-
-// ─── Provisioning (Phase 2: confirm) ──────────────────────
 const confirmProvision = async (req, res) => {
   try {
-    const gateway = req.gateway; // loaded by provisionAuth
+    const gateway = req.gateway;
     if (!gateway) {
       return res.status(401).json({ error: 'Gateway not authenticated' });
     }
+
+    console.log('🔔 CONFIRM REQUEST', {
+      gatewayId: gateway.gatewayId,
+      state: gateway.provisionState,
+      time: new Date().toISOString(),
+    });
 
     const result = await gatewayService.confirmProvision(gateway);
     clearGatewayCache(gateway.gatewayId);
