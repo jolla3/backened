@@ -6,31 +6,12 @@ const { normalizePhone } = require('../utils/phoneUtils');
 const logger = require('../utils/logger');
 const SMS_PRIORITY = require('../constants/smsPriorities');
 
-/**
- * Queue an SMS job (used by controllers)
- */
-const queueSMS = async ({
-  to,
-  message,
-  from,
-  type = 'general',
-  priority = SMS_PRIORITY.GENERAL,
-  cooperativeId,
-  farmerId,
-  maxRetries = smsConfig.MAX_RETRIES || 3,
-  metadata = {},
-  expiresAt = null,
-  idempotencyKey = null,
-}) => {
-  // ── Basic validation ──────────────────────────────────
-  if (!to || !message) {
-    throw new Error('Phone number and message are required');
-  }
-  if (!cooperativeId) {
-    throw new Error('cooperativeId is required');
-  }
+const PROCESSING_TIMEOUT_MINUTES = 5;
 
-  // ── Idempotency check ──────────────────────────────────
+const queueSMS = async ({ to, message, from, type = 'general', priority = SMS_PRIORITY.GENERAL, cooperativeId, farmerId, maxRetries = smsConfig.MAX_RETRIES || 3, metadata = {}, expiresAt = null, idempotencyKey = null }) => {
+  if (!to || !message) throw new Error('Phone number and message are required');
+  if (!cooperativeId) throw new Error('cooperativeId is required');
+
   if (idempotencyKey) {
     const existing = await OutboundSms.findOne({ idempotencyKey });
     if (existing) {
@@ -40,8 +21,6 @@ const queueSMS = async ({
   }
 
   const normalizedPhone = normalizePhone(to);
-
-  // ── Build job document ─────────────────────────────────
   const job = new OutboundSms({
     phone: normalizedPhone,
     message,
@@ -62,55 +41,77 @@ const queueSMS = async ({
   return { jobId: job._id, queued: true };
 };
 
-/**
- * Claim pending jobs for a gateway (atomic using findOneAndUpdate loop).
- */
 const claimJobs = async (gatewayId, limit = 10) => {
-  const gateway = await SmsGateway.findOne({ gatewayId });
+  const gateway = await SmsGateway
+    .findOne({ gatewayId })
+    .select('_id cooperativeId')
+    .lean();
+
   if (!gateway) throw new Error('Gateway not found');
 
-  const now = new Date();
-  const queuedJobs = await OutboundSms.find({
-    status: 'queued',
-    cooperativeId: gateway.cooperativeId,
-    $or: [
-      { nextRetryAt: { $exists: false } },
-      { nextRetryAt: { $lte: now } },
-    ],
-    $or: [
-      { expiresAt: { $exists: false } },
-      { expiresAt: { $gt: now } },
-    ],
-  })
-    .sort({ priority: -1, createdAt: 1 })
-    .limit(limit);
-
+  const cutoff = new Date(Date.now() - PROCESSING_TIMEOUT_MINUTES * 60 * 1000);
   const claimed = [];
-  for (const job of queuedJobs) {
-    const updated = await OutboundSms.findOneAndUpdate(
-      { _id: job._id, status: 'queued' },
+
+  while (claimed.length < limit) {
+    const now = new Date();
+
+    const filter = {
+      cooperativeId: gateway.cooperativeId,
+      $or: [
+        { status: 'queued' },
+        {
+          status: 'processing',
+          processingStartedAt: { $lte: cutoff }
+        }
+      ],
+      $and: [
+        {
+          $or: [
+            { nextRetryAt: null },
+            { nextRetryAt: { $exists: false } },
+            { nextRetryAt: { $lte: now } }
+          ]
+        },
+        {
+          $or: [
+            { expiresAt: null },
+            { expiresAt: { $exists: false } },
+            { expiresAt: { $gt: now } }
+          ]
+        }
+      ]
+    };
+
+    const job = await OutboundSms.findOneAndUpdate(
+      filter,
       {
         $set: {
           status: 'processing',
           gatewayId: gateway._id,
           processingStartedAt: now,
-          updatedAt: now,
-        },
+          updatedAt: now
+        }
       },
-      { returnDocument: 'after' }
+      {
+        sort: { priority: -1, createdAt: 1 },
+        returnDocument: 'after'   // ✅ fixed
+      }
     );
-    if (updated) claimed.push(updated);
+
+    if (!job) break;
+    claimed.push(job);
   }
 
   if (claimed.length > 0) {
-    logger.info(`Claimed ${claimed.length} jobs`, { gatewayId, claimed: claimed.map(j => j._id) });
+    logger.info(`Claimed ${claimed.length} jobs`, {
+      gatewayId,
+      claimed: claimed.map(j => j._id)
+    });
   }
+
   return claimed;
 };
 
-/**
- * Mark a job as sent (successful).
- */
 const markSent = async (jobId, gatewayId, providerResponse) => {
   const job = await OutboundSms.findOneAndUpdate(
     { _id: jobId, gatewayId },
@@ -129,10 +130,6 @@ const markSent = async (jobId, gatewayId, providerResponse) => {
   return job;
 };
 
-/**
- * Mark a job as failed.
- * Schedule retry using configurable delays.
- */
 const markFailed = async (jobId, gatewayId, error, providerResponse) => {
   const job = await OutboundSms.findOneAndUpdate(
     { _id: jobId, gatewayId },
@@ -169,11 +166,7 @@ const markFailed = async (jobId, gatewayId, error, providerResponse) => {
   return finalJob;
 };
 
-/**
- * Recover stuck processing jobs (run by scheduler).
- * Returns WriteResult with modifiedCount.
- */
-const recoverStuckJobs = async (olderThanMinutes = 5) => {
+const recoverStuckJobs = async (olderThanMinutes = PROCESSING_TIMEOUT_MINUTES) => {
   const cutoff = new Date(Date.now() - olderThanMinutes * 60 * 1000);
   const result = await OutboundSms.updateMany(
     {
@@ -183,6 +176,8 @@ const recoverStuckJobs = async (olderThanMinutes = 5) => {
     {
       $set: {
         status: 'queued',
+        gatewayId: null,
+        processingStartedAt: null,
         updatedAt: new Date(),
       },
     }
@@ -193,20 +188,14 @@ const recoverStuckJobs = async (olderThanMinutes = 5) => {
   return result;
 };
 
-/**
- * Get job status (for admin).
- */
 const getJobStatus = async (jobId) => {
   const job = await OutboundSms.findById(jobId);
   if (!job) throw new Error('Job not found');
   return job;
 };
 
-// ── Wrapper functions ──────────────────────────────────
 const sendSMS = async ({ to, message, from, type = 'general', cooperativeId, farmerId, priority = SMS_PRIORITY.GENERAL }) => {
-  if (!cooperativeId) {
-    throw new Error('cooperativeId is required for SMS');
-  }
+  if (!cooperativeId) throw new Error('cooperativeId required');
   return await queueSMS({ to, message, from, type, cooperativeId, farmerId, priority });
 };
 
@@ -245,7 +234,6 @@ const sendFeedTransactionNotification = async ({
   });
 };
 
-// ─── Export all ──────────────────────────────────────────
 module.exports = {
   queueSMS,
   claimJobs,
