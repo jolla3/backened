@@ -48,7 +48,6 @@ const getMonthlySummary = async (year, month, cooperativeId) => {
   const cooperative = await Cooperative.findById(cooperativeId);
   if (!cooperative) throw new Error('Cooperative not found');
 
-  // Validate year/month
   if (!Number.isInteger(year) || year < 2000 || year > 2100) {
     throw new Error('Invalid year');
   }
@@ -140,10 +139,16 @@ const addManualMilkEntry = async ({
     if (!porter) throw new Error('Porter not found or inactive');
 
     // ── 5. Get active milk rate at collection date ───────────
+    // Build the end of the collection day to include rates created at any time on that day.
+    const startOfDay = new Date(collectionDateTime);
+    startOfDay.setHours(0, 0, 0, 0);
+    const endOfDay = new Date(collectionDateTime);
+    endOfDay.setHours(23, 59, 59, 999);
+
     const rateInfo = await RateVersion.findOne({
       cooperativeId: cooperative._id,
       type: 'milk',
-      effective_date: { $lte: collectionDateTime }
+      effective_date: { $lte: endOfDay }
     }).sort({ effective_date: -1 }).session(session);
 
     if (!rateInfo) throw new Error('No active milk rate found for the collection date');
@@ -162,12 +167,6 @@ const addManualMilkEntry = async ({
       `manual:${cooperativeId}:${farmerId}:${collectionDate}:${collectionShift}`;
 
     // ── 8. Attempt to create transaction ────────────────────
-    // The application-level duplicate check (findOne) is optional but helpful for a friendly error.
-    // However, we rely on the unique index as the ultimate authority.
-    // To avoid a race, we skip findOne and handle 11000 directly.
-    // But we keep findOne for a more user-friendly message (still prone to race).
-    // We'll combine both: findOne for user-friendly check, then insert.
-
     const existing = await Transaction.findOne({ idempotency_key: idempotencyKey }).session(session);
     if (existing) {
       const error = new Error(
@@ -207,7 +206,6 @@ const addManualMilkEntry = async ({
       [transaction] = await Transaction.create([transactionData], { session });
     } catch (error) {
       if (error.code === 11000) {
-        // Duplicate key error – translate to our business error
         const dupError = new Error(
           `Milk already recorded for this farmer on ${collectionDate} (${collectionShift})`
         );
@@ -245,9 +243,6 @@ const addManualMilkEntry = async ({
     }], { session });
 
     // ── 13. Update Farmer balance ──────────────────────────
-    // ⚠️ Atomicity: updateFarmerBalance should be safe if called within the same session.
-    // But to be bulletproof, we could use findOneAndUpdate with version check.
-    // We'll keep it as is for now, assuming session isolation.
     await updateFarmerBalance(farmer._id, newBalance, ledgerEntry._id, session);
 
     // ── 14. Update Porter totals ──────────────────────────
@@ -278,8 +273,8 @@ const addManualMilkEntry = async ({
           litres: litresNum,
           payout,
           walletBalance: newBalance,
-          collectionDate,                     // business date
-          transactionDate: transaction.timestamp_server // system entry timestamp
+          collectionDate,
+          transactionDate: transaction.timestamp_server
         };
         receipt = receiptFormatter.formatMilkReceipt(receiptData);
 
@@ -329,19 +324,17 @@ const addManualMilkEntry = async ({
     await session.abortTransaction();
     session.endSession();
 
-    // If error is already a DUPLICATE_MILK_ENTRY, rethrow it
     if (error.code === 'DUPLICATE_MILK_ENTRY') {
       throw error;
     }
 
-    // Otherwise, log and rethrow
     logger.error('Manual milk entry failed', { error: error.message });
     throw error;
   }
 };
 
 module.exports = {
-  getKenyaDateString, // for other modules if needed
+  getKenyaDateString,
   getDailyTotal,
   getMonthlySummary,
   addManualMilkEntry
