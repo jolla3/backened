@@ -138,21 +138,21 @@ const addManualMilkEntry = async ({
     }).session(session);
     if (!porter) throw new Error('Porter not found or inactive');
 
-    // ── 5. Get active milk rate at collection date ───────────
-    // Build the end of the collection day to include rates created at any time on that day.
-    const startOfDay = new Date(collectionDateTime);
-    startOfDay.setHours(0, 0, 0, 0);
-    const endOfDay = new Date(collectionDateTime);
-    endOfDay.setHours(23, 59, 59, 999);
-
+    // ── 5. Get current milk rate (latest created) ──────────
+    // ✅ No effective_date – always use the most recent rate.
     const rateInfo = await RateVersion.findOne({
       cooperativeId: cooperative._id,
-      type: 'milk',
-      effective_date: { $lte: endOfDay }
-    }).sort({ effective_date: -1 }).session(session);
+      type: 'milk'
+    })
+      .sort({ createdAt: -1, _id: -1 })
+      .session(session);
 
-    if (!rateInfo) throw new Error('No active milk rate found for the collection date');
-    if (rateInfo.rate <= 0) throw new Error('Invalid milk rate');
+    if (!rateInfo) {
+      throw new Error('No milk rate configured for this cooperative');
+    }
+    if (!rateInfo.rate || rateInfo.rate <= 0) {
+      throw new Error('Invalid milk rate');
+    }
 
     const payout = parseFloat((litresNum * rateInfo.rate).toFixed(2));
 
@@ -189,7 +189,7 @@ const addManualMilkEntry = async ({
       payout,
       farmer_id: farmer._id,
       porter_id: porter._id,
-      rate_version_id: rateInfo._id,
+      rate_version_id: rateInfo._id,  // ✅ store the rate version for audit
       cooperativeId: cooperative._id,
       zoneId: zoneId || null,
       zone: zone || '',
