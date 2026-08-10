@@ -17,22 +17,33 @@ const getSummary = async (cooperativeId) => {
     if (!cooperative) throw new Error('Cooperative not found');
 
     // ─── Business dates (Kenya time) ────────────────────────────
-    const todayStr = getKenyaDateString();
-    const yesterdayStr = getKenyaDateString(new Date(Date.now() - 86400000));
-    const lastWeekDate = new Date();
+    const now = new Date();
+    const todayStr = getKenyaDateString(now);
+    const yesterdayStr = getKenyaDateString(new Date(now.getTime() - 86400000));
+    
+    // Current calendar month start
+    const kenyaYear = Number(
+      new Intl.DateTimeFormat('en-KE', { timeZone: 'Africa/Nairobi', year: 'numeric' }).format(now)
+    );
+    const kenyaMonth = Number(
+      new Intl.DateTimeFormat('en-KE', { timeZone: 'Africa/Nairobi', month: '2-digit' }).format(now)
+    );
+    const currentMonthStart = `${kenyaYear}-${String(kenyaMonth).padStart(2, '0')}-01`;
+    const currentMonthEnd = todayStr; // up to today (could include future days, but only up to today)
+
+    // Rolling 7 days
+    const lastWeekDate = new Date(now);
     lastWeekDate.setDate(lastWeekDate.getDate() - 7);
     const lastWeekStr = getKenyaDateString(lastWeekDate);
-    const lastMonthDate = new Date();
-    lastMonthDate.setMonth(lastMonthDate.getMonth() - 1);
-    const lastMonthStr = getKenyaDateString(lastMonthDate);
 
-    // ─── 1. Milk volumes ──────────────────────────────────────────
+    // ─── 1. Milk volumes (only completed transactions) ──────────
     const milkVolumes = await Transaction.aggregate([
       {
         $match: {
           type: 'milk',
           cooperativeId: cooperative._id,
-          collectionDate: { $gte: lastMonthStr },
+          status: 'completed',
+          collectionDate: { $gte: currentMonthStart }, // enough for month queries
         },
       },
       {
@@ -50,10 +61,11 @@ const getSummary = async (cooperativeId) => {
             { $group: { _id: null, totalLitres: { $sum: '$litres' } } },
           ],
           month: [
-            { $match: { collectionDate: { $gte: lastMonthStr } } },
+            { $match: { collectionDate: { $gte: currentMonthStart } } },
             { $group: { _id: null, totalLitres: { $sum: '$litres' } } },
           ],
           bestDay: [
+            { $match: { collectionDate: { $gte: currentMonthStart } } },
             { $group: { _id: '$collectionDate', totalLitres: { $sum: '$litres' } } },
             { $sort: { totalLitres: -1 } },
             { $limit: 1 },
@@ -69,18 +81,29 @@ const getSummary = async (cooperativeId) => {
     const monthLitres = result.month?.[0]?.totalLitres || 0;
     const bestDayThisMonth = result.bestDay?.[0]?.totalLitres || 0;
 
-    // ─── 2. Active farmers (based on collection date) ──────────
-    const activeFarmerIds = await Transaction.distinct('farmer_id', {
-      cooperativeId: cooperative._id,
-      type: 'milk',
-      collectionDate: todayStr,
-    });
+    // ─── 2. Active farmers & porters (based on collection date) ──
+    const [activeFarmerIds, activePorterIds] = await Promise.all([
+      Transaction.distinct('farmer_id', {
+        cooperativeId: cooperative._id,
+        type: 'milk',
+        status: 'completed',
+        collectionDate: todayStr,
+      }),
+      Transaction.distinct('porter_id', {
+        cooperativeId: cooperative._id,
+        type: 'milk',
+        status: 'completed',
+        collectionDate: todayStr,
+      }),
+    ]);
     const activeFarmersToday = activeFarmerIds.length;
+    const activePortersToday = activePorterIds.length;
 
-    // ─── 3. Today's transactions (business date) ──────────────
+    // ─── 3. Today's completed milk transactions ──────────────────
     const transactionsToday = await Transaction.countDocuments({
       cooperativeId: cooperative._id,
       type: 'milk',
+      status: 'completed',
       collectionDate: todayStr,
     });
 
@@ -126,7 +149,8 @@ const getSummary = async (cooperativeId) => {
           $match: {
             type: 'feed',
             cooperativeId: cooperative._id,
-            collectionDate: { $gte: lastMonthStr },
+            status: 'completed',
+            collectionDate: { $gte: currentMonthStart },
           },
         },
         { $group: { _id: null, total: { $sum: '$cost' } } },
@@ -137,15 +161,15 @@ const getSummary = async (cooperativeId) => {
       }),
     ]);
 
-    let farmerLiability = 0;
-    let farmerDebt = 0;
+    let farmerPayable = 0;   // positive balances: coop owes farmer
+    let farmerDebt = 0;      // negative balances: farmer owes coop
     let farmersToPay = 0;
     let farmersInDebt = 0;
 
     for (const entry of latestBalances) {
       const bal = entry.runningBalance || 0;
       if (bal > 0) {
-        farmerLiability += bal;
+        farmerPayable += bal;
         farmersToPay++;
       } else if (bal < 0) {
         farmerDebt += Math.abs(bal);
@@ -153,15 +177,15 @@ const getSummary = async (cooperativeId) => {
       }
     }
 
-    const netPayable = farmerLiability - farmerDebt;
-    const avgPayout = farmersToPay > 0 ? farmerLiability / farmersToPay : 0;
-    const avgDebt = farmersInDebt > 0 ? farmerDebt / farmersInDebt : 0;
+    const netPayable = farmerPayable - farmerDebt;
 
     // ─── Today's ledger movements (server timestamp) ────────────
+    // Note: Ledger.amount is negative for debits, positive for credits,
+    // so summing is mathematically correct for net movement.
     const milkCreditsToday = todayLedger.find(l => l._id === 'MILK_CREDIT')?.total || 0;
     const feedDebitsToday = todayLedger.find(l => l._id === 'FEED_DEBIT')?.total || 0;
     const settlementDebitsToday = todayLedger.find(l => l._id === 'SETTLEMENT_DEBIT')?.total || 0;
-    const collectionToday = Math.round(milkCreditsToday + feedDebitsToday + settlementDebitsToday);
+    const netWalletMovementToday = milkCreditsToday + feedDebitsToday + settlementDebitsToday;
 
     // ─── 6. Averages ──────────────────────────────────────────────
     const avgPerActiveFarmer = activeFarmersToday > 0 ? Math.round(todayLitres / activeFarmersToday) : 0;
@@ -181,7 +205,7 @@ const getSummary = async (cooperativeId) => {
     const participation = totalFarmers > 0 ? Math.round((activeFarmersToday / totalFarmers) * 100 * 10) / 10 : 0;
 
     // ─── 9. Production ─────────────────────────────────────────────
-    const litresPerPorter = activeFarmersToday > 0 ? Math.round(todayLitres / activeFarmersToday) : 0;
+    const litresPerPorter = activePortersToday > 0 ? Math.round(todayLitres / activePortersToday) : 0;
 
     // ─── 10. Alerts ─────────────────────────────────────────────────
     const feedRevenueMonth = feedRevenue[0]?.total || 0;
@@ -198,10 +222,10 @@ const getSummary = async (cooperativeId) => {
     }
 
     // Cash alert
-    if (farmerLiability > feedRevenueMonth * 0.5 && feedRevenueMonth > 0) {
+    if (farmerPayable > feedRevenueMonth * 0.5 && feedRevenueMonth > 0) {
       alerts.cash = {
         status: 'warning',
-        message: `KES ${farmerLiability.toLocaleString()} required for settlements`,
+        message: `KES ${farmerPayable.toLocaleString()} required for settlements`,
       };
     } else {
       alerts.cash = { status: 'ok', message: 'Cash position is healthy' };
@@ -242,7 +266,7 @@ const getSummary = async (cooperativeId) => {
     // ─── 13. KPI block ──────────────────────────────────────────
     const kpi = {
       milkCollected: Math.round(todayLitres),
-      expectedSettlement: Math.round(farmerLiability * 0.3), // placeholder
+      expectedSettlement: 0, // placeholder removed – actual calculation needed
       activeFarmers: activeFarmersToday,
       healthScore: status === 'Good' ? 85 : status === 'Fair' ? 70 : 50,
     };
@@ -261,19 +285,19 @@ const getSummary = async (cooperativeId) => {
         bestDayThisMonth: Math.round(bestDayThisMonth),
       },
       finance: {
-        milkPayable: Math.round(farmerLiability),
+        farmerPayable: Math.round(farmerPayable),
         farmerDebt: Math.round(farmerDebt),
         netPayable: Math.round(netPayable),
         farmersToPay,
         farmersInDebt,
-        collectionToday,
+        netWalletMovementToday: Math.round(netWalletMovementToday),
         settlementStatus,
       },
       operations: {
         totalFarmers,
         activeFarmersToday,
         participation,
-        activePorters: totalPorters,
+        activePortersToday,
         activeDevices: totalDevices,
         transactionsToday,
         activeBranches,
@@ -289,7 +313,14 @@ const getSummary = async (cooperativeId) => {
     };
   } catch (error) {
     logger.error('Summary failed', { error: error.message, coopId: cooperativeId });
-    return getDefaultSummary();
+    // Return a degraded response instead of hiding the failure
+    return {
+      ...getDefaultSummary(),
+      summary: {
+        status: 'Unavailable',
+        headline: 'Dashboard data could not be loaded. Please check your connection.',
+      },
+    };
   }
 };
 
@@ -306,19 +337,19 @@ const getDefaultSummary = () => ({
     bestDayThisMonth: 0,
   },
   finance: {
-    milkPayable: 0,
+    farmerPayable: 0,
     farmerDebt: 0,
     netPayable: 0,
     farmersToPay: 0,
     farmersInDebt: 0,
-    collectionToday: 0,
+    netWalletMovementToday: 0,
     settlementStatus: 'unknown',
   },
   operations: {
     totalFarmers: 0,
     activeFarmersToday: 0,
     participation: 0,
-    activePorters: 0,
+    activePortersToday: 0,
     activeDevices: 0,
     transactionsToday: 0,
     activeBranches: 0,
