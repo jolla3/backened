@@ -29,12 +29,12 @@ const getMonthlySummary = async (req, res) => {
   }
 };
 
-// ─── New: Manual milk entry ──────────────────────────────
+// ─── Manual milk entry ──────────────────────────────────────
 
 const addManualMilkEntry = async (req, res) => {
   try {
     const cooperativeId = req.user.cooperativeId;
-    const createdBy = req.user._id;   // from JWT, never from body
+    const createdBy = req.user.id;   // ✅ Correct – from JWT, never from body
 
     const {
       farmerId,
