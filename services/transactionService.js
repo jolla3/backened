@@ -16,20 +16,38 @@ const { formatMilkReceipt } = require('../utils/receiptFormatter');
 const Cooperative = require('../models/cooperative');
 const smsService = require('./smsService');
 
-// ── Helpers ─────────────────────────────────────────────
+// Add imports at top
+const {
+  parseKenyaDate,
+  isValidDateString
+} = require('../utils/dateUtils');
 
-const getActiveRateVersion = async (cooperativeId, type = 'milk') => {
-  const today = new Date();
-  today.setHours(0, 0, 0, 0);
+// Replace the function with this version:
+
+
+const getActiveRateVersion = async (cooperativeId, type = 'milk', effectiveDate) => {
+  if (!effectiveDate) {
+    throw new Error('effectiveDate is required');
+  }
+
+  if (!isValidDateString(effectiveDate)) {
+    throw new Error('Invalid effective date. Expected YYYY-MM-DD with a real date.');
+  }
+
+  const targetDate = parseKenyaDate(effectiveDate);
+
   const activeRate = await RateVersion.findOne({
     cooperativeId,
     type,
-    effective_date: { $lte: today },
-  }).sort({ effective_date: -1 }).lean();
+    effective_date: { $lte: targetDate }
+  })
+    .sort({ effective_date: -1, _id: -1 })
+    .lean();
 
   if (!activeRate) {
-    throw new Error(`No active ${type} rate found for today`);
+    throw new Error(`No active ${type} rate found for ${effectiveDate}`);
   }
+
   return {
     rate_version_id: activeRate._id,
     rate: activeRate.rate,

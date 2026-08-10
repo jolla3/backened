@@ -3,9 +3,10 @@ const RateVersion = require('../models/rateVersion');
 const Inventory = require('../models/inventory');
 const Cooperative = require('../models/cooperative');
 const logger = require('../utils/logger');
+const { parseKenyaDate, isValidDateString } = require('../utils/dateUtils');
 
-// ─── Update milk rate (no effectiveDate) ────────────────────
-const updateMilkRate = async (rate, adminId, cooperativeId) => {
+// ─── Update milk rate with effective date ────────────────────
+const updateMilkRate = async (rate, adminId, cooperativeId, effectiveDate) => {
   const cooperative = await Cooperative.findById(cooperativeId);
   if (!cooperative) throw new Error('Cooperative not found');
 
@@ -13,9 +14,20 @@ const updateMilkRate = async (rate, adminId, cooperativeId) => {
     throw new Error('Valid milk rate is required');
   }
 
+  if (!effectiveDate) {
+    throw new Error('effectiveDate is required');
+  }
+
+  if (!isValidDateString(effectiveDate)) {
+    throw new Error('Invalid effective date. Expected YYYY-MM-DD with a real date.');
+  }
+
+  const effectiveDateTime = parseKenyaDate(effectiveDate);
+
   const newVersion = await RateVersion.create({
     type: 'milk',
     rate: Number(rate),
+    effective_date: effectiveDateTime,
     admin_id: adminId,
     cooperativeId: cooperative._id
   });
@@ -78,7 +90,7 @@ const getMilkHistory = async (cooperativeId) => {
   const cooperative = await Cooperative.findById(cooperativeId);
   if (!cooperative) throw new Error('Cooperative not found');
   return RateVersion.find({ type: 'milk', cooperativeId: cooperative._id })
-    .sort({ createdAt: -1, _id: -1 });
+    .sort({ effective_date: -1, _id: -1 });
 };
 
 // ─── Get inventory categories ──────────────────────────────
@@ -118,7 +130,7 @@ const getCurrentPrices = async (cooperativeId) => {
     type: 'milk',
     cooperativeId: cooperative._id
   })
-    .sort({ createdAt: -1, _id: -1 })
+    .sort({ effective_date: -1, _id: -1 })
     .lean();
 
   const categories = await Inventory.aggregate([

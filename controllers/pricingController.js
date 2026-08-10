@@ -3,14 +3,15 @@ const logger = require('../utils/logger');
 
 const updateMilkRate = async (req, res) => {
   try {
-    const { rate } = req.body;  // ✅ No effectiveDate
+    const { rate, effectiveDate } = req.body;
     const adminId = req.user.id;
     const cooperativeId = req.user.cooperativeId;
 
     const rateVersion = await pricingService.updateMilkRate(
       Number(rate),
       adminId,
-      cooperativeId
+      cooperativeId,
+      effectiveDate   // now required
     );
 
     res.json(rateVersion);

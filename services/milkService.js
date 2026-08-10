@@ -6,7 +6,7 @@ const Porter = require('../models/porter');
 const RateVersion = require('../models/rateVersion');
 const Ledger = require('../models/ledger');
 const { updateFarmerBalance } = require('../utils/ledgerUtils');
-const { generateReceiptNum, generateServerSeqNum } = require('../services/transactionService');
+const { generateReceiptNum, generateServerSeqNum, getActiveRateVersion } = require('../services/transactionService');
 const receiptFormatter = require('../utils/receiptFormatter');
 const smsService = require('./smsService');
 const logger = require('../utils/logger');
@@ -138,35 +138,29 @@ const addManualMilkEntry = async ({
     }).session(session);
     if (!porter) throw new Error('Porter not found or inactive');
 
-    // ── 5. Get current milk rate (latest created) ──────────
-    // ✅ No effective_date – always use the most recent rate.
-    const rateInfo = await RateVersion.findOne({
-      cooperativeId: cooperative._id,
-      type: 'milk'
-    })
-      .sort({ createdAt: -1, _id: -1 })
-      .session(session);
+    // ── 5. Get active milk rate using shared function ──────
+    // ✅ Pass collectionDate so the rate is selected based on the business date
+    const rateInfo = await getActiveRateVersion(
+      cooperativeId,
+      'milk',
+      collectionDate
+    );
 
-    if (!rateInfo) {
-      throw new Error('No milk rate configured for this cooperative');
-    }
-    if (!rateInfo.rate || rateInfo.rate <= 0) {
+    if (!rateInfo || !rateInfo.rate || rateInfo.rate <= 0) {
       throw new Error('Invalid milk rate');
     }
 
     const payout = parseFloat((litresNum * rateInfo.rate).toFixed(2));
 
     // ── 6. Generate receipt numbers ────────────────────────
-    const receiptNum = await generateReceiptNum(session);
-    const serverSeqNum = await generateServerSeqNum(cooperativeId, session);
+    const receiptNum = await generateReceiptNum();
+    const serverSeqNum = await generateServerSeqNum(cooperativeId);
 
     // ── 7. Generate business idempotency key ────────────────
-    // Business rule: one milk entry per farmer per date + shift
-    // (porter_id is intentionally omitted – adjust if needed)
     const idempotencyKey =
       `manual:${cooperativeId}:${farmerId}:${collectionDate}:${collectionShift}`;
 
-    // ── 8. Attempt to create transaction ────────────────────
+    // ── 8. Check duplicate (application layer) ─────────────
     const existing = await Transaction.findOne({ idempotency_key: idempotencyKey }).session(session);
     if (existing) {
       const error = new Error(
@@ -189,7 +183,7 @@ const addManualMilkEntry = async ({
       payout,
       farmer_id: farmer._id,
       porter_id: porter._id,
-      rate_version_id: rateInfo._id,  // ✅ store the rate version for audit
+      rate_version_id: rateInfo.rate_version_id,
       cooperativeId: cooperative._id,
       zoneId: zoneId || null,
       zone: zone || '',
@@ -234,7 +228,7 @@ const addManualMilkEntry = async ({
       metadata: {
         litres: litresNum,
         rate: rateInfo.rate,
-        rate_version_id: rateInfo._id,
+        rate_version_id: rateInfo.rate_version_id,
         porter_id: porter._id,
         collectionShift,
         collectionDate
