@@ -1,162 +1,174 @@
-// services/pricingService.js
-const mongoose = require('mongoose');
-const RateVersion = require('../models/rateVersion');
-const Inventory = require('../models/inventory');
-const Cooperative = require('../models/cooperative');
+// services/dashboardService.js
+const summaryLayer = require('./dashboardLayers/summaryLayer');
+const financialLayer = require('./dashboardLayers/financialLayer');
+const analyticsLayer = require('./dashboardLayers/analyticsLayer');
+const deviceLayer = require('./dashboardLayers/deviceLayer');
+const alertLayer = require('./dashboardLayers/alertLayer');
+const inventoryLayer = require('./dashboardLayers/inventoryLayer');
+const ceoStatsLayer = require('./dashboardLayers/ceoLayer');
+const intelligenceLayer = require('./dashboardLayers/intelligenceLayer');
+const systemOverviewLayer = require('./dashboardLayers/systemLayer');
+const taskLayer = require('./dashboardLayers/taskLayer');
 const logger = require('../utils/logger');
-const { parseKenyaDate } = require('../utils/dateUtils');  // ✅ NEW
 
-// ✅ SIMPLIFIED - Only needs adminId for audit trail, cooperativeId from controller
-const updateMilkRate = async (rate, effectiveDate, adminId, cooperativeId) => {
-  const cooperative = await Cooperative.findById(cooperativeId);
-  if (!cooperative) throw new Error('Cooperative not found');
-  
-  const newVersion = await RateVersion.create({
-    type: 'milk',
-    rate,
-    effective_date: parseKenyaDate(effectiveDate),  // ✅ Store at midnight Kenya time
-    admin_id: adminId,
-    cooperativeId: cooperative._id
-  });
-  
-  return newVersion;
+const getSummary = async (cooperativeId) => {
+  try { return await summaryLayer.getSummary(cooperativeId); }
+  catch (error) { 
+    logger.warn('Summary failed', { error: error.message, coopId: cooperativeId });
+    return getDefaultSummary();
+  }
 };
 
-// ✅ NEW: Update SINGLE inventory item by ID
-const updateInventoryCategory = async (itemId, updates, adminId, cooperativeId) => {
-  const cooperative = await Cooperative.findById(cooperativeId);
-  if (!cooperative) throw new Error('Cooperative not found');
-  
-  const updateFields = {};
-  
-  if (updates.price !== undefined) {
-    updateFields.price = Number(updates.price);
+const getFinancial = async (cooperativeId) => {
+  try { return await financialLayer.getFinancial(cooperativeId); }
+  catch (error) { 
+    logger.warn('Financial failed', { error: error.message, coopId: cooperativeId });
+    return getDefaultFinancial();
   }
-  if (updates.stock !== undefined) {
-    updateFields.stock = Number(updates.stock);
-  }
-  if (updates.unit !== undefined) {
-    updateFields.unit = updates.unit.trim();
-  }
-  if (updates.threshold !== undefined) {
-    updateFields.threshold = Number(updates.threshold);
-  }
-
-  if (Object.keys(updateFields).length === 0) {
-    throw new Error('No valid fields to update');
-  }
-
-  const result = await Inventory.updateOne(
-    { 
-      _id: itemId, 
-      cooperativeId: cooperative._id
-    },
-    { 
-      $set: { 
-        ...updateFields,
-        updated_by: adminId,
-        updatedAt: new Date()
-      } 
-    }
-  );
-  
-  if (result.modifiedCount === 0) {
-    throw new Error('Item not found or no changes made');
-  }
-  
-  const updatedItem = await Inventory.findById(itemId).lean();
-  return { 
-    success: true, 
-    itemId, 
-    itemName: updatedItem.name,
-    category: updatedItem.category,
-    changes: updateFields,
-    newStock: updatedItem.stock,
-    newPrice: updatedItem.price
-  };
 };
 
-// ✅ GET methods only need cooperativeId
-const getMilkHistory = async (cooperativeId) => {
-  const cooperative = await Cooperative.findById(cooperativeId);
-  if (!cooperative) throw new Error('Cooperative not found');
-  return RateVersion.find({ type: 'milk', cooperativeId: cooperative._id })
-    .sort({ effective_date: -1 });
+// ✅ FIXED: Use getAnalyticsLayer
+const getAnalytics = async (period = 'daily', cooperativeId) => {
+  try { return await analyticsLayer.getAnalyticsLayer(period, cooperativeId); }
+  catch (error) { 
+    logger.warn('Analytics failed', { error: error.message, coopId: cooperativeId, period });
+    return getDefaultAnalytics();
+  }
 };
 
-// Get inventory categories WITH items grouped by category
-const getInventoryCategories = async (cooperativeId) => {
-  const cooperative = await Cooperative.findById(cooperativeId);
-  if (!cooperative) throw new Error('Cooperative not found');
-  
-  return await Inventory.aggregate([
-    { $match: { cooperativeId: cooperative._id } },
-    {
-      $group: {
-        _id: '$category',
-        items: {
-          $push: {
-            _id: '$_id',
-            name: '$name',
-            price: '$price',
-            stock: '$stock',
-            unit: '$unit',
-            threshold: '$threshold'
-          }
-        },
-        itemCount: { $sum: 1 },
-        avgPrice: { $avg: '$price' }
-      }
-    },
-    { $sort: { _id: 1 } }
-  ]);
+const getDevices = async (cooperativeId) => {
+  try { return await deviceLayer.getDevices(cooperativeId); }
+  catch (error) { 
+    logger.warn('Devices failed', { error: error.message, coopId: cooperativeId });
+    return getDefaultDevices();
+  }
 };
 
-// ✅ PROPER SERVICE
-const getCurrentPrices = async (cooperativeId) => {
-  const cooperative = await Cooperative.findById(cooperativeId);
-  if (!cooperative) throw new Error('Cooperative not found');
-  
-  const milkRate = await RateVersion.findOne({ 
-    type: 'milk', 
-    cooperativeId: cooperative._id 
-  })
-  .sort({ effective_date: -1 })
-  .lean();
-  
-  const categories = await Inventory.aggregate([
-    { $match: { cooperativeId: cooperative._id } },
-    {
-      $group: {
-        _id: '$category',
-        items: {
-          $push: {
-            _id: '$_id',
-            name: '$name',
-            price: '$price',
-            stock: '$stock',
-            unit: '$unit',
-            threshold: '$threshold'
-          }
-        },
-        itemCount: { $sum: 1 },
-        avgPrice: { $avg: '$price' }
-      }
-    },
-    { $sort: { _id: 1 } }
-  ]);
-  
-  return { 
-    milkRate, 
-    categories,
-    totalItems: categories.reduce((sum, cat) => sum + (cat.itemCount || 0), 0)
-  };
+const getAlerts = async (cooperativeId) => {
+  try { return await alertLayer.getAlerts(cooperativeId); }
+  catch (error) { 
+    logger.warn('Alerts failed', { error: error.message, coopId: cooperativeId });
+    return getDefaultAlerts();
+  }
 };
 
-module.exports = { 
-  updateMilkRate, 
-  updateInventoryCategory, 
-  getMilkHistory, 
-  getInventoryCategories, 
-  getCurrentPrices 
+const getInventory = async (cooperativeId) => {
+  try { return await inventoryLayer.getInventory(cooperativeId); }
+  catch (error) { 
+    logger.warn('Inventory failed', { error: error.message, coopId: cooperativeId });
+    return getDefaultInventory();
+  }
+};
+
+const getCEOStats = async (cooperativeId) => {
+  try { return await ceoStatsLayer.getCEOStats(cooperativeId); }
+  catch (error) { 
+    logger.warn('CEOStats failed', { error: error.message, coopId: cooperativeId });
+    return getDefaultCEOStats();
+  }
+};
+
+const getIntelligence = async (cooperativeId) => {
+  try { return await intelligenceLayer.getIntelligenceLayer(cooperativeId); }
+  catch (error) { 
+    logger.warn('Intelligence failed', { error: error.message, coopId: cooperativeId });
+    return getDefaultIntelligence();
+  }
+};
+
+const getSystemOverview = async (cooperativeId) => {
+  try { return await systemOverviewLayer.getSystemOverview(cooperativeId); }
+  catch (error) { 
+    logger.warn('SystemOverview failed', { error: error.message, coopId: cooperativeId });
+    return getDefaultSystemOverview();
+  }
+};
+
+const getTasks = async (cooperativeId) => {
+  try { return await taskLayer.getTasks(cooperativeId); }
+  catch (error) { 
+    logger.warn('Tasks failed', { error: error.message, coopId: cooperativeId });
+    return [];
+  }
+};
+
+// Enhanced overview
+const getCompleteOverview = async (period = 'daily', cooperativeId) => {
+  try {
+    const [summary, financial, analytics, devices, alerts, inventory] = await Promise.all([
+      getSummary(cooperativeId),
+      getFinancial(cooperativeId),
+      getAnalytics(period, cooperativeId),
+      getDevices(cooperativeId),
+      getAlerts(cooperativeId),
+      getInventory(cooperativeId)
+    ]);
+
+    return {
+      lastUpdated: new Date().toISOString(),
+      summary,
+      financial,
+      analytics,
+      devices,
+      alerts,
+      inventory
+    };
+  } catch (error) {
+    logger.error('Overview failed', { error: error.message, coopId: cooperativeId });
+    throw error;
+  }
+};
+
+// ─── Defaults ──────────────────────────────────────────────────
+const getDefaultSummary = () => ({ milkToday: 0, totalFarmers: 0, totalDevices: 0 });
+const getDefaultFinancial = () => ({ milkRevenue: 0, feedRevenue: 0 });
+const getDefaultAnalytics = () => ({
+  milkTrends: [],
+  porterPerformance: [],
+  zoneProduction: [],
+  topFarmer: null,
+  lowestProducer: null,
+  milkPrediction: null,
+  peakHours: [],
+  graphReady: {
+    milkTrendGraph: { labels: [], data: [], transactions: [] },
+    feedTrendGraph: { labels: [], data: [], revenue: [] },
+    farmerGrowthGraph: { labels: ['Previous', 'Current'], data: [0, 0] },
+    peakHours: [],
+  },
+});
+const getDefaultDevices = () => ({ health: [], summary: { totalDevices: 0 } });
+const getDefaultAlerts = () => ({ alerts: [], tasks: [] });
+const getDefaultInventory = () => ({ lowStock: [], stockoutRisk: [] });
+const getDefaultCEOStats = () => ({
+  kpis: { avgMilkPerFarmer: 0, growthVsYesterday: '0%', totalLitresToday: 0 },
+  zones: [],
+  branches: [],
+  milkQuality: { rejectedToday: 0, rejectedPercentage: '0%' },
+  payoutForecast: { estimatedAmount: 0, farmersToPay: 0 }
+});
+const getDefaultIntelligence = () => ({
+  financialIntelligence: {},
+  alerts: [],
+  predictions: { stockout: [], farmerDropout: [] },
+  sms: { smsSent: 0, deliveryRate: '0%' }
+});
+const getDefaultSystemOverview = () => ({
+  systemHealth: { healthScore: 0, status: 'unknown' },
+  todayMetrics: { transactionsToday: 0 },
+  totals: { totalFarmers: 0, totalDevices: 0 }
+});
+
+module.exports = {
+  getSummary,
+  getFinancial,
+  getAnalytics,
+  getDevices,
+  getAlerts,
+  getInventory,
+  getCEOStats,
+  getIntelligence,
+  getSystemOverview,
+  getTasks,
+  getCompleteOverview
 };
