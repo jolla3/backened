@@ -1,98 +1,133 @@
 const mongoose = require('mongoose');
 
-const outboundSmsSchema = new mongoose.Schema({
-  phone: {
-    type: String,
-    required: true,
-    index: true,
+const outboundSmsSchema = new mongoose.Schema(
+  {
+    phone: {
+      type: String,
+      required: true,
+      index: true,
+    },
+    message: {
+      type: String,
+      required: true,
+    },
+    from: {
+      type: String,
+    },
+    type: {
+      type: String,
+      enum: ['general', 'monthly_summary', 'feed_purchase', 'milk_receipt', 'custom'],
+      default: 'general',
+    },
+    priority: {
+      type: Number,
+      default: 0,
+    },
+    status: {
+      type: String,
+      enum: ['queued', 'processing', 'sent', 'failed', 'cancelled', 'expired'],
+      default: 'queued',
+      index: true,
+    },
+    cooperativeId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'Cooperative',
+      required: true,
+      index: true,
+    },
+    farmerId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'Farmer',
+    },
+    gatewayId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'SmsGateway',
+    },
+    retryCount: {
+      type: Number,
+      default: 0,
+    },
+    maxRetries: {
+      type: Number,
+      default: 3,
+    },
+    nextRetryAt: {
+      type: Date,
+      default: null,
+    },
+    expiresAt: {
+      type: Date,
+      default: null,
+    },
+    error: {
+      type: String,
+    },
+    providerResponse: {
+      type: mongoose.Schema.Types.Mixed,
+    },
+    processingStartedAt: {
+      type: Date,
+    },
+    sentAt: {
+      type: Date,
+    },
+    failedAt: {
+      type: Date,
+    },
+    metadata: {
+      type: mongoose.Schema.Types.Mixed,
+    },
+    idempotencyKey: {
+      type: String,
+      index: true,
+    },
   },
-  message: {
-    type: String,
-    required: true,
+  {
+    timestamps: {
+      createdAt: 'createdAt',
+      updatedAt: 'updatedAt',
+    },
+  }
+);
+
+// ─── Indexes ───────────────────────────────────────────────
+
+// 1. Unique idempotency key per cooperative (critical for race safety)
+outboundSmsSchema.index(
+  {
+    cooperativeId: 1,
+    idempotencyKey: 1,
   },
-  from: {
-    type: String,
-  },
-  type: {
-    type: String,
-    enum: ['general', 'monthly_summary', 'feed_purchase', 'milk_receipt', 'custom'],
-    default: 'general',
-  },
-  priority: {
-    type: Number,
-    default: 0,
-  },
-  status: {
-    type: String,
-    enum: ['queued', 'processing', 'sent', 'failed', 'cancelled', 'expired'],
-    default: 'queued',
-    index: true,
-  },
-  cooperativeId: {
-    type: mongoose.Schema.Types.ObjectId,
-    ref: 'Cooperative',
-    required: true,
-    index: true,
-  },
-  farmerId: {
-    type: mongoose.Schema.Types.ObjectId,
-    ref: 'Farmer',
-  },
-  gatewayId: {
-    type: mongoose.Schema.Types.ObjectId,
-    ref: 'SmsGateway',
-  },
-  retryCount: {
-    type: Number,
-    default: 0,
-  },
-  maxRetries: {
-    type: Number,
-    default: 3,
-  },
-  nextRetryAt: {
-    type: Date,
-    default: null,   // ✅ explicit default null for consistency
-  },
-  expiresAt: {
-    type: Date,
-    default: null,   // ✅ new field for job expiration
-  },
-  error: {
-    type: String,
-  },
-  providerResponse: {
-    type: mongoose.Schema.Types.Mixed,
-  },
-  processingStartedAt: {
-    type: Date,
-  },
-  sentAt: {
-    type: Date,
-  },
-  failedAt: {
-    type: Date,
-  },
-  metadata: {
-    type: mongoose.Schema.Types.Mixed,
-  },
-  createdAt: {
-    type: Date,
-    default: Date.now,
-    index: true,
-  },
-  updatedAt: {
-    type: Date,
-    default: Date.now,
-  },
+  {
+    unique: true,
+    partialFilterExpression: {
+      idempotencyKey: { $exists: true, $ne: null },
+    },
+  }
+);
+
+// 2. Main claim query index
+outboundSmsSchema.index({
+  cooperativeId: 1,
+  status: 1,
+  priority: -1,
+  createdAt: 1,
 });
 
-// Indexes
-outboundSmsSchema.index({ cooperativeId: 1, status: 1, priority: -1, createdAt: 1 });
-outboundSmsSchema.index({ status: 1, nextRetryAt: 1 });
-outboundSmsSchema.index({ phone: 1, createdAt: -1 });
-// Optional index for expiresAt if you query by it often
+// 3. Retry + expiration
+outboundSmsSchema.index({ nextRetryAt: 1 });
 outboundSmsSchema.index({ expiresAt: 1 });
 
+// 4. Phone lookups
+outboundSmsSchema.index({ phone: 1, createdAt: -1 });
+
+// 5. Optional TTL – auto-delete SMS older than 6 months
+// Uncomment if you don't need permanent audit history
+// outboundSmsSchema.index(
+//   { createdAt: 1 },
+//   { expireAfterSeconds: 60 * 60 * 24 * 180 } // 180 days
+// );
+
+// ─── Model ──────────────────────────────────────────────────
 const OutboundSms = mongoose.models.OutboundSms || mongoose.model('OutboundSms', outboundSmsSchema);
 module.exports = OutboundSms;
