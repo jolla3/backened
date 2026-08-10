@@ -21,7 +21,12 @@ const transactionSchema = new mongoose.Schema({
   timestamp_local: { type: Date, index: true },
   timestamp_server: { type: Date, default: Date.now, index: true },
 
-  idempotency_key: { type: String, unique: true, index: true },
+  // 🔒 Unique index on idempotency_key
+  idempotency_key: {
+    type: String,
+    unique: true,
+    index: true
+  },
   soft_delta: { type: Number, default: 0 },
 
   // ─── Transaction type ────────────────────────────────────
@@ -93,7 +98,7 @@ const transactionSchema = new mongoose.Schema({
 
 // ─── Indexes ──────────────────────────────────────────────────
 
-// Per‑farmer history by collection date
+// Per‑farmer history
 transactionSchema.index({ farmer_id: 1, collectionDate: -1 });
 
 // Per‑porter collection reports
@@ -106,24 +111,27 @@ transactionSchema.index({
   collectionShift: 1
 });
 
-// Auditing entries by creator
+// Auditing
 transactionSchema.index({ cooperativeId: 1, createdBy: 1, timestamp_server: -1 });
 
-// 🔒 UNIQUE CONSTRAINT: One milk entry per farmer per date + shift + porter
-// This enforces your business rule at the database level.
+// 🔒 Business‑rule uniqueness: one milk entry per farmer per date + shift
+// (porter_id is removed from the key – adjust if your rule includes porter)
 transactionSchema.index(
   {
     cooperativeId: 1,
     farmer_id: 1,
     collectionDate: 1,
     collectionShift: 1,
-    porter_id: 1,
   },
   {
     unique: true,
     partialFilterExpression: { type: 'milk' }
   }
 );
+
+// 🔒 idempotency_key is already marked `unique: true` above.
+// If you need to add it manually:
+// transactionSchema.index({ idempotency_key: 1 }, { unique: true });
 
 const Transaction = mongoose.models.Transaction || mongoose.model('Transaction', transactionSchema);
 module.exports = Transaction;

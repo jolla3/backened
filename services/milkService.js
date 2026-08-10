@@ -10,35 +10,23 @@ const { generateReceiptNum, generateServerSeqNum } = require('../services/transa
 const receiptFormatter = require('../utils/receiptFormatter');
 const smsService = require('./smsService');
 const logger = require('../utils/logger');
+const {
+  getKenyaDateString,
+  parseKenyaDate,
+  isValidDateString
+} = require('../utils/dateUtils');
 
-// ─── Helper: get current Kenya date as YYYY-MM-DD ──────────
-const getKenyaDateString = (date = new Date()) => {
-  return date.toLocaleDateString('en-CA', { timeZone: 'Africa/Nairobi' });
-};
-
-// ─── Helper: validate collection date ──────────────────────
-const COLLECTION_DATE_REGEX = /^\d{4}-\d{2}-\d{2}$/;
-
-const isValidCollectionDate = (dateString) => {
-  if (!COLLECTION_DATE_REGEX.test(dateString)) {
-    return false;
-  }
-  const [year, month, day] = dateString.split('-').map(Number);
-  const date = new Date(Date.UTC(year, month - 1, day));
-  return (
-    date.getUTCFullYear() === year &&
-    date.getUTCMonth() === month - 1 &&
-    date.getUTCDate() === day
-  );
-};
-
-// ─── Existing read functions ──────────────────────────────
+// ─── Read functions ──────────────────────────────────────────
 
 const getDailyTotal = async (cooperativeId, date = null) => {
   const cooperative = await Cooperative.findById(cooperativeId);
   if (!cooperative) throw new Error('Cooperative not found');
 
   const targetDate = date || getKenyaDateString();
+  if (!isValidDateString(targetDate)) {
+    throw new Error('Invalid date. Expected YYYY-MM-DD with a real date.');
+  }
+
   const result = await Transaction.aggregate([
     { $match: {
       type: 'milk',
@@ -59,6 +47,14 @@ const getDailyTotal = async (cooperativeId, date = null) => {
 const getMonthlySummary = async (year, month, cooperativeId) => {
   const cooperative = await Cooperative.findById(cooperativeId);
   if (!cooperative) throw new Error('Cooperative not found');
+
+  // Validate year/month
+  if (!Number.isInteger(year) || year < 2000 || year > 2100) {
+    throw new Error('Invalid year');
+  }
+  if (!Number.isInteger(month) || month < 1 || month > 12) {
+    throw new Error('Invalid month');
+  }
 
   const startDate = `${year}-${String(month).padStart(2,'0')}-01`;
   const lastDay = new Date(year, month, 0).getDate();
@@ -112,7 +108,7 @@ const addManualMilkEntry = async ({
       throw new Error('Valid litres value is required');
     }
     if (!collectionDate) throw new Error('collectionDate is required');
-    if (!isValidCollectionDate(collectionDate)) {
+    if (!isValidDateString(collectionDate)) {
       throw new Error('Invalid collection date. Expected YYYY-MM-DD with a real date.');
     }
     if (!collectionShift || !['AM', 'PM'].includes(collectionShift)) {
@@ -121,18 +117,13 @@ const addManualMilkEntry = async ({
     if (!createdBy) throw new Error('createdBy (user ID) is required');
 
     const litresNum = parseFloat(litres);
+    const collectionDateTime = parseKenyaDate(collectionDate);
 
-    // ── 2. Build Kenya‑local timestamp for legacy timestamp_local ──
-    const collectionDateTime = new Date(`${collectionDate}T00:00:00+03:00`);
-    if (isNaN(collectionDateTime.getTime())) {
-      throw new Error('Unable to parse collection date');
-    }
-
-    // ── 3. Validate cooperative ────────────────────────────
+    // ── 2. Validate cooperative ────────────────────────────
     const cooperative = await Cooperative.findById(cooperativeId).session(session);
     if (!cooperative) throw new Error('Cooperative not found');
 
-    // ── 4. Validate farmer ──────────────────────────────────
+    // ── 3. Validate farmer ──────────────────────────────────
     const farmer = await Farmer.findOne({
       _id: farmerId,
       cooperativeId: cooperative._id,
@@ -140,7 +131,7 @@ const addManualMilkEntry = async ({
     }).session(session);
     if (!farmer) throw new Error('Farmer not found or inactive');
 
-    // ── 5. Validate porter ──────────────────────────────────
+    // ── 4. Validate porter ──────────────────────────────────
     const porter = await Porter.findOne({
       _id: porterId,
       cooperativeId: cooperative._id,
@@ -148,7 +139,7 @@ const addManualMilkEntry = async ({
     }).session(session);
     if (!porter) throw new Error('Porter not found or inactive');
 
-    // ── 6. Get active milk rate at collection date ───────────
+    // ── 5. Get active milk rate at collection date ───────────
     const rateInfo = await RateVersion.findOne({
       cooperativeId: cooperative._id,
       type: 'milk',
@@ -160,26 +151,34 @@ const addManualMilkEntry = async ({
 
     const payout = parseFloat((litresNum * rateInfo.rate).toFixed(2));
 
-    // ── 7. Generate receipt numbers ────────────────────────
+    // ── 6. Generate receipt numbers ────────────────────────
     const receiptNum = await generateReceiptNum(session);
     const serverSeqNum = await generateServerSeqNum(cooperativeId, session);
 
-    // ── 8. Generate idempotency key ─────────────────────────
+    // ── 7. Generate business idempotency key ────────────────
+    // Business rule: one milk entry per farmer per date + shift
+    // (porter_id is intentionally omitted – adjust if needed)
     const idempotencyKey =
-      `manual:${cooperativeId}:${farmerId}:${collectionDate}:${collectionShift}:${porterId}`;
+      `manual:${cooperativeId}:${farmerId}:${collectionDate}:${collectionShift}`;
 
-    // ── 9. Check duplicate (with proper error) ──────────────
+    // ── 8. Attempt to create transaction ────────────────────
+    // The application-level duplicate check (findOne) is optional but helpful for a friendly error.
+    // However, we rely on the unique index as the ultimate authority.
+    // To avoid a race, we skip findOne and handle 11000 directly.
+    // But we keep findOne for a more user-friendly message (still prone to race).
+    // We'll combine both: findOne for user-friendly check, then insert.
+
     const existing = await Transaction.findOne({ idempotency_key: idempotencyKey }).session(session);
     if (existing) {
       const error = new Error(
-        `Milk already recorded for ${farmer.name} on ${collectionDate} (${collectionShift}) by ${porter.name}`
+        `Milk already recorded for ${farmer.name} on ${collectionDate} (${collectionShift})`
       );
       error.code = 'DUPLICATE_MILK_ENTRY';
       error.statusCode = 409;
       throw error;
     }
 
-    // ── 10. Create Transaction ─────────────────────────────
+    // ── 9. Create Transaction ─────────────────────────────
     const transactionData = {
       receipt_num: receiptNum,
       status: 'completed',
@@ -202,7 +201,22 @@ const addManualMilkEntry = async ({
       idempotency_key: idempotencyKey,
     };
 
-    const [transaction] = await Transaction.create([transactionData], { session });
+    // ── 10. Try insert, catch duplicate key error ────────
+    let transaction;
+    try {
+      [transaction] = await Transaction.create([transactionData], { session });
+    } catch (error) {
+      if (error.code === 11000) {
+        // Duplicate key error – translate to our business error
+        const dupError = new Error(
+          `Milk already recorded for this farmer on ${collectionDate} (${collectionShift})`
+        );
+        dupError.code = 'DUPLICATE_MILK_ENTRY';
+        dupError.statusCode = 409;
+        throw dupError;
+      }
+      throw error;
+    }
 
     // ── 11. Get previous balance ────────────────────────────
     const previousBalance = farmer.currentBalance || 0;
@@ -231,6 +245,9 @@ const addManualMilkEntry = async ({
     }], { session });
 
     // ── 13. Update Farmer balance ──────────────────────────
+    // ⚠️ Atomicity: updateFarmerBalance should be safe if called within the same session.
+    // But to be bulletproof, we could use findOneAndUpdate with version check.
+    // We'll keep it as is for now, assuming session isolation.
     await updateFarmerBalance(farmer._id, newBalance, ledgerEntry._id, session);
 
     // ── 14. Update Porter totals ──────────────────────────
@@ -261,8 +278,8 @@ const addManualMilkEntry = async ({
           litres: litresNum,
           payout,
           walletBalance: newBalance,
-          transactionDate: collectionDateTime,
-          createdAt: new Date()
+          collectionDate,                     // business date
+          transactionDate: transaction.timestamp_server // system entry timestamp
         };
         receipt = receiptFormatter.formatMilkReceipt(receiptData);
 
@@ -311,13 +328,20 @@ const addManualMilkEntry = async ({
   } catch (error) {
     await session.abortTransaction();
     session.endSession();
-    // Re-throw the error with its code intact
+
+    // If error is already a DUPLICATE_MILK_ENTRY, rethrow it
+    if (error.code === 'DUPLICATE_MILK_ENTRY') {
+      throw error;
+    }
+
+    // Otherwise, log and rethrow
+    logger.error('Manual milk entry failed', { error: error.message });
     throw error;
   }
 };
 
 module.exports = {
-  getKenyaDateString,
+  getKenyaDateString, // for other modules if needed
   getDailyTotal,
   getMonthlySummary,
   addManualMilkEntry

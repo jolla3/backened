@@ -9,20 +9,22 @@ const Ledger = require('../../models/ledger');
 const Inventory = require('../../models/inventory');
 const Settlement = require('../../models/settlement');
 const logger = require('../../utils/logger');
+const { getKenyaDateString, isValidDateString } = require('../../utils/dateUtils');
 
 const getSummary = async (cooperativeId) => {
   try {
     const cooperative = await Cooperative.findById(cooperativeId);
     if (!cooperative) throw new Error('Cooperative not found');
 
-    const now = new Date();
-    const today = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 0, 0, 0, 0);
-    const yesterday = new Date(today);
-    yesterday.setDate(yesterday.getDate() - 1);
-    const lastWeek = new Date(today);
-    lastWeek.setDate(lastWeek.getDate() - 7);
-    const lastMonth = new Date(today);
-    lastMonth.setMonth(lastMonth.getMonth() - 1);
+    // ─── Business dates (Kenya time) ────────────────────────────
+    const todayStr = getKenyaDateString();
+    const yesterdayStr = getKenyaDateString(new Date(Date.now() - 86400000));
+    const lastWeekDate = new Date();
+    lastWeekDate.setDate(lastWeekDate.getDate() - 7);
+    const lastWeekStr = getKenyaDateString(lastWeekDate);
+    const lastMonthDate = new Date();
+    lastMonthDate.setMonth(lastMonthDate.getMonth() - 1);
+    const lastMonthStr = getKenyaDateString(lastMonthDate);
 
     // ─── 1. Milk volumes ──────────────────────────────────────────
     const milkVolumes = await Transaction.aggregate([
@@ -30,29 +32,29 @@ const getSummary = async (cooperativeId) => {
         $match: {
           type: 'milk',
           cooperativeId: cooperative._id,
-          timestamp_server: { $gte: lastMonth },
+          collectionDate: { $gte: lastMonthStr },
         },
       },
       {
         $facet: {
           today: [
-            { $match: { timestamp_server: { $gte: today } } },
+            { $match: { collectionDate: todayStr } },
             { $group: { _id: null, totalLitres: { $sum: '$litres' } } },
           ],
           yesterday: [
-            { $match: { timestamp_server: { $gte: yesterday, $lt: today } } },
+            { $match: { collectionDate: yesterdayStr } },
             { $group: { _id: null, totalLitres: { $sum: '$litres' } } },
           ],
           week: [
-            { $match: { timestamp_server: { $gte: lastWeek } } },
+            { $match: { collectionDate: { $gte: lastWeekStr } } },
             { $group: { _id: null, totalLitres: { $sum: '$litres' } } },
           ],
           month: [
-            { $match: { timestamp_server: { $gte: lastMonth } } },
+            { $match: { collectionDate: { $gte: lastMonthStr } } },
             { $group: { _id: null, totalLitres: { $sum: '$litres' } } },
           ],
           bestDay: [
-            { $group: { _id: { $dateToString: { format: '%Y-%m-%d', date: '$timestamp_server' } }, totalLitres: { $sum: '$litres' } } },
+            { $group: { _id: '$collectionDate', totalLitres: { $sum: '$litres' } } },
             { $sort: { totalLitres: -1 } },
             { $limit: 1 },
           ],
@@ -67,19 +69,19 @@ const getSummary = async (cooperativeId) => {
     const monthLitres = result.month?.[0]?.totalLitres || 0;
     const bestDayThisMonth = result.bestDay?.[0]?.totalLitres || 0;
 
-    // ─── 2. Active farmers ────────────────────────────────────────
+    // ─── 2. Active farmers (based on collection date) ──────────
     const activeFarmerIds = await Transaction.distinct('farmer_id', {
       cooperativeId: cooperative._id,
       type: 'milk',
-      timestamp_server: { $gte: today },
+      collectionDate: todayStr,
     });
     const activeFarmersToday = activeFarmerIds.length;
 
-    // ─── 3. Today's transactions ──────────────────────────────────
+    // ─── 3. Today's transactions (business date) ──────────────
     const transactionsToday = await Transaction.countDocuments({
       cooperativeId: cooperative._id,
       type: 'milk',
-      timestamp_server: { $gte: today },
+      collectionDate: todayStr,
     });
 
     // ─── 4. Total farmers, porters, devices ──────────────────────
@@ -97,7 +99,7 @@ const getSummary = async (cooperativeId) => {
     const branches = new Set(farmers.map(f => f.branch_id || 'main'));
     const activeBranches = branches.size;
 
-    // ─── 5. Financial from Ledger ──────────────────────────────────
+    // ─── 5. Financial from Ledger (uses server timestamp for audit) ──
     const [latestBalances, todayLedger, feedRevenue, pendingSettlements] = await Promise.all([
       Ledger.aggregate([
         { $match: { cooperativeId: cooperative._id } },
@@ -108,7 +110,7 @@ const getSummary = async (cooperativeId) => {
         {
           $match: {
             cooperativeId: cooperative._id,
-            timestamp: { $gte: today },
+            timestamp: { $gte: new Date(new Date().setHours(0, 0, 0, 0)) },
           },
         },
         {
@@ -118,12 +120,13 @@ const getSummary = async (cooperativeId) => {
           },
         },
       ]),
+      // Feed revenue based on business date (collectionDate)
       Transaction.aggregate([
         {
           $match: {
             type: 'feed',
             cooperativeId: cooperative._id,
-            timestamp_server: { $gte: lastMonth },
+            collectionDate: { $gte: lastMonthStr },
           },
         },
         { $group: { _id: null, total: { $sum: '$cost' } } },
@@ -154,7 +157,7 @@ const getSummary = async (cooperativeId) => {
     const avgPayout = farmersToPay > 0 ? farmerLiability / farmersToPay : 0;
     const avgDebt = farmersInDebt > 0 ? farmerDebt / farmersInDebt : 0;
 
-    // ─── Today's ledger movements ──────────────────────────────────
+    // ─── Today's ledger movements (server timestamp) ────────────
     const milkCreditsToday = todayLedger.find(l => l._id === 'MILK_CREDIT')?.total || 0;
     const feedDebitsToday = todayLedger.find(l => l._id === 'FEED_DEBIT')?.total || 0;
     const settlementDebitsToday = todayLedger.find(l => l._id === 'SETTLEMENT_DEBIT')?.total || 0;

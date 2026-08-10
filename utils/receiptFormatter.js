@@ -1,6 +1,5 @@
 // utils/receiptFormatter.js
 // Pure dumb formatter – no validation, no business logic, no state.
-// Receives raw data, returns SMS and printable strings.
 
 const SEPARATOR = '='.repeat(40);
 
@@ -11,20 +10,18 @@ const formatCurrency = (amount) => {
 const formatDate = (date) => {
   const d = new Date(date);
   if (isNaN(d.getTime())) {
-    throw new Error('Invalid transaction date');
+    throw new Error('Invalid date');
   }
-  const months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
-  const day = String(d.getDate()).padStart(2,'0');
-  const month = months[d.getMonth()];
-  const year = d.getFullYear();
-  let hours = d.getHours();
-  const minutes = String(d.getMinutes()).padStart(2,'0');
-  const ampm = hours >= 12 ? 'PM' : 'AM';
-  hours = hours % 12 || 12;
-  return `${day} ${month} ${year} ${hours}:${minutes} ${ampm}`;
+  return new Intl.DateTimeFormat('en-KE', {
+    timeZone: 'Africa/Nairobi',
+    day: '2-digit',
+    month: 'short',
+    year: 'numeric',
+    hour: 'numeric',
+    minute: '2-digit',
+    hour12: true,
+  }).format(d);
 };
-
-// ─── Shared header ─────────────────────────────────────────
 
 const buildHeader = ({ cooperativeName, receiptNumber, farmerName, farmerCode, title }) => {
   return [
@@ -39,8 +36,6 @@ const buildHeader = ({ cooperativeName, receiptNumber, farmerName, farmerCode, t
   ];
 };
 
-// ─── Milk receipt ──────────────────────────────────────────
-
 const formatMilkReceipt = ({
   cooperativeName,
   receiptNumber,
@@ -49,6 +44,7 @@ const formatMilkReceipt = ({
   litres,
   payout,
   walletBalance,
+  collectionDate,
   transactionDate,
 }) => {
   const header = buildHeader({
@@ -63,12 +59,16 @@ const formatMilkReceipt = ({
     `Milk Delivered: ${Number(litres).toFixed(1)} L`,
     `Amount Earned: ${formatCurrency(payout)}`,
     '',
-    `Delivered At: ${formatDate(transactionDate)}`,
+    `Collection Date: ${collectionDate}`,
   ];
+
+  const auditLine = transactionDate ? [`Recorded At: ${formatDate(transactionDate)}`] : [];
 
   const footer = [
     '',
     `Wallet Balance: ${formatCurrency(walletBalance)}`,
+    '',
+    ...auditLine,
     '',
     'Thank you.',
   ];
@@ -94,7 +94,7 @@ const formatFeedReceipt = ({
   farmerName,
   farmerCode,
   paymentMethod,
-  items,          // [{ productName, quantity, unit, category, unitPrice, lineTotal }]
+  items,
   total,
   walletBalance,
   transactionDate,
@@ -107,12 +107,8 @@ const formatFeedReceipt = ({
     title: 'FEED PURCHASE RECEIPT',
   });
 
-  const paymentLabel = paymentMethod === 'balance'
-    ? 'Farmer Balance'
-    : 'Cash';
+  const paymentLabel = paymentMethod === 'balance' ? 'Farmer Balance' : 'Cash';
 
-  // ── Build item lines for SMS and printable ──
-  // Each item: "2 x Dairy Meal (Feed) @ KES 3,500 = KES 7,000"
   const itemLines = items.map(item => {
     const qtyLabel = item.unit
       ? `${item.quantity} ${item.unit} ${item.productName}`
@@ -123,12 +119,7 @@ const formatFeedReceipt = ({
     return `${qtyLabel}${categoryPart} @ ${unitPriceStr} = ${totalStr}`;
   });
 
-  // For printable, we might want to indent the line total, but we'll keep it simple.
-  // For SMS, we put each item on its own line, no extra blank lines between.
-  // The SMS body will have items separated by newline only.
-
   const smsItems = itemLines.join('\n');
-
   const smsBody = [
     `Payment: ${paymentLabel}`,
     '',
@@ -137,9 +128,7 @@ const formatFeedReceipt = ({
     `TOTAL: ${formatCurrency(total)}`,
   ];
 
-  // Printable: same items, but indented slightly for readability
   const printableItems = itemLines.map(line => `  ${line}`).join('\n');
-
   const printableBody = [
     `Payment: ${paymentLabel}`,
     '',
@@ -152,7 +141,7 @@ const formatFeedReceipt = ({
     '',
     `Wallet Balance: ${formatCurrency(walletBalance)}`,
     '',
-    `Purchased At: ${formatDate(transactionDate)}`,
+    `Transaction Date: ${formatDate(transactionDate)}`,
     '',
     'Thank you.',
   ];

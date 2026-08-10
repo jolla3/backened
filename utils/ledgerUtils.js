@@ -5,13 +5,15 @@ const Farmer = require('../models/farmer');
  * Update a farmer's current balance and last ledger reference.
  * This is the ONLY function that should modify Farmer.currentBalance.
  */
-const updateFarmerBalance = async (farmerId, newBalance, ledgerId) => {
-  await Farmer.findByIdAndUpdate(farmerId, {
-    currentBalance: newBalance,
-    lastLedgerId: ledgerId
-  });
+// utils/ledgerUtils.js
+const updateFarmerBalance = async (farmerId, newBalance, ledgerId, session = null) => {
+  const update = { currentBalance: newBalance, lastLedgerId: ledgerId };
+  if (session) {
+    await Farmer.findByIdAndUpdate(farmerId, update, { session });
+  } else {
+    await Farmer.findByIdAndUpdate(farmerId, update);
+  }
 };
-
 /**
  * Recalculate all farmer balances from the latest ledger entry.
  * Use this as a migration script.

@@ -6,20 +6,26 @@ const Device = require('../../models/device');
 const RateVersion = require('../../models/rateVersion');
 const Cooperative = require('../../models/cooperative');
 const logger = require('../../utils/logger');
+const { getKenyaDateString, isValidDateString } = require('../../utils/dateUtils');
 
+/**
+ * Get system overview dashboard data.
+ * Uses collectionDate for business date (when milk/feed was actually collected/purchased).
+ * Uses timestamp_server for system audit events (device online, failures).
+ */
 const getSystemOverview = async (cooperativeId) => {
   try {
     const cooperative = await Cooperative.findById(cooperativeId);
     if (!cooperative) throw new Error('Cooperative not found');
 
-    const today = new Date();
-    today.setHours(0, 0, 0, 0);
-    const yesterday = new Date(today);
-    yesterday.setDate(yesterday.getDate() - 1);
-    const lastWeek = new Date(today);
-    lastWeek.setDate(lastWeek.getDate() - 7);
+    // ── Business date (Kenya time) ──────────────────────────
+    const todayStr = getKenyaDateString();
+    const yesterdayStr = getKenyaDateString(new Date(Date.now() - 86400000));
+    const lastWeekDate = new Date();
+    lastWeekDate.setDate(lastWeekDate.getDate() - 7);
+    const lastWeekStr = getKenyaDateString(lastWeekDate);
 
-    // Get totals
+    // ── Totals ────────────────────────────────────────────────
     const [totalFarmers, totalPorters, totalProducts, totalRates, totalDevices] = await Promise.all([
       Farmer.countDocuments({ cooperativeId: cooperative._id }),
       Porter.countDocuments({ cooperativeId: cooperative._id }),
@@ -28,40 +34,47 @@ const getSystemOverview = async (cooperativeId) => {
       Device.countDocuments({ cooperativeId: cooperative._id, revoked: false })
     ]);
 
-    // Low stock alerts
+    // ── Low stock alerts ──────────────────────────────────────
     const lowStockAlerts = await Inventory.countDocuments({
       cooperativeId: cooperative._id,
       $expr: { $lte: ['$stock', '$threshold'] }
     });
 
-    // Today's metrics
-    const todayMetrics = await getTodayMetrics(cooperative, today);
-    
-    // Yesterday's metrics for comparison
-    const yesterdayMetrics = await getTodayMetrics(cooperative, yesterday);
-    
-    // Device online status (seen in last 24h)
+    // ── Today's metrics (business date) ──────────────────────
+    const todayMetrics = await getTodayMetrics(cooperative._id, todayStr);
+
+    // ── Yesterday's metrics for comparison ──────────────────
+    const yesterdayMetrics = await getTodayMetrics(cooperative._id, yesterdayStr);
+
+    // ── Device online status (system time) ──────────────────
     const devicesOnline = await Device.countDocuments({
       cooperativeId: cooperative._id,
       last_seen: { $gte: new Date(Date.now() - 24 * 3600000) }
     });
-    
-    // Transaction success rate (based on status field, if exists; otherwise assume all completed)
-    // We'll check if there's a status field with 'failed'. If not, we assume all succeeded.
+
+    // ── Failed transactions today (system time) ─────────────
+    const startOfDay = new Date();
+    startOfDay.setHours(0, 0, 0, 0);
     const failedTransactionsToday = await Transaction.countDocuments({
       cooperativeId: cooperative._id,
-      timestamp_server: { $gte: today },
+      timestamp_server: { $gte: startOfDay },
       status: 'failed'
     });
+
     const successRate = todayMetrics.transactionsToday > 0
       ? ((todayMetrics.transactionsToday - failedTransactionsToday) / todayMetrics.transactionsToday) * 100
       : 100;
 
-    // Milk quality: assumed from any 'rejected' flag; if not present, we can skip or use zero.
-    // For now, we'll query if there's a 'quality' field or assume all accepted.
-    // Could also use a separate rejection collection.
+    // ── Milk quality (rejection rate for today's business date) ──
     const rejectedMilk = await Transaction.aggregate([
-      { $match: { type: 'milk', cooperativeId: cooperative._id, timestamp_server: { $gte: today }, status: 'rejected' } },
+      {
+        $match: {
+          type: 'milk',
+          cooperativeId: cooperative._id,
+          collectionDate: todayStr,
+          status: 'rejected'
+        }
+      },
       { $group: { _id: null, totalLitres: { $sum: '$litres' } } }
     ]);
     const rejectedLitres = rejectedMilk[0]?.totalLitres || 0;
@@ -69,7 +82,7 @@ const getSystemOverview = async (cooperativeId) => {
       ? (rejectedLitres / todayMetrics.milkToday.litres) * 100
       : 0;
 
-    // Health score calculation
+    // ── Health score ──────────────────────────────────────────
     const healthScore = calculateHealthScore({
       totalTransactions: todayMetrics.transactionsToday,
       lowStock: lowStockAlerts,
@@ -81,7 +94,7 @@ const getSystemOverview = async (cooperativeId) => {
       yesterdayTransactions: yesterdayMetrics.transactionsToday
     });
 
-    // System issues
+    // ── System issues ────────────────────────────────────────
     const issues = getSystemIssues({
       lowStock: lowStockAlerts,
       totalDevices,
@@ -97,7 +110,7 @@ const getSystemOverview = async (cooperativeId) => {
         healthScore,
         status: healthScore >= 80 ? 'healthy' : healthScore >= 60 ? 'warning' : 'critical',
         totalTransactions: todayMetrics.transactionsToday,
-        pendingTransactions: 0, // would need status field
+        pendingTransactions: 0,
         failedTransactions: failedTransactionsToday,
         totalFarmers,
         totalPorters,
@@ -121,11 +134,14 @@ const getSystemOverview = async (cooperativeId) => {
   }
 };
 
-const getTodayMetrics = async (cooperative, date) => {
-  const start = new Date(date);
-  start.setHours(0, 0, 0, 0);
-  const end = new Date(start);
-  end.setDate(end.getDate() + 1);
+/**
+ * Get metrics for a specific business date (YYYY-MM-DD).
+ * Uses collectionDate for milk and feed transactions.
+ */
+const getTodayMetrics = async (cooperativeId, dateStr) => {
+  if (!isValidDateString(dateStr)) {
+    throw new Error(`Invalid date string: ${dateStr}`);
+  }
 
   const [
     transactionsToday,
@@ -135,21 +151,69 @@ const getTodayMetrics = async (cooperative, date) => {
     portersToday,
     devicesToday
   ] = await Promise.all([
+    // Total transactions on this business date (milk + feed)
     Transaction.countDocuments({
-      cooperativeId: cooperative._id,
-      timestamp_server: { $gte: start, $lt: end }
+      cooperativeId,
+      collectionDate: dateStr
     }),
+    // Milk aggregation
     Transaction.aggregate([
-      { $match: { type: 'milk', cooperativeId: cooperative._id, timestamp_server: { $gte: start, $lt: end } } },
-      { $group: { _id: null, totalLitres: { $sum: { $ifNull: ['$litres', 0] } }, totalPayout: { $sum: { $ifNull: ['$payout', 0] } } } }
+      {
+        $match: {
+          type: 'milk',
+          cooperativeId,
+          collectionDate: dateStr
+        }
+      },
+      {
+        $group: {
+          _id: null,
+          totalLitres: { $sum: { $ifNull: ['$litres', 0] } },
+          totalPayout: { $sum: { $ifNull: ['$payout', 0] } }
+        }
+      }
     ]),
+    // Feed aggregation
     Transaction.aggregate([
-      { $match: { type: 'feed', cooperativeId: cooperative._id, timestamp_server: { $gte: start, $lt: end } } },
-      { $group: { _id: null, totalQuantity: { $sum: { $ifNull: ['$quantity', 0] } }, totalCost: { $sum: { $ifNull: ['$cost', 0] } } } }
+      {
+        $match: {
+          type: 'feed',
+          cooperativeId,
+          collectionDate: dateStr
+        }
+      },
+      {
+        $group: {
+          _id: null,
+          totalQuantity: { $sum: { $ifNull: ['$quantity', 0] } },
+          totalCost: { $sum: { $ifNull: ['$cost', 0] } }
+        }
+      }
     ]),
-    Farmer.countDocuments({ cooperativeId: cooperative._id, createdAt: { $gte: start, $lt: end } }),
-    Porter.countDocuments({ cooperativeId: cooperative._id, createdAt: { $gte: start, $lt: end } }),
-    Device.countDocuments({ cooperativeId: cooperative._id, last_seen: { $gte: start, $lt: end } })
+    // New farmers registered on that business date (using createdAt for registration)
+    Farmer.countDocuments({
+      cooperativeId,
+      createdAt: {
+        $gte: new Date(`${dateStr}T00:00:00+03:00`),
+        $lt: new Date(`${dateStr}T23:59:59+03:00`)
+      }
+    }),
+    // New porters registered on that business date
+    Porter.countDocuments({
+      cooperativeId,
+      createdAt: {
+        $gte: new Date(`${dateStr}T00:00:00+03:00`),
+        $lt: new Date(`${dateStr}T23:59:59+03:00`)
+      }
+    }),
+    // Devices active on that business date (using last_seen)
+    Device.countDocuments({
+      cooperativeId,
+      last_seen: {
+        $gte: new Date(`${dateStr}T00:00:00+03:00`),
+        $lt: new Date(`${dateStr}T23:59:59+03:00`)
+      }
+    })
   ]);
 
   return {
@@ -168,6 +232,7 @@ const getTodayMetrics = async (cooperative, date) => {
   };
 };
 
+// ─── Health score calculation ────────────────────────────────
 const calculateHealthScore = ({
   totalTransactions,
   lowStock,
@@ -180,33 +245,26 @@ const calculateHealthScore = ({
 }) => {
   let score = 100;
 
-  // Activity weight: 30% (if zero transactions today, heavy penalty)
   if (totalTransactions === 0) score -= 30;
   else if (totalTransactions < 10) score -= 10;
   else if (totalTransactions < 50) score -= 5;
 
-  // Transaction success rate: 20%
   if (successRate < 80) score -= 20;
   else if (successRate < 95) score -= 10;
 
-  // Low stock: 15%
   if (lowStock > 5) score -= 15;
   else if (lowStock > 0) score -= Math.min(15, lowStock * 2);
 
-  // Device coverage: 15% (if no devices, heavy penalty)
   if (totalDevices === 0) score -= 15;
   else if (devicesOnline === 0) score -= 10;
   else if (devicesOnline / totalDevices < 0.5) score -= 5;
 
-  // Farmer base: 10% (if no farmers, heavy penalty)
   if (totalFarmers === 0) score -= 10;
   else if (totalFarmers < 5) score -= 5;
 
-  // Milk quality: 10% (if rejection rate > 5%, penalty)
   if (milkQuality > 10) score -= 10;
   else if (milkQuality > 5) score -= 5;
 
-  // Trend: if today's transactions are significantly lower than yesterday, penalty
   if (yesterdayTransactions > 0 && totalTransactions < yesterdayTransactions * 0.5) {
     score -= 10;
   }
@@ -214,6 +272,7 @@ const calculateHealthScore = ({
   return Math.max(0, Math.min(100, score));
 };
 
+// ─── System issues ────────────────────────────────────────────
 const getSystemIssues = ({
   lowStock,
   totalDevices,
@@ -252,6 +311,7 @@ const getSystemIssues = ({
   return issues;
 };
 
+// ─── Default fallback ─────────────────────────────────────────
 const getDefaultSystemOverview = () => ({
   systemHealth: {
     healthScore: 0,
