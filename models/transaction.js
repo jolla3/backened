@@ -17,6 +17,7 @@ const transactionSchema = new mongoose.Schema({
   },
   server_seq_num: { type: String },
 
+  // ─── Legacy timestamps ──────────────────────────────────
   timestamp_local: { type: Date, index: true },
   timestamp_server: { type: Date, default: Date.now, index: true },
 
@@ -57,6 +58,12 @@ const transactionSchema = new mongoose.Schema({
   zone: { type: String, trim: true, index: true },
 
   // ─── Collection information ─────────────────────────────
+  collectionDate: {
+    type: String,
+    required: true,
+    index: true,
+    match: /^\d{4}-\d{2}-\d{2}$/
+  },
   collectionShift: {
     type: String,
     enum: ['AM', 'PM'],
@@ -64,6 +71,7 @@ const transactionSchema = new mongoose.Schema({
     index: true
   },
 
+  // ─── Audit ──────────────────────────────────────────────
   createdBy: {
     type: mongoose.Schema.Types.ObjectId,
     ref: 'User',
@@ -83,22 +91,39 @@ const transactionSchema = new mongoose.Schema({
   updatedAt: { type: Date, default: Date.now }
 }, { timestamps: true });
 
-// ─── Optimized indexes ──────────────────────────────────
-// For per‑farmer history
-transactionSchema.index({ farmer_id: 1, timestamp_local: -1 });
-// For per‑porter collection reports
-transactionSchema.index({ porter_id: 1, timestamp_local: -1 });
-// For cooperative‑wide reports by date and shift
+// ─── Indexes ──────────────────────────────────────────────────
+
+// Per‑farmer history by collection date
+transactionSchema.index({ farmer_id: 1, collectionDate: -1 });
+
+// Per‑porter collection reports
+transactionSchema.index({ porter_id: 1, collectionDate: -1 });
+
+// Cooperative‑wide reports by date and shift
 transactionSchema.index({
   cooperativeId: 1,
-  timestamp_local: -1,
+  collectionDate: 1,
   collectionShift: 1
 });
-// For auditing entries by creator (optional, but useful)
+
+// Auditing entries by creator
 transactionSchema.index({ cooperativeId: 1, createdBy: 1, timestamp_server: -1 });
 
-// The separate index on cooperativeId + timestamp_local is
-// covered by the compound index above (prefix), so removed.
+// 🔒 UNIQUE CONSTRAINT: One milk entry per farmer per date + shift + porter
+// This enforces your business rule at the database level.
+transactionSchema.index(
+  {
+    cooperativeId: 1,
+    farmer_id: 1,
+    collectionDate: 1,
+    collectionShift: 1,
+    porter_id: 1,
+  },
+  {
+    unique: true,
+    partialFilterExpression: { type: 'milk' }
+  }
+);
 
 const Transaction = mongoose.models.Transaction || mongoose.model('Transaction', transactionSchema);
 module.exports = Transaction;
