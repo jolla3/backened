@@ -6,7 +6,7 @@
 
     // Farmer  Lookup (no auth needed for lookup)
     // routes/posRoutes.js (add this route)
-    router.get('/search',  posController.searchFarmers);
+    router.get('/search', authMiddleware, posController.searchFarmers);
     // Milk Transaction Recording (Requires Device Auth)
     router.post('/milk', deviceMiddleware, posController.recordMilkTransaction);
 
