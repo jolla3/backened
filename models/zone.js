@@ -4,7 +4,6 @@ const mongoose = require('mongoose');
 const zoneSchema = new mongoose.Schema({
   name: {
     type: String,
-    required: true,
     unique: true,
     trim: true,
     index: true,
@@ -14,7 +13,6 @@ const zoneSchema = new mongoose.Schema({
   cooperativeId: {
     type: mongoose.Schema.Types.ObjectId,
     ref: 'Cooperative',
-    required: true,
     index: true,
   },
   // Geo location (optional)
