@@ -1,4 +1,3 @@
-// services/posService.js
 const mongoose = require('mongoose');
 const crypto = require('crypto');
 const Transaction = require('../models/transaction');
@@ -79,19 +78,16 @@ class POSAnalytics {
     this.cooperativeId = cooperativeId;
     this.baseMatch = { type: 'milk' };
     if (this.cooperativeId) {
-      // Ensure it's a valid ObjectId
       try {
         this.baseMatch.cooperativeId = new mongoose.Types.ObjectId(this.cooperativeId);
       } catch (err) {
         logger.warn('Invalid cooperativeId provided to POSAnalytics', { cooperativeId: this.cooperativeId });
-        // Fallback: try to use as string, but MongoDB will fail if invalid
         this.baseMatch.cooperativeId = this.cooperativeId;
       }
     }
   }
 
   // ─── 1. PORTER PERFORMANCE ────────────────────────────
-  // ✅ ZONE-RELATED: collects zones in stats, groups by zone for breakdown
   async getPorterPerformance(porterId, period = 'today') {
     const porter = await Porter.findById(porterId).lean();
     if (!porter) throw new Error('Porter not found');
@@ -112,7 +108,7 @@ class POSAnalytics {
           transactionCount: { $sum: 1 },
           avgLitres: { $avg: '$litres' },
           uniqueFarmers: { $addToSet: '$farmer_id' },
-          zones: { $addToSet: '$zone' }, // ✅ ZONE
+          zones: { $addToSet: '$zone' },
         },
       },
       {
@@ -142,7 +138,7 @@ class POSAnalytics {
       { $match: match },
       {
         $group: {
-          _id: '$zone', // ✅ ZONE
+          _id: '$zone',
           litres: { $sum: '$litres' },
           count: { $sum: 1 },
         },
@@ -178,130 +174,121 @@ class POSAnalytics {
   }
 
   // ─── 2. DAILY SUMMARY ──────────────────────────────────
- async getDailySummary(date = new Date()) {
-  // Parse date as UTC to avoid timezone issues
-  const target = DATE_UTILS.getStartOfDay(date);
-  const nextDay = new Date(target);
-  nextDay.setUTCDate(nextDay.getUTCDate() + 1);
+  async getDailySummary(date = new Date()) {
+    const target = DATE_UTILS.getStartOfDay(date);
+    const nextDay = new Date(target);
+    nextDay.setUTCDate(nextDay.getUTCDate() + 1);
 
-  const match = {
-    ...this.baseMatch,
-    timestamp_server: { $gte: target, $lt: nextDay },
-  };
+    const match = {
+      ...this.baseMatch,
+      timestamp_server: { $gte: target, $lt: nextDay },
+    };
 
-  // 1. Summary aggregation
-  const [daily] = await Transaction.aggregate([
-    { $match: match },
-    {
-      $group: {
-        _id: null,
-        totalLitres: { $sum: '$litres' },
-        transactionCount: { $sum: 1 },
-        activeFarmers: { $addToSet: '$farmer_id' },
-        zones: { $addToSet: '$zone' },
+    const [daily] = await Transaction.aggregate([
+      { $match: match },
+      {
+        $group: {
+          _id: null,
+          totalLitres: { $sum: '$litres' },
+          transactionCount: { $sum: 1 },
+          activeFarmers: { $addToSet: '$farmer_id' },
+          zones: { $addToSet: '$zone' },
+        },
       },
-    },
-    {
-      $project: {
-        totalLitres: 1,
-        transactionCount: 1,
-        activeFarmersCount: { $size: '$activeFarmers' },
-        zones: 1,
+      {
+        $project: {
+          totalLitres: 1,
+          transactionCount: 1,
+          activeFarmersCount: { $size: '$activeFarmers' },
+          zones: 1,
+        },
       },
-    },
-  ]);
+    ]);
 
-  // 2. Previous day comparison
-  const prevDay = new Date(target);
-  prevDay.setUTCDate(prevDay.getUTCDate() - 1);
-  const prevMatch = {
-    ...this.baseMatch,
-    timestamp_server: { $gte: prevDay, $lt: target },
-  };
-  const [prev] = await Transaction.aggregate([
-    { $match: prevMatch },
-    { $group: { _id: null, totalLitres: { $sum: '$litres' }, count: { $sum: 1 } } },
-  ]);
+    const prevDay = new Date(target);
+    prevDay.setUTCDate(prevDay.getUTCDate() - 1);
+    const prevMatch = {
+      ...this.baseMatch,
+      timestamp_server: { $gte: prevDay, $lt: target },
+    };
+    const [prev] = await Transaction.aggregate([
+      { $match: prevMatch },
+      { $group: { _id: null, totalLitres: { $sum: '$litres' }, count: { $sum: 1 } } },
+    ]);
 
-  // 3. Hourly distribution
-  const hourly = await Transaction.aggregate([
-    { $match: match },
-    {
-      $group: {
-        _id: { $hour: { date: '$timestamp_server', timezone: 'UTC' } },
-        litres: { $sum: '$litres' },
-        count: { $sum: 1 },
+    const hourly = await Transaction.aggregate([
+      { $match: match },
+      {
+        $group: {
+          _id: { $hour: { date: '$timestamp_server', timezone: 'UTC' } },
+          litres: { $sum: '$litres' },
+          count: { $sum: 1 },
+        },
       },
-    },
-    { $sort: { _id: 1 } },
-  ]);
+      { $sort: { _id: 1 } },
+    ]);
 
-  // 4. Top zones
-  const topZones = await Transaction.aggregate([
-    { $match: match },
-    {
-      $group: {
-        _id: '$zone',
-        litres: { $sum: '$litres' },
-        count: { $sum: 1 },
+    const topZones = await Transaction.aggregate([
+      { $match: match },
+      {
+        $group: {
+          _id: '$zone',
+          litres: { $sum: '$litres' },
+          count: { $sum: 1 },
+        },
       },
-    },
-    { $sort: { litres: -1 } },
-    { $limit: 3 },
-  ]);
+      { $sort: { litres: -1 } },
+      { $limit: 3 },
+    ]);
 
-  // 5. 🔥 NEW: Fetch actual transactions for the date
-  const txDocs = await Transaction.find(match)
-    .sort({ timestamp_server: -1 })
-    .limit(100) // limit to avoid huge payloads
-    .populate('farmer_id', 'name farmer_code')
-    .populate('porter_id', 'name')
-    .lean();
+    const txDocs = await Transaction.find(match)
+      .sort({ timestamp_server: -1 })
+      .limit(100)
+      .populate('farmer_id', 'name farmer_code')
+      .populate('porter_id', 'name')
+      .lean();
 
-  const formattedTransactions = txDocs.map(t => ({
-    _id: t._id,
-    receiptNum: t.receipt_num,
-    farmerName: t.farmer_id?.name || 'Unknown',
-    farmerCode: t.farmer_id?.farmer_code || '',
-    porterName: t.porter_id?.name || 'Direct',
-    litres: t.litres,
-    amount: t.payout || (t.litres * (t.rate || 55)),
-    status: t.status || 'recorded',
-    timestamp: t.timestamp_server,
-    createdAt: t.createdAt || t.timestamp_server,
-  }));
+    const formattedTransactions = txDocs.map(t => ({
+      _id: t._id,
+      receiptNum: t.receipt_num,
+      farmerName: t.farmer_id?.name || 'Unknown',
+      farmerCode: t.farmer_id?.farmer_code || '',
+      porterName: t.porter_id?.name || 'Direct',
+      litres: t.litres,
+      amount: t.payout || (t.litres * (t.rate || 55)),
+      status: t.status || 'recorded',
+      timestamp: t.timestamp_server,
+      createdAt: t.createdAt || t.timestamp_server,
+    }));
 
-  // 6. Build response
-  const defaultDaily = {
-    totalLitres: 0,
-    transactionCount: 0,
-    activeFarmersCount: 0,
-    zones: [],
-  };
+    const defaultDaily = {
+      totalLitres: 0,
+      transactionCount: 0,
+      activeFarmersCount: 0,
+      zones: [],
+    };
 
-  const prevLitres = prev?.totalLitres || 0;
-  const change = daily?.totalLitres - prevLitres;
-  const changePercent = prevLitres ? ((change / prevLitres) * 100).toFixed(1) : null;
+    const prevLitres = prev?.totalLitres || 0;
+    const change = daily?.totalLitres - prevLitres;
+    const changePercent = prevLitres ? ((change / prevLitres) * 100).toFixed(1) : null;
 
-  return {
-    date: DATE_UTILS.formatDate(target),
-    summary: daily || defaultDaily,
-    comparison: {
-      previousDay: {
-        litres: prevLitres,
-        change,
-        changePercent: changePercent ? parseFloat(changePercent) : null,
+    return {
+      date: DATE_UTILS.formatDate(target),
+      summary: daily || defaultDaily,
+      comparison: {
+        previousDay: {
+          litres: prevLitres,
+          change,
+          changePercent: changePercent ? parseFloat(changePercent) : null,
+        },
       },
-    },
-    hourlyDistribution: hourly.map(h => ({ hour: h._id, litres: h.litres, count: h.count })),
-    topZones: topZones.map(z => ({ zone: z._id || 'Unassigned', litres: z.litres, count: z.count })),
-    // 🔥 ADD THIS LINE
-    transactions: formattedTransactions,
-  };
-}
+      hourlyDistribution: hourly.map(h => ({ hour: h._id, litres: h.litres, count: h.count })),
+      topZones: topZones.map(z => ({ zone: z._id || 'Unassigned', litres: z.litres, count: z.count })),
+      transactions: formattedTransactions,
+    };
+  }
 
   // ─── 3. FARMER HISTORY ──────────────────────────────────
-  // ✅ ZONE-RELATED: returns zone per transaction
   async getFarmerHistory(farmerCode, limit = 50, offset = 0, cooperativeId = null) {
     const farmer = await Farmer.findOne({ farmer_code: farmerCode }).lean();
     if (!farmer) throw new Error('Farmer not found');
@@ -363,7 +350,7 @@ class POSAnalytics {
       timestamp: doc.timestamp_server,
       status: doc.status,
       porter: doc.porter_id?.name || 'Direct',
-      zone: doc.zone || '', // ✅ ZONE
+      zone: doc.zone || '',
     }));
 
     const monthlyTrend = await Transaction.aggregate([
@@ -410,7 +397,6 @@ class POSAnalytics {
   }
 
   // ─── 4. FARMERS COLLECTED BY PORTER ──────────────────────
-  // ✅ ZONE-RELATED: returns porter zones
   async getFarmersCollectedByPorter(porterId, startDate, endDate) {
     const porter = await Porter.findById(porterId).lean();
     if (!porter) throw new Error('Porter not found');
@@ -479,7 +465,7 @@ class POSAnalytics {
       porter: {
         id: porter._id,
         name: porter.name,
-        zones: porter.zones || [], // ✅ ZONE
+        zones: porter.zones || [],
       },
       dateRange: { start: start.toISOString(), end: end.toISOString() },
       farmers,
@@ -488,7 +474,6 @@ class POSAnalytics {
   }
 
   // ─── 5. CHART DATA ───────────────────────────────────────
-  // Does not directly touch zones.
   async getPerformanceChartData(params) {
     const { entity, id, period = 'day', metric = 'litres', startDate, endDate } = params;
 
@@ -603,7 +588,6 @@ class POSAnalytics {
   }
 
   // ─── 6. TOP FARMERS ─────────────────────────────────────
-  // Does not directly touch zones.
   async getTopFarmers({ date = null, limit = 10, sortBy = 'litres' } = {}) {
     const match = { ...this.baseMatch };
     if (date) {
@@ -650,7 +634,6 @@ class POSAnalytics {
   }
 
   // ─── 7. ZONE PERFORMANCE ─────────────────────────────────
-  // ✅ ZONE-RELATED: groups by zone
   async getZonePerformance({ dateRange = null } = {}) {
     const match = { ...this.baseMatch };
     if (dateRange) {
@@ -664,7 +647,7 @@ class POSAnalytics {
       { $match: match },
       {
         $group: {
-          _id: '$zone', // ✅ ZONE
+          _id: '$zone',
           totalLitres: { $sum: '$litres' },
           transactionCount: { $sum: 1 },
           uniqueFarmers: { $addToSet: '$farmer_id' },
@@ -686,7 +669,6 @@ class POSAnalytics {
   }
 
   // ─── 8. PORTER RANKING ──────────────────────────────────
-  // Does not directly touch zones.
   async getPorterRanking({ period = 'today', limit = 5 } = {}) {
     const { start, end } = DATE_UTILS.getDateRange(period);
     const match = {
@@ -738,38 +720,69 @@ class POSAnalytics {
 // ─── Factory ───────────────────────────────────────────
 const createAnalytics = (cooperativeId = null) => new POSAnalytics({ cooperativeId });
 
-// ─── Original functions (unchanged) ───────────────────
+// ─── Original functions ───────────────────────────────
 const TransactionService = require('./transactionService');
 const {
   recordMilkTransaction: origRecord,
   syncOfflineTransactions: origSync,
 } = TransactionService;
 
+// ─── SEARCH FARMERS (NEW) ─────────────────────────────
+const searchFarmersService = async (query, cooperativeId) => {
+  if (!query || !cooperativeId) return [];
+
+  const escaped = query.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const regex = new RegExp(escaped, 'i');
+
+  const farmers = await Farmer.find({
+    cooperativeId,
+    isActive: true,
+    $or: [
+      { name: regex },
+      { farmer_code: regex },
+      { phone: regex },
+      { location: regex },
+      { branch_id: regex },
+    ],
+  })
+    .select('_id farmer_code name phone location branch_id zoneId currentBalance')
+    .sort({ name: 1 })
+    .limit(20)
+    .lean();
+
+  return farmers.map(f => ({
+    id: f._id,
+    code: f.farmer_code,
+    name: f.name,
+    phone: f.phone,
+    location: f.location,
+    branch: f.branch_id,
+    zoneId: f.zoneId,
+    balance: f.currentBalance || 0,
+  }));
+};
+
 // ─── Legacy functions (some touch zones) ──────────────
 module.exports = {
   recordMilkTransaction: origRecord,
   syncOfflineTransactions: origSync,
 
-  // --- Enhanced functions (porter‑friendly) ---
-
+  // Enhanced functions
   getFarmerHistory: async (farmerCode, limit, offset, cooperativeId) => {
     const analytics = createAnalytics(cooperativeId);
     return analytics.getFarmerHistory(farmerCode, limit, offset, cooperativeId);
   },
 
-  // ✅ ZONE-RELATED
   getPorterPerformance: async (porterId, period, cooperativeId) => {
     const analytics = createAnalytics(cooperativeId);
     return analytics.getPorterPerformance(porterId, period);
   },
 
-  // ✅ ZONE-RELATED
   getDailySummary: async (date, cooperativeId) => {
     const analytics = createAnalytics(cooperativeId);
     return analytics.getDailySummary(date);
   },
 
-  // ✅ ZONE-RELATED
   getFarmersCollectedByPorter: async (porterId, startDate, endDate, cooperativeId) => {
     const analytics = createAnalytics(cooperativeId);
     return analytics.getFarmersCollectedByPorter(porterId, startDate, endDate);
@@ -785,7 +798,6 @@ module.exports = {
     return analytics.getTopFarmers(params);
   },
 
-  // ✅ ZONE-RELATED
   getZonePerformance: async (params, cooperativeId) => {
     const analytics = createAnalytics(cooperativeId);
     return analytics.getZonePerformance(params);
@@ -796,8 +808,7 @@ module.exports = {
     return analytics.getPorterRanking(params);
   },
 
-  // ── Legacy (unchanged) ──
-
+  // ── Legacy ──
   findFarmerByCode: async (farmerCode) => {
     const farmer = await Farmer.findOne({ farmer_code: farmerCode }).lean();
     if (!farmer) return { error: 'Farmer not found' };
@@ -819,7 +830,6 @@ module.exports = {
     };
   },
 
-  // ✅ ZONE-RELATED
   verifyTransaction: async (receiptNum, cooperativeId = null) => {
     const transaction = await Transaction.findOne({ receipt_num: receiptNum })
       .populate('farmer_id', 'name farmer_code')
@@ -846,10 +856,13 @@ module.exports = {
           litres: transaction.litres,
         },
         porter: transaction.porter_id?.name || 'Direct Delivery',
-        zone: transaction.zone || '', // ✅ ZONE
+        zone: transaction.zone || '',
         timestamp: transaction.timestamp_server.toISOString(),
         status: transaction.status,
       },
     };
   },
+
+  // ✅ NEW: Search farmers
+  searchFarmersService,
 };

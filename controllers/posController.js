@@ -16,6 +16,7 @@ const {
   getTopFarmers: getTopFarmersService,
   getZonePerformance: getZonePerformanceService,
   getPorterRanking: getPorterRankingService,
+  searchFarmersService,
 } = require('../services/posService');
 const { milkTransactionSchema, farmerCodeSchema } = require('../validators/posValidator');
 const logger = require('../utils/logger');
@@ -42,51 +43,29 @@ const compareObjectId = (id1, id2) => {
   return id1.toString() === id2.toString();
 };
 
-// ── 1. Find Farmer ──────────────────────────────────────
+// ─── 1. Search Farmers ──────────────────────────────────
 
-// ── 1. Find Farmer ──────────────────────────────────────
-
-const findFarmerByCode = async (req, res) => {
+const searchFarmers = async (req, res) => {
   try {
-    const { error } = farmerCodeSchema.validate(req.params);
-    if (error) return res.status(400).json({ error: error.details[0].message });
-
-    const result = await findFarmerService(req.params.farmer_code);
-    if (result.error) return res.status(404).json({ error: result.error });
-
-    const coopId = getCooperativeId(req); // from token or null
-    const farmerCoop = result.farmer?.cooperativeId;
-
-    // Log for debugging – you can remove after confirming
-    logger.debug('Cooperative check', {
-      tokenCoop: coopId,
-      farmerCoop: farmerCoop,
-      farmerCoopType: typeof farmerCoop,
-      tokenCoopType: typeof coopId,
-    });
-
-    if (coopId && farmerCoop) {
-      const tokenCoopStr = String(coopId);
-      const farmerCoopStr = String(farmerCoop);
-      if (tokenCoopStr !== farmerCoopStr) {
-        logger.warn('Cooperative mismatch', { token: tokenCoopStr, farmer: farmerCoopStr });
-        return res.status(403).json({ error: 'Farmer does not belong to your cooperative' });
-      }
-    } else if (coopId && !farmerCoop) {
-      // Farmer has no cooperative – deny access
-      return res.status(403).json({ error: 'Farmer has no cooperative assigned' });
+    const { q } = req.query;
+    if (!q || !q.trim()) {
+      return res.status(400).json({ error: 'Search query is required' });
     }
-    // If no coopId in token, we skip the check (shouldn't happen for authenticated porter)
 
-    res.json({ success: true, ...result });
+    const cooperativeId = getCooperativeId(req);
+    if (!cooperativeId) {
+      return res.status(403).json({ error: 'Cooperative not identified' });
+    }
+
+    const results = await searchFarmersService(q.trim(), cooperativeId);
+    res.json({ success: true, data: results });
   } catch (error) {
-    logger.error('Find farmer failed', { error: error.message });
+    logger.error('Farmer search failed', { error: error.message });
     res.status(500).json({ error: error.message });
   }
 };
 
-
-// ── 2. Record Milk Transaction ──────────────────────────
+// ─── 2. Record Milk Transaction ──────────────────────────
 
 const recordMilkTransaction = async (req, res) => {
   try {
@@ -108,7 +87,6 @@ const recordMilkTransaction = async (req, res) => {
       return res.status(403).json({ error: 'Cooperative mismatch' });
     }
 
-    // ── 1. Verify device ────────────────────────────────────
     const device = req.device;
     const branch_id = req.branch_id;
 
@@ -119,7 +97,6 @@ const recordMilkTransaction = async (req, res) => {
       return res.status(403).json({ error: 'Device branch mismatch' });
     }
 
-    // ── 2. Find the farmer ──────────────────────────────────
     const farmer = await Farmer.findOne({
       farmer_code,
       cooperativeId: cooperativeId
@@ -129,13 +106,11 @@ const recordMilkTransaction = async (req, res) => {
       return res.status(404).json({ error: 'Farmer not found in this cooperative' });
     }
 
-    // ── 3. Get userId from token ─────────────────────────────
     const userId = req.user?.id;
     if (!userId) {
       return res.status(401).json({ error: 'User not authenticated' });
     }
 
-    // ── 4. Call service with farmer_id and userId ────────────
     const result = await recordMilkTxService({
       farmer_code,
       farmer_id: farmer._id,
@@ -147,7 +122,7 @@ const recordMilkTransaction = async (req, res) => {
       device_seq_num,
       timestamp_local: timestamp_local ? new Date(timestamp_local) : new Date(),
       cooperativeId,
-      userId, // ✅ now passed
+      userId,
     });
 
     res.json({
@@ -178,7 +153,7 @@ const recordMilkTransaction = async (req, res) => {
   }
 };
 
-// ── 3. Verify Transaction ──────────────────────────────
+// ─── 3. Verify Transaction ──────────────────────────────
 
 const verifyTransaction = async (req, res) => {
   try {
@@ -197,7 +172,7 @@ const verifyTransaction = async (req, res) => {
   }
 };
 
-// ── 4. Porter Performance ──────────────────────────────
+// ─── 4. Porter Performance ──────────────────────────────
 
 const getPorterPerformance = async (req, res) => {
   try {
@@ -223,7 +198,7 @@ const getPorterPerformance = async (req, res) => {
   }
 };
 
-// ── 5. Daily Summary ────────────────────────────────────
+// ─── 5. Daily Summary ────────────────────────────────────
 
 const getDailySummary = async (req, res) => {
   try {
@@ -241,7 +216,7 @@ const getDailySummary = async (req, res) => {
   }
 };
 
-// ── 6. Farmer History ──────────────────────────────────
+// ─── 6. Farmer History ──────────────────────────────────
 
 const getFarmerHistory = async (req, res) => {
   try {
@@ -274,7 +249,7 @@ const getFarmerHistory = async (req, res) => {
   }
 };
 
-// ── 7. Sync Offline ─────────────────────────────────────
+// ─── 7. Sync Offline ─────────────────────────────────────
 
 const syncOfflineTransactions = async (req, res) => {
   try {
@@ -304,7 +279,7 @@ const syncOfflineTransactions = async (req, res) => {
   }
 };
 
-// ── 8. Farmers Collected by Porter ─────────────────────
+// ─── 8. Farmers Collected by Porter ─────────────────────
 
 const getFarmersCollectedByPorter = async (req, res) => {
   try {
@@ -338,7 +313,7 @@ const getFarmersCollectedByPorter = async (req, res) => {
   }
 };
 
-// ── 9. Chart Data ──────────────────────────────────────
+// ─── 9. Chart Data ──────────────────────────────────────
 
 const getPerformanceChartData = async (req, res) => {
   try {
@@ -376,7 +351,7 @@ const getPerformanceChartData = async (req, res) => {
   }
 };
 
-// ── 10. New: Top Farmers ──────────────────────────────
+// ─── 10. Top Farmers ─────────────────────────────────────
 
 const getTopFarmers = async (req, res) => {
   try {
@@ -399,7 +374,7 @@ const getTopFarmers = async (req, res) => {
   }
 };
 
-// ── 11. New: Zone Performance ──────────────────────────
+// ─── 11. Zone Performance ──────────────────────────────
 
 const getZonePerformance = async (req, res) => {
   try {
@@ -421,7 +396,7 @@ const getZonePerformance = async (req, res) => {
   }
 };
 
-// ── 12. New: Porter Ranking ────────────────────────────
+// ─── 12. Porter Ranking ────────────────────────────────
 
 const getPorterRanking = async (req, res) => {
   try {
@@ -446,7 +421,7 @@ const getPorterRanking = async (req, res) => {
 // ── Exports ─────────────────────────────────────────────
 
 module.exports = {
-  findFarmerByCode,
+  searchFarmers,
   recordMilkTransaction,
   verifyTransaction,
   getPorterPerformance,
@@ -458,4 +433,4 @@ module.exports = {
   getTopFarmers,
   getZonePerformance,
   getPorterRanking,
-};
+}; 

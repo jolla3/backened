@@ -1,34 +1,34 @@
-const express = require('express');
-const router = express.Router();
-const posController = require('../controllers/posController');
-const deviceMiddleware = require('../middlewares/deviceMiddleware');
-const { authMiddleware } = require('../middlewares/authMiddleware');
+    const express = require('express');
+    const router = express.Router();
+    const posController = require('../controllers/posController');
+    const deviceMiddleware = require('../middlewares/deviceMiddleware');
+    const { authMiddleware } = require('../middlewares/authMiddleware');
 
-// Farmer Lookup (no auth needed for lookup)
-router.get('/farmer/:farmer_code', posController.findFarmerByCode);
+    // Farmer  Lookup (no auth needed for lookup)
+    // routes/posRoutes.js (add this route)
+    router.get('/search',  posController.searchFarmers);
+    // Milk Transaction Recording (Requires Device Auth)
+    router.post('/milk', deviceMiddleware, posController.recordMilkTransaction);
 
-// Milk Transaction Recording (Requires Device Auth)
-router.post('/milk', deviceMiddleware, posController.recordMilkTransaction);
+    // Transaction Verification (Public - for QR scanning)
+    router.get('/verify/:receiptNum', posController.verifyTransaction);
 
-// Transaction Verification (Public - for QR scanning)
-router.get('/verify/:receiptNum', posController.verifyTransaction);
+    // Porter Performance
+    router.get('/porter/:porter_id/performance', posController.getPorterPerformance);
 
-// Porter Performance
-router.get('/porter/:porter_id/performance', posController.getPorterPerformance);
+    // Daily Summary
+    router.get('/summary', posController.getDailySummary);
 
-// Daily Summary
-router.get('/summary', posController.getDailySummary);
+    // Sync Offline Transactions (Requires Device Auth)
+    router.post('/sync', deviceMiddleware, posController.syncOfflineTransactions);
 
-// Sync Offline Transactions (Requires Device Auth)
-router.post('/sync', deviceMiddleware, posController.syncOfflineTransactions);
+    // Farmer History (✅ now uses deviceMiddleware to get req.user.cooperativeId)
+    router.get('/farmer/:farmer_code/history', deviceMiddleware, posController.getFarmerHistory);
 
-// Farmer History (✅ now uses deviceMiddleware to get req.user.cooperativeId)
-router.get('/farmer/:farmer_code/history', deviceMiddleware, posController.getFarmerHistory);
+    router.get('/porters/:porter_id/farmers', posController.getFarmersCollectedByPorter);
+    router.get('/chart-data', posController.getPerformanceChartData);
+    router.get('/top-farmers', authMiddleware, posController.getTopFarmers);
+    router.get('/zone-performance', authMiddleware, posController.getZonePerformance);
+    router.get('/porter-ranking', authMiddleware, posController.getPorterRanking);
 
-router.get('/porters/:porter_id/farmers', posController.getFarmersCollectedByPorter);
-router.get('/chart-data', posController.getPerformanceChartData);
-router.get('/top-farmers', authMiddleware, posController.getTopFarmers);
-router.get('/zone-performance', authMiddleware, posController.getZonePerformance);
-router.get('/porter-ranking', authMiddleware, posController.getPorterRanking);
-
-module.exports = router;
+    module.exports = router;
