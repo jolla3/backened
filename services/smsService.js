@@ -1,4 +1,6 @@
+// services/smsService.js
 const mongoose = require('mongoose');
+const crypto = require('crypto');
 const OutboundSms = require('../models/OutboundSms');
 const SmsGateway = require('../models/SmsGateway');
 const smsConfig = require('../config/smsConfig');
@@ -8,39 +10,74 @@ const SMS_PRIORITY = require('../constants/smsPriorities');
 
 const PROCESSING_TIMEOUT_MINUTES = 5;
 
-const queueSMS = async ({ to, message, from, type = 'general', priority = SMS_PRIORITY.GENERAL, cooperativeId, farmerId, maxRetries = smsConfig.MAX_RETRIES || 3, metadata = {}, expiresAt = null, idempotencyKey = null }) => {
+// ─── Idempotency key fallback ──────────────────────────────
+function generateFallbackIdempotencyKey() {
+  return `fallback_${Date.now()}_${crypto.randomBytes(8).toString('hex')}`;
+}
+
+// ─── Queue SMS ──────────────────────────────────────────────
+const queueSMS = async ({
+  to,
+  message,
+  from,
+  type = 'general',
+  priority = SMS_PRIORITY.GENERAL,
+  cooperativeId,
+  farmerId,
+  maxRetries = smsConfig.MAX_RETRIES || 3,
+  metadata = {},
+  expiresAt = null,
+  idempotencyKey = null,
+}) => {
   if (!to || !message) throw new Error('Phone number and message are required');
   if (!cooperativeId) throw new Error('cooperativeId is required');
 
-  if (idempotencyKey) {
+  // ── Ensure we always have an idempotency key ──────────
+  if (!idempotencyKey) {
+    idempotencyKey = generateFallbackIdempotencyKey();
+  }
+
+  try {
+    // ── Check for existing job with same key ────────────
     const existing = await OutboundSms.findOne({ idempotencyKey });
     if (existing) {
       logger.info('Duplicate SMS prevented', { idempotencyKey });
       return { jobId: existing._id, queued: true, duplicate: true };
     }
+
+    const normalizedPhone = normalizePhone(to);
+    const job = new OutboundSms({
+      phone: normalizedPhone,
+      message,
+      from: from || process.env.SMS_SENDER || 'Cooperative',
+      type,
+      priority,
+      cooperativeId,
+      farmerId,
+      maxRetries,
+      metadata,
+      expiresAt,
+      idempotencyKey,   // now always non‑null
+      status: 'queued',
+    });
+
+    await job.save();
+    logger.info('SMS job queued', { jobId: job._id, phone: normalizedPhone, type });
+    return { jobId: job._id, queued: true };
+  } catch (error) {
+    // ── Handle duplicate key race (E11000) ──────────────
+    if (error.code === 11000) {
+      const existing = await OutboundSms.findOne({ idempotencyKey });
+      if (existing) {
+        logger.info('Duplicate SMS prevented (race condition)', { idempotencyKey });
+        return { jobId: existing._id, queued: true, duplicate: true };
+      }
+    }
+    throw error;
   }
-
-  const normalizedPhone = normalizePhone(to);
-  const job = new OutboundSms({
-    phone: normalizedPhone,
-    message,
-    from: from || process.env.SMS_SENDER || 'Cooperative',
-    type,
-    priority,
-    cooperativeId,
-    farmerId,
-    maxRetries,
-    metadata,
-    expiresAt,
-    idempotencyKey,
-    status: 'queued',
-  });
-
-  await job.save();
-  logger.info('SMS job queued', { jobId: job._id, phone: normalizedPhone, type });
-  return { jobId: job._id, queued: true };
 };
 
+// ─── Claim jobs ─────────────────────────────────────────────
 const claimJobs = async (gatewayId, limit = 10) => {
   const gateway = await SmsGateway
     .findOne({ gatewayId })
@@ -94,7 +131,7 @@ const claimJobs = async (gatewayId, limit = 10) => {
       },
       {
         sort: { priority: -1, createdAt: 1 },
-        returnDocument: 'after'   // ✅ fixed
+        returnDocument: 'after'
       }
     );
 
@@ -112,6 +149,7 @@ const claimJobs = async (gatewayId, limit = 10) => {
   return claimed;
 };
 
+// ─── Mark sent ──────────────────────────────────────────────
 const markSent = async (jobId, gatewayId, providerResponse) => {
   const job = await OutboundSms.findOneAndUpdate(
     { _id: jobId, gatewayId },
@@ -130,6 +168,7 @@ const markSent = async (jobId, gatewayId, providerResponse) => {
   return job;
 };
 
+// ─── Mark failed ─────────────────────────────────────────────
 const markFailed = async (jobId, gatewayId, error, providerResponse) => {
   const job = await OutboundSms.findOneAndUpdate(
     { _id: jobId, gatewayId },
@@ -166,6 +205,7 @@ const markFailed = async (jobId, gatewayId, error, providerResponse) => {
   return finalJob;
 };
 
+// ─── Recover stuck jobs ─────────────────────────────────────
 const recoverStuckJobs = async (olderThanMinutes = PROCESSING_TIMEOUT_MINUTES) => {
   const cutoff = new Date(Date.now() - olderThanMinutes * 60 * 1000);
   const result = await OutboundSms.updateMany(
@@ -188,18 +228,46 @@ const recoverStuckJobs = async (olderThanMinutes = PROCESSING_TIMEOUT_MINUTES) =
   return result;
 };
 
+// ─── Get job status ──────────────────────────────────────────
 const getJobStatus = async (jobId) => {
   const job = await OutboundSms.findById(jobId);
   if (!job) throw new Error('Job not found');
   return job;
 };
 
-const sendSMS = async ({ to, message, from, type = 'general', cooperativeId, farmerId, priority = SMS_PRIORITY.GENERAL }) => {
+// ─── sendSMS (public API) ───────────────────────────────────
+const sendSMS = async ({
+  to,
+  message,
+  from,
+  type = 'general',
+  cooperativeId,
+  farmerId,
+  priority = SMS_PRIORITY.GENERAL,
+  idempotencyKey = null,   // ✅ now accepts an explicit key
+}) => {
   if (!cooperativeId) throw new Error('cooperativeId required');
-  return await queueSMS({ to, message, from, type, cooperativeId, farmerId, priority });
+  return await queueSMS({
+    to,
+    message,
+    from,
+    type,
+    cooperativeId,
+    farmerId,
+    priority,
+    idempotencyKey,
+  });
 };
 
-const sendMonthlyMilkSummary = async (farmerPhone, farmerName, litresDelivered, totalPayout, totalDeductions, cooperativeId) => {
+// ─── Legacy functions (use queueSMS) ────────────────────────
+const sendMonthlyMilkSummary = async (
+  farmerPhone,
+  farmerName,
+  litresDelivered,
+  totalPayout,
+  totalDeductions,
+  cooperativeId
+) => {
   if (!cooperativeId) throw new Error('cooperativeId required');
   const netPayout = totalPayout - totalDeductions;
   const message = `Dear ${farmerName}, Monthly: ${litresDelivered}L, Payout:${totalPayout}, Deduct:${totalDeductions}, Net:${netPayout}`;

@@ -332,30 +332,30 @@ const recordMilkTransaction = async (data) => {
     });
 
     // ── 13. Send SMS ────────────────────────────────────
-    if (farmer.phone) {
-      try {
-        const smsResult = await smsService.sendSMS({
-          to: farmer.phone,
-          message: receipt.sms,
-          type: 'milk_receipt',
-          cooperativeId,
-          farmerId: farmer_id,
-        });
-        if (smsResult.queued) {
-          logger.info('Milk SMS queued', { jobId: smsResult.jobId, phone: farmer.phone });
-        } else {
-          logger.warn('Milk SMS queue returned unexpected result', { smsResult });
-        }
-      } catch (smsError) {
-        // SMS failure is logged but doesn't affect transaction
-        logger.error('SMS failed but transaction committed', {
-          phone: farmer.phone,
-          error: smsError.message,
-          stack: smsError.stack,
-        });
-      }
+if (farmer.phone) {
+  try {
+    const smsResult = await smsService.sendSMS({
+      to: farmer.phone,
+      message: receipt.sms,
+      type: 'milk_receipt',
+      cooperativeId,
+      farmerId: farmer_id,
+      idempotencyKey: `sms_${transaction._id}`,   // ✅ unique per transaction
+    });
+    if (smsResult.queued) {
+      logger.info('Milk SMS queued', { jobId: smsResult.jobId, phone: farmer.phone });
+    } else {
+      logger.warn('Milk SMS queue returned unexpected result', { smsResult });
     }
-
+  } catch (smsError) {
+    // SMS failure is logged but doesn't affect transaction
+    logger.error('SMS failed but transaction committed', {
+      phone: farmer.phone,
+      error: smsError.message,
+      stack: smsError.stack,
+    });
+  }
+}
     // ── 14. Generate QR (non‑critical) ──────────────────
     let qrImage = null;
     try {
