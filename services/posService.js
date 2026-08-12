@@ -745,7 +745,7 @@ const searchFarmersService = async (query, cooperativeId) => {
       { branch_id: regex },
     ],
   })
-    .select('_id farmer_code name phone location branch_id zoneId currentBalance')
+    .select('_id farmer_code name phone location branch_id zoneId ')
     .sort({ name: 1 })
     .limit(20)
     .lean();
