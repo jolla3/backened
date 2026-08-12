@@ -16,15 +16,14 @@ const { formatMilkReceipt } = require('../utils/receiptFormatter');
 const Cooperative = require('../models/cooperative');
 const smsService = require('./smsService');
 
-// Add imports at top
+// ─── Import date utilities ────────────────────────────────
 const {
   parseKenyaDate,
-  isValidDateString
+  isValidDateString,
+  getKenyaDateString,   // ✅ added
 } = require('../utils/dateUtils');
 
-// Replace the function with this version:
-
-
+// ─── Rate lookup (requires effectiveDate) ──────────────────
 const getActiveRateVersion = async (cooperativeId, type = 'milk', effectiveDate) => {
   if (!effectiveDate) {
     throw new Error('effectiveDate is required');
@@ -105,7 +104,7 @@ const checkDailyFraudLimit = async (farmer_id, litres) => {
   return currentTotal;
 };
 
-// ── MAIN: Record milk transaction ──────────────────────
+// ── MAIN: Record milk transaction ──────────────────────────
 const recordMilkTransaction = async (data) => {
   const session = await mongoose.startSession();
   session.startTransaction();
@@ -151,7 +150,25 @@ const recordMilkTransaction = async (data) => {
       throw new Error(`Milk quantity cannot exceed ${FRAUD_CONFIG.MAX_MILK_PER_TRANSACTION}L per transaction`);
     }
 
-    const rateInfo = await getActiveRateVersion(cooperativeId);
+    // ── Derive effective date from timestamp_local ──
+    let effectiveDate = null;
+    if (timestamp_local) {
+      const dateObj = new Date(timestamp_local);
+      if (!isNaN(dateObj.getTime())) {
+        effectiveDate = getKenyaDateString(dateObj);
+      }
+    }
+    if (!effectiveDate) {
+      logger.warn('timestamp_local missing or invalid; using today\'s date for rate lookup');
+      effectiveDate = getKenyaDateString();
+    }
+
+    // ── Get the rate for the effective date ─────────────
+    const rateInfo = await getActiveRateVersion(
+      cooperativeId,
+      'milk',
+      effectiveDate
+    );
     payout = parseFloat((litresNum * rateInfo.rate).toFixed(2));
 
     await checkDailyFraudLimit(farmer_id, litresNum);
