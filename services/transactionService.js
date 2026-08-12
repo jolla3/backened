@@ -152,15 +152,19 @@ const recordMilkTransaction = async (data) => {
 
     // ── Derive effective date from timestamp_local ──
     let effectiveDate = null;
+    let collectionShift = 'AM';
     if (timestamp_local) {
       const dateObj = new Date(timestamp_local);
       if (!isNaN(dateObj.getTime())) {
         effectiveDate = getKenyaDateString(dateObj);
+        const hour = dateObj.getHours();
+        collectionShift = hour >= 12 ? 'PM' : 'AM';
       }
     }
     if (!effectiveDate) {
       logger.warn('timestamp_local missing or invalid; using today\'s date for rate lookup');
       effectiveDate = getKenyaDateString();
+      // default shift to AM if we fallback
     }
 
     // ── Get the rate for the effective date ─────────────
@@ -224,6 +228,7 @@ const recordMilkTransaction = async (data) => {
     }
 
     // ── 6. Create Transaction ──────────────────────────────
+    // ✅ Added required fields: createdBy, collectionDate, collectionShift
     [transaction] = await Transaction.create(
       [{
         device_id,
@@ -249,6 +254,11 @@ const recordMilkTransaction = async (data) => {
         zoneId: zoneId || farmer.zoneId || null,
         branch_id,
         cooperativeId,
+        // ─── NEW: required fields ────────────────────────
+        createdBy: userId,
+        collectionDate: effectiveDate,
+        collectionShift: collectionShift,
+        // ──────────────────────────────────────────────────
       }],
       { session }
     );
@@ -391,6 +401,7 @@ const recordMilkTransaction = async (data) => {
     throw error;
   }
 };
+
 
 // ── Sync offline ────────────────────────────────────────
 const syncOfflineTransactions = async (transactions, cooperativeId) => {
