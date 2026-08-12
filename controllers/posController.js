@@ -148,7 +148,7 @@ const recordMilkTransaction = async (req, res) => {
     });
   } catch (error) {
     logger.error('Record milk failed', { error: error.message });
-    const status = error.message.includes('limit') || error.message.includes('rate') ? 400 : 500;
+    const status = error.message.includes('limit') 
     res.status(status).json({ error: error.message });
   }
 };

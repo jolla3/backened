@@ -4,7 +4,7 @@ const milkTransactionSchema = Joi.object({
   farmer_code: Joi.string().required(),
   litres: Joi.number().positive().required(),
   porter_id: Joi.string().optional().allow(null),
-  zone: Joi.string().optional(),
+zone: Joi.string().optional().allow(null, ''),
   device_seq_num: Joi.number().integer().min(0).required(),
   timestamp_local: Joi.date().iso().optional(),
   cooperativeId: Joi.string().required()
