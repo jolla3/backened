@@ -18,6 +18,7 @@ const formatSmsCurrency = (amount) => {
   return `KES ${rounded.toLocaleString('en-KE')}`;
 };
 
+// Full date (with year) – used in printable
 const formatDate = (date) => {
   const d = new Date(date);
   if (isNaN(d.getTime())) throw new Error('Invalid date');
@@ -32,6 +33,7 @@ const formatDate = (date) => {
   }).format(d);
 };
 
+// Date only (with year) – used in printable collection line
 const formatCollectionDate = (dateInput) => {
   if (!dateInput) return '';
   let d;
@@ -47,6 +49,24 @@ const formatCollectionDate = (dateInput) => {
     day: 'numeric',
     month: 'short',
     year: 'numeric',
+  }).format(d);
+};
+
+// SMS‑specific date formatter – no year, just day and month
+const formatSmsCollectionDate = (dateInput) => {
+  if (!dateInput) return '';
+  let d;
+  if (typeof dateInput === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(dateInput)) {
+    const [y, m, day] = dateInput.split('-').map(Number);
+    d = new Date(y, m - 1, day);
+  } else {
+    d = new Date(dateInput);
+  }
+  if (isNaN(d.getTime())) return String(dateInput);
+  return new Intl.DateTimeFormat('en-KE', {
+    timeZone: 'Africa/Nairobi',
+    day: 'numeric',
+    month: 'short',
   }).format(d);
 };
 
@@ -72,7 +92,8 @@ const formatMilkReceipt = ({
   const receiptShort = String(receiptNumber || '')
     .replace(/^REC-\d{8}-/, '');
 
-  const date = formatCollectionDate(collectionDate);
+  // Use SMS‑specific date formatter (no year)
+  const date = formatSmsCollectionDate(collectionDate);
   const shift = collectionShift ? ` ${collectionShift}` : '';
 
   // ---- SMS (aggressively compact) ----
@@ -99,7 +120,7 @@ const formatMilkReceipt = ({
     `Milk Delivered: ${milk.toFixed(1)} L`,
     `Month Total: ${cumulative.toFixed(1)} L`,
     `Amount Earned: ${formatCurrency(payout)}`,
-    `Collection: ${date}${shift ? `, ${shift.trim()}` : ''}`,
+    `Collection: ${formatCollectionDate(collectionDate)}${shift ? `, ${shift.trim()}` : ''}`,
     SEPARATOR,
     `Wallet Balance: ${formatCurrency(walletBalance)}`,
     '',
@@ -183,6 +204,7 @@ module.exports = {
   formatSmsCurrency,
   formatDate,
   formatCollectionDate,
+  formatSmsCollectionDate,
   formatMilkReceipt,
   formatFeedReceipt,
 };

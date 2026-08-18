@@ -1,6 +1,6 @@
 /**
- * Cumulative Milk Service – authoritative calculation from Transaction collection.
- * Now accepts asOfDate and asOfShift to compute month‑to‑date inclusive of the current shift.
+ * Cumulative Milk Service – Authoritative calculation from Transaction collection.
+ * Accepts asOfDate and asOfShift to compute month‑to‑date inclusive of the current shift.
  */
 const mongoose = require('mongoose');
 const Transaction = require('../models/transaction');
@@ -27,7 +27,7 @@ const getCurrentMonthBoundaries = (referenceDate = new Date()) => {
 /**
  * Cumulative milk for one farmer for the month containing asOfDate,
  * up to and including the given shift (AM or PM) on that date.
- * If asOfShift is not provided, it includes all transactions up to the end of asOfDate.
+ * Uses explicit $or with date ranges – clean and safe.
  */
 const getCumulativeMilkForMonth = async (
   farmerId,
@@ -41,40 +41,65 @@ const getCumulativeMilkForMonth = async (
 
   const boundaries = getCurrentMonthBoundaries(asOfDate);
 
-  // Base match: same month, completed milk transactions
-  const match = {
-    farmer_id: new mongoose.Types.ObjectId(farmerId),
-    cooperativeId: new mongoose.Types.ObjectId(cooperativeId),
+  const farmerObjectId = new mongoose.Types.ObjectId(farmerId);
+  const cooperativeObjectId = new mongoose.Types.ObjectId(cooperativeId);
+
+  // Base match: same cooperative, farmer, milk type, completed
+  let match = {
+    farmer_id: farmerObjectId,
+    cooperativeId: cooperativeObjectId,
     type: 'milk',
     status: 'completed',
-    collectionDate: {
-      $gte: boundaries.startDate,
-      $lte: boundaries.endDate,
-    },
   };
 
-  // Apply shift-based cutoff if provided
-  if (asOfShift) {
-    // If shift is AM: include all before asOfDate, plus AM on asOfDate
-    // If shift is PM: include all before asOfDate, plus AM and PM on asOfDate
+  // If asOfDate is a YYYY-MM-DD string, apply shift-based cutoff
+  if (
+    typeof asOfDate === 'string' &&
+    /^\d{4}-\d{2}-\d{2}$/.test(asOfDate)
+  ) {
+    // AM shift: include all previous days + AM on asOfDate
     if (asOfShift === 'AM') {
       match.$or = [
-        { collectionDate: { $lt: asOfDate } },
+        {
+          collectionDate: {
+            $gte: boundaries.startDate,
+            $lt: asOfDate,
+          },
+        },
         {
           collectionDate: asOfDate,
           collectionShift: 'AM',
         },
       ];
-    } else if (asOfShift === 'PM') {
+    }
+    // PM shift: include all previous days + AM & PM on asOfDate
+    else if (asOfShift === 'PM') {
       match.$or = [
-        { collectionDate: { $lt: asOfDate } },
+        {
+          collectionDate: {
+            $gte: boundaries.startDate,
+            $lt: asOfDate,
+          },
+        },
         {
           collectionDate: asOfDate,
           collectionShift: { $in: ['AM', 'PM'] },
         },
       ];
     }
-    // Note: for invalid shift, we default to including everything up to endDate (same as no shift)
+    // If no shift provided, default to entire month up to endDate
+    else {
+      match.collectionDate = {
+        $gte: boundaries.startDate,
+        $lte: boundaries.endDate,
+      };
+    }
+  } else {
+    // Fallback for Date objects: use full month
+    match.collectionDate = {
+      $gte: boundaries.startDate,
+      $lte: boundaries.endDate,
+    };
   }
 
   const result = await Transaction.aggregate([
@@ -130,7 +155,6 @@ const getCumulativeMilk = async ({
   asOfDate = new Date(),
   asOfShift = null,
 }) => {
-  // session is accepted for future transactional use; aggregation currently runs outside session
   return getCumulativeMilkForMonth(
     farmerId,
     cooperativeId,
@@ -140,7 +164,7 @@ const getCumulativeMilk = async ({
 };
 
 /**
- * Bulk cumulative for multiple farmers (kept for completeness)
+ * Bulk cumulative – for reporting, uses full month (unchanged).
  */
 const getCumulativeMilkForFarmers = async (farmerIds, cooperativeId, asOfDate = new Date()) => {
   if (!Array.isArray(farmerIds) || farmerIds.length === 0) return {};
