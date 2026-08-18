@@ -105,9 +105,7 @@ const purchaseFeed = async (data, session) => {
     throw new Error('No products specified');
   }
 
-  // ── Server-side idempotency key when client does not send one ──
-  // Note: this does NOT protect against double-submit of the same user action
-  // unless the client later sends a stable key. It only keeps each request unique.
+  // Server-side idempotency key when client does not send one
   if (!clientIdempotencyKey) {
     const crypto = require('crypto');
     clientIdempotencyKey = `feed:server:${cooperativeId}:${farmerId}:${Date.now()}:${crypto.randomBytes(8).toString('hex')}`;
@@ -118,7 +116,7 @@ const purchaseFeed = async (data, session) => {
     });
   }
 
-  // ── Request-level idempotency ─────────────────────────
+  // Request-level idempotency
   const existing = await Transaction.findOne({
     cooperativeId,
     idempotency_key: clientIdempotencyKey,
@@ -126,28 +124,26 @@ const purchaseFeed = async (data, session) => {
   }).session(session);
 
   if (existing) {
-    const farmer = await Farmer.findById(farmerId).session(session).lean();
-
+    const farmerDoc = await Farmer.findById(farmerId).session(session).lean();
     return {
       success: true,
       duplicate: true,
       farmerId,
-      farmerName: farmer?.name,
+      farmerName: farmerDoc?.name,
       transactions: [existing],
       totalCost: existing.cost,
       paymentMethod: existing.paymentMethod,
       balanceBefore: null,
-      balanceAfter: farmer?.currentBalance,
+      balanceAfter: farmerDoc?.currentBalance,
       paymentSummary: {
         method: existing.paymentMethod,
         amount: existing.cost,
         balanceAdjusted: existing.paymentMethod === 'balance',
-        newBalance: farmer?.currentBalance,
+        newBalance: farmerDoc?.currentBalance,
       },
       receipt: null,
     };
   }
-
 
   const cooperative = await Cooperative.findById(cooperativeId).session(session);
   if (!cooperative) throw new Error('Cooperative not found');
@@ -165,12 +161,22 @@ const purchaseFeed = async (data, session) => {
   const receiptItems = [];
   const branchId = cooperative._id.toString();
 
-  // Explicit debt policy (env or future coop setting)
   const ALLOW_NEGATIVE_BALANCE =
     process.env.ALLOW_FARMER_DEBT === 'true' ||
     cooperative.allowFarmerDebt === true;
 
-  // ── Process each product – price from inventory only ──
+  const { getKenyaDateString } = require('../utils/dateUtils');
+  const collectionDate = getKenyaDateString();
+  const nairobiHour = Number(
+    new Intl.DateTimeFormat('en-US', {
+      timeZone: 'Africa/Nairobi',
+      hour: 'numeric',
+      hour12: false,
+    }).format(new Date())
+  );
+  const collectionShift = nairobiHour >= 12 ? 'PM' : 'AM';
+
+  // Process each product – price from inventory only
   for (const productData of products) {
     const { productId, quantity, category } = productData;
 
@@ -193,7 +199,6 @@ const purchaseFeed = async (data, session) => {
       throw new Error(`Insufficient stock: ${product.name} (${product.stock} available)`);
     }
 
-    // ★ Authoritative price – never trust client
     const unitPrice = Number(
       product.sellingPrice ?? product.price ?? product.unitPrice
     );
@@ -207,8 +212,6 @@ const purchaseFeed = async (data, session) => {
     const receiptNum = await transactionService.generateReceiptNum(session);
     const serverSeqNum = await transactionService.generateServerSeqNum(session, branchId);
 
-    // First product carries the client idempotency key; subsequent products
-    // get a deterministic suffix so they stay linked but unique if needed.
     const isPrimary = transactions.length === 0;
     const txIdempotencyKey = isPrimary
       ? clientIdempotencyKey
@@ -237,6 +240,10 @@ const purchaseFeed = async (data, session) => {
       timestamp_local: new Date(),
       paymentMethod,
       balanceAdjusted: paymentMethod === 'balance',
+      // Required by Transaction schema
+      createdBy: adminId,
+      collectionDate,
+      collectionShift,
     };
 
     const [tx] = await Transaction.create([transactionData], { session });
@@ -255,7 +262,7 @@ const purchaseFeed = async (data, session) => {
     });
   }
 
-  // ── Atomic balance from latest ledger (same session) ──
+  // Atomic balance from latest ledger (same session)
   const lastLedger = await Ledger.findOne({
     cooperativeId: cooperative._id,
     farmerId: farmer._id,
@@ -274,7 +281,6 @@ const purchaseFeed = async (data, session) => {
   if (paymentMethod === 'balance') {
     const newRunningBalance = currentRunningBalance - totalCost;
 
-    // Explicit negative-balance policy
     if (!ALLOW_NEGATIVE_BALANCE && newRunningBalance < 0) {
       throw new Error(
         `Insufficient balance. Available: KES ${currentRunningBalance.toFixed(2)}, required: KES ${totalCost.toFixed(2)}`
@@ -305,7 +311,6 @@ const purchaseFeed = async (data, session) => {
       { session }
     );
 
-    // ★ Session passed – stays inside the Mongo transaction
     await updateFarmerBalance(farmer._id, newRunningBalance, ledgerEntry._id, session);
 
     balanceBefore = currentRunningBalance;
@@ -318,15 +323,14 @@ const purchaseFeed = async (data, session) => {
       ledgerId: ledgerEntry._id,
     });
   } else {
-    // Cash sale – zero wallet impact
     const [ledgerEntry] = await Ledger.create(
       [{
         cooperativeId: cooperative._id,
         farmerId: farmer._id,
         transactionId: transactions[0]._id,
         type: 'FEED_CASH_SALE',
-        amount: totalCost,          // informational only
-        runningBalance: currentRunningBalance, // unchanged
+        amount: totalCost,
+        runningBalance: currentRunningBalance,
         description: `Cash feed purchase - ${transactions.map((t) => t.receipt_num).join(', ')}`,
         reference: transactions.map((t) => t.receipt_num).join(','),
         createdBy: adminId,
@@ -354,7 +358,7 @@ const purchaseFeed = async (data, session) => {
     });
   }
 
-  // ── Receipt ───────────────────────────────────────────
+  // Receipt
   const receipt = formatFeedReceipt({
     cooperativeName: cooperative.name,
     receiptNumber: transactions[0].receipt_num,
@@ -367,7 +371,7 @@ const purchaseFeed = async (data, session) => {
     transactionDate: new Date(),
   });
 
-  // ── Queue SMS (after business work; caller commits session) ──
+  // Queue SMS (caller commits session)
   if (farmer.phone) {
     try {
       const primaryTxId = transactions[0]._id.toString();
