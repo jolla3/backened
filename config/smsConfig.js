@@ -55,3 +55,11 @@ module.exports = {
   // Heartbeat stale threshold (minutes)
   heartbeatStaleMinutes: 2,
 };
+
+
+module.exports = {
+  MAX_RETRIES: parseInt(process.env.SMS_MAX_RETRIES || '3', 10),
+  RETRY_DELAYS: [30, 60, 120, 300], // seconds – index by retryCount-1
+  gatewayPollIntervalSeconds: 3,
+  minGatewayVersion: '1.0.0',
+};

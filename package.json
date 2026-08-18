@@ -4,7 +4,9 @@
   "main": "app.js",
   "scripts": {
     "start": "nodemon app.js",
-    "test": "jest --coverage"
+    "test": "jest --coverage",
+        "worker": "node src/workers/smsWorkerProcess.js"
+
   },
   "dependencies": {
     "axios": "^1.13.6",

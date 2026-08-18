@@ -1,4 +1,3 @@
-// services/smsService.js
 const mongoose = require('mongoose');
 const crypto = require('crypto');
 const OutboundSms = require('../models/OutboundSms');
@@ -10,9 +9,13 @@ const SMS_PRIORITY = require('../constants/smsPriorities');
 
 const PROCESSING_TIMEOUT_MINUTES = 5;
 
-// ─── Idempotency key fallback ──────────────────────────────
 function generateFallbackIdempotencyKey() {
   return `fallback_${Date.now()}_${crypto.randomBytes(8).toString('hex')}`;
+}
+
+function maskPhone(phone) {
+  if (!phone || phone.length < 6) return phone;
+  return `${phone.substring(0, 7)}****${phone.substring(phone.length - 2)}`;
 }
 
 // ─── Queue SMS ──────────────────────────────────────────────
@@ -32,16 +35,14 @@ const queueSMS = async ({
   if (!to || !message) throw new Error('Phone number and message are required');
   if (!cooperativeId) throw new Error('cooperativeId is required');
 
-  // ── Ensure we always have an idempotency key ──────────
   if (!idempotencyKey) {
     idempotencyKey = generateFallbackIdempotencyKey();
   }
 
   try {
-    // ── Check for existing job with same key ────────────
     const existing = await OutboundSms.findOne({ idempotencyKey });
     if (existing) {
-      logger.info('Duplicate SMS prevented', { idempotencyKey });
+      logger.info('Duplicate SMS prevented', { idempotencyKey, jobId: existing._id });
       return { jobId: existing._id, queued: true, duplicate: true };
     }
 
@@ -49,7 +50,7 @@ const queueSMS = async ({
     const job = new OutboundSms({
       phone: normalizedPhone,
       message,
-      from: from || process.env.SMS_SENDER || 'Cooperative',
+      from: from || process.env.CELCOM_SENDER_ID || process.env.SMS_SENDER || 'JOMUGITAGRI',
       type,
       priority,
       cooperativeId,
@@ -57,15 +58,19 @@ const queueSMS = async ({
       maxRetries,
       metadata,
       expiresAt,
-      idempotencyKey,   // now always non‑null
+      idempotencyKey,
       status: 'queued',
     });
 
     await job.save();
-    logger.info('SMS job queued', { jobId: job._id, phone: normalizedPhone, type });
-    return { jobId: job._id, queued: true };
+    logger.info('SMS job queued', {
+      jobId: job._id,
+      phone: maskPhone(normalizedPhone),
+      type,
+      idempotencyKey,
+    });
+    return { jobId: job._id, queued: true, duplicate: false };
   } catch (error) {
-    // ── Handle duplicate key race (E11000) ──────────────
     if (error.code === 11000) {
       const existing = await OutboundSms.findOne({ idempotencyKey });
       if (existing) {
@@ -77,7 +82,7 @@ const queueSMS = async ({
   }
 };
 
-// ─── Claim jobs ─────────────────────────────────────────────
+// ─── Claim jobs (device gateway path) ───────────────────────
 const claimJobs = async (gatewayId, limit = 10) => {
   const gateway = await SmsGateway
     .findOne({ gatewayId })
@@ -94,29 +99,23 @@ const claimJobs = async (gatewayId, limit = 10) => {
 
     const filter = {
       cooperativeId: gateway.cooperativeId,
-      $or: [
-        { status: 'queued' },
-        {
-          status: 'processing',
-          processingStartedAt: { $lte: cutoff }
-        }
-      ],
+      status: 'queued', // never claim unknown / processing without recovery path
       $and: [
         {
           $or: [
             { nextRetryAt: null },
             { nextRetryAt: { $exists: false } },
-            { nextRetryAt: { $lte: now } }
-          ]
+            { nextRetryAt: { $lte: now } },
+          ],
         },
         {
           $or: [
             { expiresAt: null },
             { expiresAt: { $exists: false } },
-            { expiresAt: { $gt: now } }
-          ]
-        }
-      ]
+            { expiresAt: { $gt: now } },
+          ],
+        },
+      ],
     };
 
     const job = await OutboundSms.findOneAndUpdate(
@@ -126,12 +125,12 @@ const claimJobs = async (gatewayId, limit = 10) => {
           status: 'processing',
           gatewayId: gateway._id,
           processingStartedAt: now,
-          updatedAt: now
-        }
+          updatedAt: now,
+        },
       },
       {
         sort: { priority: -1, createdAt: 1 },
-        returnDocument: 'after'
+        returnDocument: 'after',
       }
     );
 
@@ -142,76 +141,217 @@ const claimJobs = async (gatewayId, limit = 10) => {
   if (claimed.length > 0) {
     logger.info(`Claimed ${claimed.length} jobs`, {
       gatewayId,
-      claimed: claimed.map(j => j._id)
+      claimed: claimed.map((j) => j._id),
     });
   }
 
   return claimed;
 };
 
-// ─── Mark sent ──────────────────────────────────────────────
-const markSent = async (jobId, gatewayId, providerResponse) => {
-  const job = await OutboundSms.findOneAndUpdate(
-    { _id: jobId, gatewayId },
-    {
-      $set: {
-        status: 'sent',
-        sentAt: new Date(),
-        providerResponse,
-        updatedAt: new Date(),
+/**
+ * Claim for direct Celcom worker.
+ * ONLY status: 'queued'. Never claims unknown.
+ * Stuck processing is handled by recoverStuckJobs first.
+ */
+const claimJobsForWorker = async (limit = 50) => {
+  const claimed = [];
+  const now = new Date();
+
+  while (claimed.length < limit) {
+    const filter = {
+      status: 'queued',
+      $and: [
+        {
+          $or: [
+            { nextRetryAt: null },
+            { nextRetryAt: { $exists: false } },
+            { nextRetryAt: { $lte: now } },
+          ],
+        },
+        {
+          $or: [
+            { expiresAt: null },
+            { expiresAt: { $exists: false } },
+            { expiresAt: { $gt: now } },
+          ],
+        },
+      ],
+    };
+
+    const job = await OutboundSms.findOneAndUpdate(
+      filter,
+      {
+        $set: {
+          status: 'processing',
+          processingStartedAt: now,
+          updatedAt: now,
+        },
       },
-    },
-    { returnDocument: 'after' }
-  );
-  if (!job) throw new Error('Job not found or not owned by this gateway');
-  logger.info('SMS job marked sent', { jobId });
-  return job;
-};
+      {
+        sort: { priority: -1, createdAt: 1 },
+        returnDocument: 'after',
+      }
+    );
 
-// ─── Mark failed ─────────────────────────────────────────────
-const markFailed = async (jobId, gatewayId, error, providerResponse) => {
-  const job = await OutboundSms.findOneAndUpdate(
-    { _id: jobId, gatewayId },
-    {
-      $inc: { retryCount: 1 },
-      $set: {
-        error,
-        providerResponse,
-        updatedAt: new Date(),
-      },
-    },
-    { returnDocument: 'after' }
-  );
-
-  if (!job) throw new Error('Job not found or not owned by this gateway');
-
-  const newStatus = job.retryCount < job.maxRetries ? 'queued' : 'failed';
-  const update = { status: newStatus, updatedAt: new Date() };
-
-  if (newStatus === 'queued') {
-    const delaySeconds = smsConfig.RETRY_DELAYS[job.retryCount - 1] || 300;
-    update.nextRetryAt = new Date(Date.now() + delaySeconds * 1000);
-  } else {
-    update.failedAt = new Date();
+    if (!job) break;
+    claimed.push(job);
   }
 
-  const finalJob = await OutboundSms.findOneAndUpdate(
-    { _id: jobId, gatewayId },
+  if (claimed.length > 0) {
+    logger.info(`Worker claimed ${claimed.length} jobs`, {
+      jobIds: claimed.map((j) => j._id.toString()).slice(0, 5),
+    });
+  }
+
+  return claimed;
+};
+
+// ─── Mark sent (conditional) ────────────────────────────────
+const markSent = async (jobId, gatewayId, providerResponse = {}) => {
+  const filter = {
+    _id: jobId,
+    status: 'processing',
+    $or: [
+      { providerMessageId: null },
+      { providerMessageId: { $exists: false } },
+    ],
+  };
+  if (gatewayId) filter.gatewayId = gatewayId;
+
+  const update = {
+    status: 'sent',
+    sentAt: new Date(),
+    providerResponse,
+    updatedAt: new Date(),
+  };
+
+  if (providerResponse && providerResponse.providerMessageId) {
+    update.providerMessageId = String(providerResponse.providerMessageId);
+  }
+
+  const job = await OutboundSms.findOneAndUpdate(
+    filter,
     { $set: update },
     { returnDocument: 'after' }
   );
 
-  logger.warn('SMS job marked failed', { jobId, retryCount: finalJob.retryCount, error });
-  return finalJob;
+  if (!job) {
+    logger.warn('markSent skipped – not processing or already has providerMessageId', {
+      jobId,
+    });
+    return null;
+  }
+
+  logger.info('SMS job marked sent', {
+    jobId,
+    providerMessageId: job.providerMessageId,
+  });
+  return job;
+};
+
+// ─── Mark unknown (conditional) ─────────────────────────────
+const markUnknown = async (jobId, details = {}) => {
+  const update = {
+    status: 'unknown',
+    updatedAt: new Date(),
+    error: details.error || 'Provider outcome unknown',
+  };
+  if (details.providerMessageId) {
+    update.providerMessageId = String(details.providerMessageId);
+  }
+  if (details.errorCode) {
+    update.errorCode = details.errorCode;
+  }
+
+  const job = await OutboundSms.findOneAndUpdate(
+    {
+      _id: jobId,
+      status: { $in: ['processing', 'queued'] },
+    },
+    { $set: update },
+    { returnDocument: 'after' }
+  );
+
+  if (job) {
+    logger.warn('SMS job marked unknown', {
+      jobId,
+      providerMessageId: details.providerMessageId,
+      reason: details.reason || details.errorCode,
+    });
+  }
+  return job;
+};
+
+// ─── Mark failed (retry OPT-IN only) ────────────────────────
+const markFailed = async (jobId, gatewayId, error, meta = {}) => {
+  const filter = gatewayId
+    ? { _id: jobId, gatewayId, status: { $in: ['processing', 'queued'] } }
+    : { _id: jobId, status: { $in: ['processing', 'queued'] } };
+
+  // OPT-IN: only retry when explicitly true
+  const retryable = meta.retryable === true;
+
+  const job = await OutboundSms.findOneAndUpdate(
+    filter,
+    {
+      $inc: { retryCount: 1 },
+      $set: {
+        error: typeof error === 'string' ? error : (error?.message || String(error)),
+        providerResponse: meta.providerResponse || null,
+        updatedAt: new Date(),
+      },
+    },
+    { returnDocument: 'after' }
+  );
+
+  if (!job) {
+    logger.warn('markFailed skipped – job not in processing/queued', { jobId });
+    return null;
+  }
+
+  const canRetry = retryable && job.retryCount < job.maxRetries;
+  const update = { updatedAt: new Date() };
+
+  if (canRetry) {
+    const delaySeconds =
+      (smsConfig.RETRY_DELAYS && smsConfig.RETRY_DELAYS[job.retryCount - 1]) || 300;
+    update.status = 'queued';
+    update.nextRetryAt = new Date(Date.now() + delaySeconds * 1000);
+    logger.info('SMS retry scheduled', {
+      jobId,
+      retryCount: job.retryCount,
+      nextRetryAt: update.nextRetryAt,
+    });
+  } else {
+    update.status = 'failed';
+    update.failedAt = new Date();
+    logger.warn('SMS permanently failed', {
+      jobId,
+      retryCount: job.retryCount,
+      error: job.error,
+    });
+  }
+
+  return OutboundSms.findOneAndUpdate(
+    { _id: job._id, status: { $in: ['processing', 'queued'] } },
+    { $set: update },
+    { returnDocument: 'after' }
+  );
 };
 
 // ─── Recover stuck jobs ─────────────────────────────────────
 const recoverStuckJobs = async (olderThanMinutes = PROCESSING_TIMEOUT_MINUTES) => {
   const cutoff = new Date(Date.now() - olderThanMinutes * 60 * 1000);
-  const result = await OutboundSms.updateMany(
+
+  // Safe: no providerMessageId → may never have reached Celcom
+  const safe = await OutboundSms.updateMany(
     {
       status: 'processing',
       processingStartedAt: { $lte: cutoff },
+      $or: [
+        { providerMessageId: null },
+        { providerMessageId: { $exists: false } },
+      ],
     },
     {
       $set: {
@@ -222,20 +362,59 @@ const recoverStuckJobs = async (olderThanMinutes = PROCESSING_TIMEOUT_MINUTES) =
       },
     }
   );
-  if (result.modifiedCount > 0) {
-    logger.info(`Recovered ${result.modifiedCount} stuck processing jobs`);
+
+  // Unsafe: has providerMessageId → never auto-resend
+  const unsafe = await OutboundSms.updateMany(
+    {
+      status: 'processing',
+      processingStartedAt: { $lte: cutoff },
+      providerMessageId: { $exists: true, $ne: null },
+    },
+    {
+      $set: {
+        status: 'unknown',
+        updatedAt: new Date(),
+        error: 'Stuck processing with providerMessageId – needs reconciliation',
+      },
+    }
+  );
+
+  if (safe.modifiedCount || unsafe.modifiedCount) {
+    logger.info('Stuck job recovery', {
+      requeued: safe.modifiedCount,
+      markedUnknown: unsafe.modifiedCount,
+    });
   }
-  return result;
+
+  return {
+    requeued: safe.modifiedCount,
+    markedUnknown: unsafe.modifiedCount,
+  };
 };
 
-// ─── Get job status ──────────────────────────────────────────
+// ─── Get job status ─────────────────────────────────────────
 const getJobStatus = async (jobId) => {
-  const job = await OutboundSms.findById(jobId);
+  const job = await OutboundSms.findById(jobId).select(
+    '-providerResponse.raw -metadata'
+  );
   if (!job) throw new Error('Job not found');
-  return job;
+  return {
+    jobId: job._id,
+    status: job.status,
+    phone: job.phone,
+    type: job.type,
+    retryCount: job.retryCount,
+    maxRetries: job.maxRetries,
+    providerMessageId: job.providerMessageId || null,
+    error: job.error || null,
+    createdAt: job.createdAt,
+    sentAt: job.sentAt || null,
+    failedAt: job.failedAt || null,
+    nextRetryAt: job.nextRetryAt || null,
+  };
 };
 
-// ─── sendSMS (public API) ───────────────────────────────────
+// ─── Public API ─────────────────────────────────────────────
 const sendSMS = async ({
   to,
   message,
@@ -244,10 +423,11 @@ const sendSMS = async ({
   cooperativeId,
   farmerId,
   priority = SMS_PRIORITY.GENERAL,
-  idempotencyKey = null,   // ✅ now accepts an explicit key
+  idempotencyKey = null,
+  metadata = {},
 }) => {
   if (!cooperativeId) throw new Error('cooperativeId required');
-  return await queueSMS({
+  return queueSMS({
     to,
     message,
     from,
@@ -256,10 +436,10 @@ const sendSMS = async ({
     farmerId,
     priority,
     idempotencyKey,
+    metadata,
   });
 };
 
-// ─── Legacy functions (use queueSMS) ────────────────────────
 const sendMonthlyMilkSummary = async (
   farmerPhone,
   farmerName,
@@ -271,7 +451,7 @@ const sendMonthlyMilkSummary = async (
   if (!cooperativeId) throw new Error('cooperativeId required');
   const netPayout = totalPayout - totalDeductions;
   const message = `Dear ${farmerName}, Monthly: ${litresDelivered}L, Payout:${totalPayout}, Deduct:${totalDeductions}, Net:${netPayout}`;
-  return await queueSMS({
+  return queueSMS({
     to: farmerPhone,
     message,
     type: 'monthly_summary',
@@ -293,7 +473,7 @@ const sendFeedTransactionNotification = async ({
 }) => {
   if (!cooperativeId) throw new Error('cooperativeId required');
   const message = `Dear ${farmerName}, You bought ${quantity} units of ${productName} @ ${pricePerUnit}/unit. Total: ${totalCost}. Balance: ${newBalance}. ${cooperativeName || 'Cooperative'}`;
-  return await queueSMS({
+  return queueSMS({
     to: farmerPhone,
     message,
     type: 'feed_purchase',
@@ -305,7 +485,9 @@ const sendFeedTransactionNotification = async ({
 module.exports = {
   queueSMS,
   claimJobs,
+  claimJobsForWorker,
   markSent,
+  markUnknown,
   markFailed,
   recoverStuckJobs,
   getJobStatus,

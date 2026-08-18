@@ -104,7 +104,6 @@ const checkDailyFraudLimit = async (farmer_id, litres) => {
   return currentTotal;
 };
 
-// ── MAIN: Record milk transaction ──────────────────────────
 const recordMilkTransaction = async (data) => {
   const session = await mongoose.startSession();
   session.startTransaction();
@@ -118,6 +117,9 @@ const recordMilkTransaction = async (data) => {
   let cooperativeId;
   let farmer_id;
   let ledgerEntry;
+  let effectiveDate;
+  let collectionShift = 'AM';
+  let litresNum;
 
   try {
     const {
@@ -132,6 +134,8 @@ const recordMilkTransaction = async (data) => {
       timestamp_local,
       cooperativeId: coopId,
       userId,
+      // Optional client-supplied key for request-level idempotency
+      clientIdempotencyKey,
     } = data;
 
     cooperativeId = coopId;
@@ -140,9 +144,12 @@ const recordMilkTransaction = async (data) => {
     if (!userId) {
       throw new Error('User ID (userId) is required for ledger entry');
     }
+    if (!device_id) {
+      throw new Error('device_id is required');
+    }
 
     // ── 1. Validation ──────────────────────────────────
-    const litresNum = parseFloat(litres);
+    litresNum = parseFloat(litres);
     if (isNaN(litresNum) || litresNum < FRAUD_CONFIG.MIN_MILK_THRESHOLD) {
       throw new Error(`Milk quantity must be at least ${FRAUD_CONFIG.MIN_MILK_THRESHOLD}L`);
     }
@@ -150,41 +157,83 @@ const recordMilkTransaction = async (data) => {
       throw new Error(`Milk quantity cannot exceed ${FRAUD_CONFIG.MAX_MILK_PER_TRANSACTION}L per transaction`);
     }
 
-    // ── Derive effective date from timestamp_local ──
-    let effectiveDate = null;
-    let collectionShift = 'AM';
+    // ── Request-level idempotency (device_id + device_seq_num) ──
+    // Prefer explicit client key when provided; otherwise use device sequence.
+    const requestIdempotencyKey =
+      clientIdempotencyKey ||
+      (device_seq_num != null
+        ? `milk:${cooperativeId}:${device_id}:${device_seq_num}`
+        : null);
+
+    if (requestIdempotencyKey) {
+      const existing = await Transaction.findOne({
+        cooperativeId,
+        idempotency_key: requestIdempotencyKey,
+        type: 'milk',
+      }).session(session);
+
+      if (existing) {
+        // Idempotent replay – return the already-committed transaction
+        await session.abortTransaction();
+        session.endSession();
+
+        const cooperative = await Cooperative.findById(cooperativeId).lean();
+        const farmerDoc = await Farmer.findById(farmer_id).lean();
+        const receipt = formatMilkReceipt({
+          cooperativeName: cooperative?.name || 'COOPERATIVE',
+          receiptNumber: existing.receipt_num,
+          farmerName: farmerDoc?.name || '',
+          farmerCode: farmerDoc?.farmer_code || farmerDoc?.code || '',
+          litres: existing.litres,
+          payout: existing.payout,
+          walletBalance: farmerDoc?.currentBalance || 0,
+          cumulativeMilk: null, // caller can recompute if needed
+          collectionDate: existing.collectionDate,
+          transactionDate: existing.timestamp_server,
+        });
+
+        return {
+          transaction: existing,
+          receiptNum: existing.receipt_num,
+          serverSeqNum: existing.server_seq_num,
+          qrUrl: qrService.generateQRUrl(existing.receipt_num),
+          qrImage: null,
+          payout: existing.payout,
+          farmer_code: farmerDoc?.farmer_code || farmerDoc?.code,
+          farmer_name: farmerDoc?.name,
+          previousBalance: null,
+          newBalance: farmerDoc?.currentBalance,
+          ledgerEntry: null,
+          receipt,
+          duplicate: true,
+        };
+      }
+    }
+
+    // ── Derive effective date / shift ───────────────────
     if (timestamp_local) {
       const dateObj = new Date(timestamp_local);
       if (!isNaN(dateObj.getTime())) {
         effectiveDate = getKenyaDateString(dateObj);
+        // Prefer explicit offset from device; hour is only a fallback
         const hour = dateObj.getHours();
         collectionShift = hour >= 12 ? 'PM' : 'AM';
       }
     }
     if (!effectiveDate) {
-      logger.warn('timestamp_local missing or invalid; using today\'s date for rate lookup');
+      logger.warn("timestamp_local missing or invalid; using today's Nairobi date");
       effectiveDate = getKenyaDateString();
-      // default shift to AM if we fallback
     }
 
-    // ── Get the rate for the effective date ─────────────
-    const rateInfo = await getActiveRateVersion(
-      cooperativeId,
-      'milk',
-      effectiveDate
-    );
+    // ── Rate lookup ─────────────────────────────────────
+    const rateInfo = await getActiveRateVersion(cooperativeId, 'milk', effectiveDate);
     payout = parseFloat((litresNum * rateInfo.rate).toFixed(2));
 
     await checkDailyFraudLimit(farmer_id, litresNum);
 
-    // ── 2. Generate numbers ────────────────────────────
+    // ── Generate numbers ────────────────────────────────
     receiptNum = await generateReceiptNum();
     const serverSeqNum = await generateServerSeqNum(branch_id);
-
-    // ── 3. Build transaction ────────────────────────────
-    const now = Date.now();
-    const random = Math.random().toString(36).substring(2, 10);
-    const finalKey = `${device_id}-${now}-${random}`;
 
     const qrHash = qrService.generateHMAC(`${receiptNum}${serverSeqNum}`);
     const signatureData = {
@@ -203,17 +252,15 @@ const recordMilkTransaction = async (data) => {
     };
     const digitalSignature = qrService.generateHMAC(signatureData);
 
-    // ── 4. Get farmer ──────────────────────────────────────
+    // ── Farmer (under session) ──────────────────────────
     farmer = await Farmer.findById(farmer_id).session(session);
     if (!farmer) {
       throw new Error('Farmer not found');
     }
-    previousBalance = farmer.currentBalance || 0;
 
-    // ── 5. Resolve zone ──────────────────────────────────
+    // ── Zone resolution ─────────────────────────────────
     let zoneId = null;
     let zoneName = '';
-
     if (zone) {
       const zoneDoc = await Zone.findById(zone).session(session);
       if (zoneDoc) {
@@ -227,8 +274,21 @@ const recordMilkTransaction = async (data) => {
       zoneName = farmer.zoneName || '';
     }
 
-    // ── 6. Create Transaction ──────────────────────────────
-    // ✅ Added required fields: createdBy, collectionDate, collectionShift
+    // ── Atomic balance from latest ledger (same session) ─
+    const lastLedger = await Ledger.findOne({
+      cooperativeId,
+      farmerId: farmer_id,
+    })
+      .sort({ timestamp: -1, _id: -1 })
+      .session(session)
+      .lean();
+
+    previousBalance = lastLedger ? lastLedger.runningBalance : 0;
+    newBalance = previousBalance + payout;
+
+    // ── Create Transaction ──────────────────────────────
+    const finalKey = requestIdempotencyKey || `${device_id}-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+
     [transaction] = await Transaction.create(
       [{
         device_id,
@@ -237,7 +297,7 @@ const recordMilkTransaction = async (data) => {
         status: 'completed',
         device_seq_num,
         server_seq_num: serverSeqNum,
-        timestamp_local: new Date(timestamp_local),
+        timestamp_local: timestamp_local ? new Date(timestamp_local) : new Date(),
         timestamp_server: new Date(),
         digital_signature: digitalSignature,
         idempotency_key: finalKey,
@@ -254,17 +314,14 @@ const recordMilkTransaction = async (data) => {
         zoneId: zoneId || farmer.zoneId || null,
         branch_id,
         cooperativeId,
-        // ─── NEW: required fields ────────────────────────
         createdBy: userId,
-        collectionDate: effectiveDate,
-        collectionShift: collectionShift,
-        // ──────────────────────────────────────────────────
+        collectionDate: effectiveDate, // always YYYY-MM-DD string
+        collectionShift,
       }],
       { session }
     );
 
-    // ── 7. Create Ledger Entry ────────────────────────────
-    newBalance = previousBalance + payout;
+    // ── Create Ledger Entry ─────────────────────────────
     [ledgerEntry] = await Ledger.create(
       [{
         cooperativeId,
@@ -290,36 +347,44 @@ const recordMilkTransaction = async (data) => {
       { session }
     );
 
-    // ── 8. Update Farmer balance ──────────────────────────
-    await updateFarmerBalance(farmer_id, newBalance, ledgerEntry._id);
+    // ── Update farmer balance INSIDE the same session ───
+    await updateFarmerBalance(farmer_id, newBalance, ledgerEntry._id, session);
 
-    // ── 9. Update Porter totals ──────────────────────────
-    await Porter.findByIdAndUpdate(
-      porter_id,
-      {
-        $inc: {
-          'totals.litresCollected': litresNum,
-          'totals.transactionsCount': 1,
+    // ── Porter totals ───────────────────────────────────
+    if (porter_id) {
+      await Porter.findByIdAndUpdate(
+        porter_id,
+        {
+          $inc: {
+            'totals.litresCollected': litresNum,
+            'totals.transactionsCount': 1,
+          },
         },
-      },
-      { session }
-    );
+        { session }
+      );
+    }
 
-    // ── 10. Commit transaction ──────────────────────────
+    // ── Commit ──────────────────────────────────────────
     await session.commitTransaction();
     session.endSession();
 
-    // ── ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─
-    // Everything below is **outside** the transaction
-    // ── ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─
+    // =====================================================
+    // OUTSIDE TRANSACTION – SMS failure must not roll back
+    // =====================================================
 
-    // ── 11. Get cooperative (for receipt) ──────────────
     const cooperative = await Cooperative.findById(cooperativeId).lean();
     if (!cooperative) {
       throw new Error('Cooperative not found for receipt');
     }
 
-    // ── 12. Build receipt using the formatter ──────────
+    // Cumulative milk from Transaction collection (source of truth)
+    const { getCumulativeMilkForMonth } = require('./cumulativeMilkService');
+    const cumulative = await getCumulativeMilkForMonth(
+      farmer_id,
+      cooperativeId,
+      transaction.timestamp_server || new Date()
+    );
+
     const receipt = formatMilkReceipt({
       cooperativeName: cooperative.name,
       receiptNumber: receiptNum,
@@ -328,41 +393,56 @@ const recordMilkTransaction = async (data) => {
       litres: litresNum,
       payout,
       walletBalance: newBalance,
+      cumulativeMilk: cumulative.litres,
+      collectionDate: transaction.collectionDate || effectiveDate,
       transactionDate: transaction.timestamp_server,
     });
 
-    // ── 13. Send SMS ────────────────────────────────────
-if (farmer.phone) {
-  try {
-    const smsResult = await smsService.sendSMS({
-      to: farmer.phone,
-      message: receipt.sms,
-      type: 'milk_receipt',
-      cooperativeId,
-      farmerId: farmer_id,
-      idempotencyKey: `sms_${transaction._id}`,   // ✅ unique per transaction
-    });
-    if (smsResult.queued) {
-      logger.info('Milk SMS queued', { jobId: smsResult.jobId, phone: farmer.phone });
-    } else {
-      logger.warn('Milk SMS queue returned unexpected result', { smsResult });
+    // Queue SMS
+    if (farmer.phone) {
+      try {
+        const smsResult = await smsService.sendSMS({
+          to: farmer.phone,
+          message: receipt.sms,
+          from: process.env.CELCOM_SENDER_ID || 'JOMUGITAGRI',
+          type: 'milk_receipt',
+          cooperativeId,
+          farmerId: farmer_id,
+          priority: 80,
+          idempotencyKey: `milk_receipt:${transaction._id}`,
+          metadata: {
+            transactionId: transaction._id.toString(),
+            receiptNumber: receiptNum,
+            litres: litresNum,
+            payout,
+          },
+        });
+
+        if (smsResult.queued) {
+          logger.info('Milk SMS queued', {
+            jobId: smsResult.jobId,
+            phone: farmer.phone,
+            duplicate: !!smsResult.duplicate,
+          });
+        }
+      } catch (smsError) {
+        logger.error('SMS failed but transaction committed', {
+          phone: farmer.phone,
+          error: smsError.message,
+        });
+      }
     }
-  } catch (smsError) {
-    // SMS failure is logged but doesn't affect transaction
-    logger.error('SMS failed but transaction committed', {
-      phone: farmer.phone,
-      error: smsError.message,
-      stack: smsError.stack,
-    });
-  }
-}
-    // ── 14. Generate QR (non‑critical) ──────────────────
+
+    // QR (non-critical)
     let qrImage = null;
     try {
       const qrResult = await qrService.generateQRForTransaction(transaction._id, cooperativeId);
       qrImage = qrResult.qrImage;
     } catch (err) {
-      logger.warn('QR generation failed', { transactionId: transaction._id, error: err.message });
+      logger.warn('QR generation failed', {
+        transactionId: transaction._id,
+        error: err.message,
+      });
     }
 
     const updatedFarmer = await Farmer.findById(farmer_id).lean();
@@ -374,6 +454,7 @@ if (farmer.phone) {
       payout,
       previousBalance,
       newBalance,
+      cumulativeMilk: cumulative.litres,
     });
 
     return {
@@ -384,20 +465,22 @@ if (farmer.phone) {
       qrImage,
       payout,
       farmer_code: farmer.farmer_code || farmer.code,
-      farmer_name: updatedFarmer.name,
+      farmer_name: updatedFarmer?.name,
       previousBalance,
       newBalance,
       ledgerEntry,
       receipt,
+      duplicate: false,
     };
-
   } catch (error) {
     if (session.inTransaction()) {
       await session.abortTransaction();
     }
     session.endSession();
-
-    logger.error('Milk transaction failed', { error: error.message, stack: error.stack });
+    logger.error('Milk transaction failed', {
+      error: error.message,
+      stack: error.stack,
+    });
     throw error;
   }
 };

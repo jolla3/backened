@@ -25,7 +25,7 @@ const outboundSmsSchema = new mongoose.Schema(
     },
     status: {
       type: String,
-      enum: ['queued', 'processing', 'sent', 'failed', 'cancelled', 'expired'],
+      enum: ['queued', 'processing', 'sent', 'failed', 'cancelled', 'expired', 'delivered', 'undelivered'],
       default: 'queued',
       index: true,
     },
@@ -62,6 +62,12 @@ const outboundSmsSchema = new mongoose.Schema(
     error: {
       type: String,
     },
+    // Top-level provider message ID for DLR lookups (required)
+    providerMessageId: {
+      type: String,
+      index: true,
+      sparse: true,
+    },
     providerResponse: {
       type: mongoose.Schema.Types.Mixed,
     },
@@ -72,6 +78,9 @@ const outboundSmsSchema = new mongoose.Schema(
       type: Date,
     },
     failedAt: {
+      type: Date,
+    },
+    deliveredAt: {
       type: Date,
     },
     metadata: {
@@ -90,9 +99,7 @@ const outboundSmsSchema = new mongoose.Schema(
   }
 );
 
-// ─── Indexes ───────────────────────────────────────────────
-
-// 1. Unique idempotency key per cooperative (critical for race safety)
+// Unique idempotency key per cooperative
 outboundSmsSchema.index(
   {
     cooperativeId: 1,
@@ -106,7 +113,7 @@ outboundSmsSchema.index(
   }
 );
 
-// 2. Main claim query index
+// Main claim query index
 outboundSmsSchema.index({
   cooperativeId: 1,
   status: 1,
@@ -114,20 +121,10 @@ outboundSmsSchema.index({
   createdAt: 1,
 });
 
-// 3. Retry + expiration
 outboundSmsSchema.index({ nextRetryAt: 1 });
 outboundSmsSchema.index({ expiresAt: 1 });
-
-// 4. Phone lookups
 outboundSmsSchema.index({ phone: 1, createdAt: -1 });
+outboundSmsSchema.index({ providerMessageId: 1 }, { sparse: true });
 
-// 5. Optional TTL – auto-delete SMS older than 6 months
-// Uncomment if you don't need permanent audit history
-// outboundSmsSchema.index(
-//   { createdAt: 1 },
-//   { expireAfterSeconds: 60 * 60 * 24 * 180 } // 180 days
-// );
-
-// ─── Model ──────────────────────────────────────────────────
 const OutboundSms = mongoose.models.OutboundSms || mongoose.model('OutboundSms', outboundSmsSchema);
 module.exports = OutboundSms;
