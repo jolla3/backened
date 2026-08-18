@@ -15,6 +15,7 @@ const {
   parseKenyaDate,
   isValidDateString
 } = require('../utils/dateUtils');
+const { getCumulativeMilk } = require('./cumulativeMilkService');
 
 // ─── Read functions ──────────────────────────────────────────
 
@@ -139,7 +140,6 @@ const addManualMilkEntry = async ({
     if (!porter) throw new Error('Porter not found or inactive');
 
     // ── 5. Get active milk rate using shared function ──────
-    // ✅ Pass collectionDate so the rate is selected based on the business date
     const rateInfo = await getActiveRateVersion(
       cooperativeId,
       'milk',
@@ -259,6 +259,16 @@ const addManualMilkEntry = async ({
     let receipt = null;
     if (farmer.phone) {
       try {
+        // ✅ Calculate cumulative – pass asOfDate and asOfShift
+        const cumulative = await getCumulativeMilk({
+          farmerId: farmer._id,
+          cooperativeId: cooperative._id,
+          asOfDate: collectionDate,
+          asOfShift: collectionShift,
+        });
+        const cumulativeLitres = cumulative.litres;
+
+        // ✅ Build receipt data with all required fields
         const receiptData = {
           receiptNumber: receiptNum,
           cooperativeName: cooperative.name,
@@ -268,19 +278,44 @@ const addManualMilkEntry = async ({
           payout,
           walletBalance: newBalance,
           collectionDate,
-          transactionDate: transaction.timestamp_server
+          collectionShift,
+          cumulativeMilk: cumulativeLitres,
         };
+
         receipt = receiptFormatter.formatMilkReceipt(receiptData);
 
+        // ✅ Log final SMS for debugging
+        logger.info('FINAL MILK SMS', {
+          receiptNum,
+          length: receipt.smsLength,
+          message: receipt.sms,
+          cumulativeMilk: cumulativeLitres,
+          collectionDate,
+          collectionShift,
+        });
+
+        // ✅ Queue SMS with enriched metadata
         await smsService.queueSMS({
           to: farmer.phone,
           message: receipt.sms,
           type: 'milk_receipt',
           cooperativeId: cooperative._id,
           farmerId: farmer._id,
-          metadata: { receiptNumber: receiptNum, entryMethod: 'manual' }
+          metadata: {
+            receiptNumber: receiptNum,
+            collectionDate,
+            collectionShift,
+            litres: litresNum,
+            cumulativeMilk: cumulativeLitres,
+            entryMethod: 'manual',
+          }
         });
-        logger.info('Manual milk receipt SMS queued', { phone: farmer.phone, receiptNum });
+
+        logger.info('Manual milk receipt SMS queued', {
+          phone: farmer.phone,
+          receiptNum,
+          cumulative: cumulativeLitres
+        });
       } catch (err) {
         logger.warn('Receipt generation or SMS queue failed (non-critical)', {
           farmerId: farmer._id,

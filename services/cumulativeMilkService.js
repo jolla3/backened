@@ -1,14 +1,13 @@
 /**
- * Cumulative Milk Service
- * Authoritative calculation from Transaction collection (source of truth).
- * Never derived from SMS messages.
+ * Cumulative Milk Service – authoritative calculation from Transaction collection.
+ * Now accepts asOfDate and asOfShift to compute month‑to‑date inclusive of the current shift.
  */
 const mongoose = require('mongoose');
 const Transaction = require('../models/transaction');
 const logger = require('../utils/logger');
 
 /**
- * Get current month boundaries in Africa/Nairobi (YYYY-MM-DD strings)
+ * Get month boundaries for a given date (Africa/Nairobi).
  */
 const getCurrentMonthBoundaries = (referenceDate = new Date()) => {
   const formatter = new Intl.DateTimeFormat('en-CA', {
@@ -26,29 +25,60 @@ const getCurrentMonthBoundaries = (referenceDate = new Date()) => {
 };
 
 /**
- * Cumulative milk for one farmer for the month containing asOfDate
- * (includes all completed milk transactions in that calendar month)
+ * Cumulative milk for one farmer for the month containing asOfDate,
+ * up to and including the given shift (AM or PM) on that date.
+ * If asOfShift is not provided, it includes all transactions up to the end of asOfDate.
  */
-const getCumulativeMilkForMonth = async (farmerId, cooperativeId, asOfDate = new Date()) => {
+const getCumulativeMilkForMonth = async (
+  farmerId,
+  cooperativeId,
+  asOfDate = new Date(),
+  asOfShift = null
+) => {
   if (!farmerId || !cooperativeId) {
     throw new Error('farmerId and cooperativeId are required');
   }
 
   const boundaries = getCurrentMonthBoundaries(asOfDate);
 
-  const result = await Transaction.aggregate([
-    {
-      $match: {
-        farmer_id: new mongoose.Types.ObjectId(farmerId),
-        cooperativeId: new mongoose.Types.ObjectId(cooperativeId),
-        type: 'milk',
-        collectionDate: {
-          $gte: boundaries.startDate,
-          $lte: boundaries.endDate,
-        },
-        status: 'completed',
-      },
+  // Base match: same month, completed milk transactions
+  const match = {
+    farmer_id: new mongoose.Types.ObjectId(farmerId),
+    cooperativeId: new mongoose.Types.ObjectId(cooperativeId),
+    type: 'milk',
+    status: 'completed',
+    collectionDate: {
+      $gte: boundaries.startDate,
+      $lte: boundaries.endDate,
     },
+  };
+
+  // Apply shift-based cutoff if provided
+  if (asOfShift) {
+    // If shift is AM: include all before asOfDate, plus AM on asOfDate
+    // If shift is PM: include all before asOfDate, plus AM and PM on asOfDate
+    if (asOfShift === 'AM') {
+      match.$or = [
+        { collectionDate: { $lt: asOfDate } },
+        {
+          collectionDate: asOfDate,
+          collectionShift: 'AM',
+        },
+      ];
+    } else if (asOfShift === 'PM') {
+      match.$or = [
+        { collectionDate: { $lt: asOfDate } },
+        {
+          collectionDate: asOfDate,
+          collectionShift: { $in: ['AM', 'PM'] },
+        },
+      ];
+    }
+    // Note: for invalid shift, we default to including everything up to endDate (same as no shift)
+  }
+
+  const result = await Transaction.aggregate([
+    { $match: match },
     {
       $group: {
         _id: null,
@@ -69,15 +99,18 @@ const getCumulativeMilkForMonth = async (farmerId, cooperativeId, asOfDate = new
 
   logger.debug('Cumulative milk calculated', {
     farmerId: farmerId.toString(),
+    cooperativeId: cooperativeId.toString(),
     month: boundaries.month,
     year: boundaries.year,
+    asOfDate,
+    asOfShift,
     litres: data.totalLitres,
     transactions: data.transactionCount,
   });
 
   return {
-    litres: data.totalLitres,
-    transactionCount: data.transactionCount,
+    litres: Number(data.totalLitres || 0),
+    transactionCount: Number(data.transactionCount || 0),
     month: boundaries.month,
     year: boundaries.year,
     startDate: boundaries.startDate,
@@ -88,15 +121,26 @@ const getCumulativeMilkForMonth = async (farmerId, cooperativeId, asOfDate = new
 };
 
 /**
- * Convenience alias matching the required signature
+ * Public wrapper – now accepts asOfDate and asOfShift.
  */
-const getCumulativeMilk = async ({ farmerId, cooperativeId, session }) => {
+const getCumulativeMilk = async ({
+  farmerId,
+  cooperativeId,
+  session,
+  asOfDate = new Date(),
+  asOfShift = null,
+}) => {
   // session is accepted for future transactional use; aggregation currently runs outside session
-  return getCumulativeMilkForMonth(farmerId, cooperativeId);
+  return getCumulativeMilkForMonth(
+    farmerId,
+    cooperativeId,
+    asOfDate,
+    asOfShift
+  );
 };
 
 /**
- * Bulk cumulative for multiple farmers
+ * Bulk cumulative for multiple farmers (kept for completeness)
  */
 const getCumulativeMilkForFarmers = async (farmerIds, cooperativeId, asOfDate = new Date()) => {
   if (!Array.isArray(farmerIds) || farmerIds.length === 0) return {};

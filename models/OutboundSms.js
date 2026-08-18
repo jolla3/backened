@@ -25,7 +25,7 @@ const outboundSmsSchema = new mongoose.Schema(
     },
     status: {
       type: String,
-      enum: ['queued', 'processing', 'sent', 'failed', 'cancelled', 'expired', 'delivered', 'undelivered'],
+      enum: ['queued', 'processing', 'sent', 'failed', 'unknown','cancelled', 'expired', 'delivered', 'undelivered'],
       default: 'queued',
       index: true,
     },
@@ -62,7 +62,6 @@ const outboundSmsSchema = new mongoose.Schema(
     error: {
       type: String,
     },
-    // Top-level provider message ID for DLR lookups (required)
     providerMessageId: {
       type: String,
       index: true,
@@ -91,11 +90,11 @@ const outboundSmsSchema = new mongoose.Schema(
       index: true,
     },
     deliveryRoute: {
-  type: String,
-  enum: ['celcom', 'gateway'],
-  default: 'celcom',
-  index: true,
-},
+      type: String,
+      enum: ['celcom', 'gateway'],
+      default: 'celcom',
+      index: true,
+    },
   },
   {
     timestamps: {

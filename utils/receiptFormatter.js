@@ -1,13 +1,21 @@
 /**
- * Receipt Formatter (dumb – no DB, no business logic)
+ * Receipt Formatter – pure functions, no DB or business logic.
+ * SMS is compact; printable retains full detail.
  */
 const SEPARATOR = '='.repeat(40);
 
+// Full currency for printable (with decimals)
 const formatCurrency = (amount) => {
   return `KES ${Number(amount).toLocaleString('en-KE', {
     minimumFractionDigits: 2,
     maximumFractionDigits: 2,
   })}`;
+};
+
+// Compact currency for SMS (round to nearest shilling, no decimals)
+const formatSmsCurrency = (amount) => {
+  const rounded = Math.round(Number(amount || 0));
+  return `KES ${rounded.toLocaleString('en-KE')}`;
 };
 
 const formatDate = (date) => {
@@ -26,7 +34,6 @@ const formatDate = (date) => {
 
 const formatCollectionDate = (dateInput) => {
   if (!dateInput) return '';
-  // Accept YYYY-MM-DD or Date
   let d;
   if (typeof dateInput === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(dateInput)) {
     const [y, m, day] = dateInput.split('-').map(Number);
@@ -43,21 +50,8 @@ const formatCollectionDate = (dateInput) => {
   }).format(d);
 };
 
-const buildHeader = ({ cooperativeName, receiptNumber, farmerName, farmerCode, title }) => {
-  return [
-    (cooperativeName || 'COOPERATIVE').toUpperCase(),
-    title,
-    '',
-    `Receipt: ${receiptNumber}`,
-    '',
-    `Farmer: ${farmerName}`,
-    `Code: ${farmerCode}`,
-    '',
-  ];
-};
-
 /**
- * Milk receipt – includes cumulative milk when provided
+ * Milk receipt – compact SMS, verbose printable.
  */
 const formatMilkReceipt = ({
   cooperativeName,
@@ -69,48 +63,60 @@ const formatMilkReceipt = ({
   walletBalance,
   cumulativeMilk,
   collectionDate,
-  transactionDate,
+  collectionShift,
 }) => {
-  const header = buildHeader({
-    cooperativeName,
-    receiptNumber,
-    farmerName,
-    farmerCode,
-    title: 'MILK DELIVERY RECEIPT',
-  });
+  const milk = Number(litres || 0);
+  const cumulative = Number(cumulativeMilk || 0);
 
-  const body = [
-    `Milk Delivered: ${Number(litres).toFixed(1)} L`,
-  ];
+  // Extract short numeric part from REC-YYYYMMDD-XXXXXX
+  const receiptShort = String(receiptNumber || '')
+    .replace(/^REC-\d{8}-/, '');
 
-  if (cumulativeMilk !== undefined && cumulativeMilk !== null) {
-    body.push(`Cumulative Milk: ${Number(cumulativeMilk).toFixed(1)} L`);
-  }
+  const date = formatCollectionDate(collectionDate);
+  const shift = collectionShift ? ` ${collectionShift}` : '';
 
-  body.push(`Amount Earned: ${formatCurrency(payout)}`);
-  body.push('');
-  body.push(`Collection Date: ${formatCollectionDate(collectionDate)}`);
+  // ---- SMS (aggressively compact) ----
+  const sms = [
+    (cooperativeName || 'COOPERATIVE').toUpperCase(),
+    `Milk Receipt ${receiptShort}`,
+    `${farmerName || 'Farmer'} #${farmerCode || 'N/A'}`,
+    `${milk}L | ${cumulative}L Mo`,
+    formatSmsCurrency(payout),
+    `${date}${shift}`,
+    `Bal ${formatSmsCurrency(walletBalance).replace('KES ', '')}`,
+  ].join('\n');
 
-  const footer = [
+  // ---- Printable (verbose, with decimals) ----
+  const printable = [
+    (cooperativeName || 'COOPERATIVE').toUpperCase(),
+    'MILK DELIVERY RECEIPT',
     '',
+    `Receipt: ${receiptNumber}`,
+    '',
+    `Farmer: ${farmerName}`,
+    `Code: ${farmerCode}`,
+    SEPARATOR,
+    `Milk Delivered: ${milk.toFixed(1)} L`,
+    `Month Total: ${cumulative.toFixed(1)} L`,
+    `Amount Earned: ${formatCurrency(payout)}`,
+    `Collection: ${date}${shift ? `, ${shift.trim()}` : ''}`,
+    SEPARATOR,
     `Wallet Balance: ${formatCurrency(walletBalance)}`,
     '',
     'Thank you.',
-  ];
-
-  const sms = [...header, ...body, ...footer].join('\n');
-  const printable = [
-    ...header,
-    SEPARATOR,
-    ...body,
-    SEPARATOR,
-    ...footer,
     SEPARATOR,
   ].join('\n');
 
-  return { sms, printable };
+  return {
+    sms,
+    printable,
+    smsLength: sms.length,
+  };
 };
 
+/**
+ * Feed receipt – unchanged (kept for completeness)
+ */
 const formatFeedReceipt = ({
   cooperativeName,
   receiptNumber,
@@ -122,13 +128,17 @@ const formatFeedReceipt = ({
   walletBalance,
   transactionDate,
 }) => {
-  const header = buildHeader({
-    cooperativeName,
-    receiptNumber,
-    farmerName,
-    farmerCode,
-    title: 'FEED PURCHASE RECEIPT',
-  });
+  const header = [
+    (cooperativeName || 'COOPERATIVE').toUpperCase(),
+    'FEED PURCHASE RECEIPT',
+    '',
+    `Receipt: ${receiptNumber}`,
+    '',
+    `Farmer: ${farmerName}`,
+    `Code: ${farmerCode}`,
+    '',
+  ];
+
   const paymentLabel = paymentMethod === 'balance' ? 'Farmer Balance' : 'Cash';
   const itemLines = (items || []).map(item => {
     const qtyLabel = item.unit
@@ -137,6 +147,7 @@ const formatFeedReceipt = ({
     const categoryPart = item.category ? ` (${item.category})` : '';
     return `${qtyLabel}${categoryPart} @ ${formatCurrency(item.unitPrice)} = ${formatCurrency(item.lineTotal)}`;
   });
+
   const smsBody = [
     `Payment: ${paymentLabel}`,
     '',
@@ -144,6 +155,7 @@ const formatFeedReceipt = ({
     '',
     `TOTAL: ${formatCurrency(total)}`,
   ];
+
   const footer = [
     '',
     `Wallet Balance: ${formatCurrency(walletBalance)}`,
@@ -152,6 +164,7 @@ const formatFeedReceipt = ({
     '',
     'Thank you.',
   ];
+
   const sms = [...header, ...smsBody, ...footer].join('\n');
   const printable = [
     ...header,
@@ -161,11 +174,13 @@ const formatFeedReceipt = ({
     ...footer,
     SEPARATOR,
   ].join('\n');
+
   return { sms, printable };
 };
 
 module.exports = {
   formatCurrency,
+  formatSmsCurrency,
   formatDate,
   formatCollectionDate,
   formatMilkReceipt,
