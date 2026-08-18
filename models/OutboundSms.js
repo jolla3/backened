@@ -90,6 +90,12 @@ const outboundSmsSchema = new mongoose.Schema(
       type: String,
       index: true,
     },
+    deliveryRoute: {
+  type: String,
+  enum: ['celcom', 'gateway'],
+  default: 'celcom',
+  index: true,
+},
   },
   {
     timestamps: {

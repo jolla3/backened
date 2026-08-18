@@ -48,19 +48,20 @@ const queueSMS = async ({
 
     const normalizedPhone = normalizePhone(to);
     const job = new OutboundSms({
-      phone: normalizedPhone,
-      message,
-      from: from || process.env.CELCOM_SENDER_ID || process.env.SMS_SENDER || 'JOMUGITAGRI',
-      type,
-      priority,
-      cooperativeId,
-      farmerId,
-      maxRetries,
-      metadata,
-      expiresAt,
-      idempotencyKey,
-      status: 'queued',
-    });
+  phone: normalizedPhone,
+  message,
+  from: from || process.env.CELCOM_SENDER_ID || process.env.SMS_SENDER || 'JOMUGITAGRI',
+  type,
+  priority,
+  cooperativeId,
+  farmerId,
+  maxRetries,
+  metadata,
+  expiresAt,
+  idempotencyKey,
+  status: 'queued',
+  deliveryRoute: 'celcom', // direct Celcom worker only
+});
 
     await job.save();
     logger.info('SMS job queued', {
@@ -84,6 +85,10 @@ const queueSMS = async ({
 
 // ─── Claim jobs (device gateway path) ───────────────────────
 const claimJobs = async (gatewayId, limit = 10) => {
+  if (process.env.SMS_GATEWAY_ENABLED !== 'true') {
+    throw new Error('SMS gateway is disabled');
+  }
+
   const gateway = await SmsGateway
     .findOne({ gatewayId })
     .select('_id cooperativeId')
@@ -91,15 +96,14 @@ const claimJobs = async (gatewayId, limit = 10) => {
 
   if (!gateway) throw new Error('Gateway not found');
 
-  const cutoff = new Date(Date.now() - PROCESSING_TIMEOUT_MINUTES * 60 * 1000);
   const claimed = [];
+  const now = new Date();
 
   while (claimed.length < limit) {
-    const now = new Date();
-
     const filter = {
       cooperativeId: gateway.cooperativeId,
-      status: 'queued', // never claim unknown / processing without recovery path
+      status: 'queued',
+      deliveryRoute: 'gateway',
       $and: [
         {
           $or: [
@@ -138,13 +142,6 @@ const claimJobs = async (gatewayId, limit = 10) => {
     claimed.push(job);
   }
 
-  if (claimed.length > 0) {
-    logger.info(`Claimed ${claimed.length} jobs`, {
-      gatewayId,
-      claimed: claimed.map((j) => j._id),
-    });
-  }
-
   return claimed;
 };
 
@@ -160,6 +157,11 @@ const claimJobsForWorker = async (limit = 50) => {
   while (claimed.length < limit) {
     const filter = {
       status: 'queued',
+      $or: [
+        { deliveryRoute: 'celcom' },
+        { deliveryRoute: { $exists: false } }, // legacy rows
+        { deliveryRoute: null },
+      ],
       $and: [
         {
           $or: [
@@ -482,10 +484,43 @@ const sendFeedTransactionNotification = async ({
   });
 };
 
+
+const recoverLowCreditJobs = async () => {
+  const result = await OutboundSms.updateMany(
+    {
+      status: 'unknown',
+      providerMessageId: { $exists: false },
+      error: /Low credit|insufficient.?credit|1004/i,
+    },
+    {
+      $set: {
+        status: 'queued',
+        deliveryRoute: 'celcom',
+        retryCount: 0,
+        nextRetryAt: null,
+        gatewayId: null,
+        processingStartedAt: null,
+        error: null,
+        updatedAt: new Date(),
+      },
+      $unset: {
+        providerResponse: '',
+      },
+    }
+  );
+
+  logger.info('Recovered low-credit SMS jobs', {
+    count: result.modifiedCount,
+  });
+
+  return result.modifiedCount;
+};
+
 module.exports = {
   queueSMS,
   claimJobs,
   claimJobsForWorker,
+  recoverLowCreditJobs,
   markSent,
   markUnknown,
   markFailed,

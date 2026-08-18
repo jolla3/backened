@@ -4,25 +4,23 @@ const http = require('http');
 const cors = require('cors');
 const helmet = require('helmet');
 const compression = require('compression');
-const { initWebSocket, emitToAdmin } = require('./websocket');
+const { initWebSocket } = require('./websocket');
 const connectDB = require('./config/db');
 const routes = require('./routes');
 const errorMiddleware = require('./middlewares/errorMiddleware');
 const correlationMiddleware = require('./middlewares/correlationMiddleware');
 const logger = require('./utils/logger');
 const config = require('./config');
+const smsService = require('./services/smsService');
 
-// Schedulers
 const { startJobRecovery } = require('./scheduler/jobRecovery');
 const { startSmsWorker, stopSmsWorker } = require('./scheduler/smsWorkerScheduler');
 
 const app = express();
 const server = http.createServer(app);
 
-// Initialize WebSocket
-const io = initWebSocket(server);
+initWebSocket(server);
 
-// Middleware
 app.use(cors());
 app.use(helmet());
 app.use(compression());
@@ -30,29 +28,34 @@ app.use(express.json({ limit: '1mb' }));
 app.use(express.urlencoded({ extended: true, limit: '1mb' }));
 app.use(correlationMiddleware);
 
-// Routes
 app.use('/api', routes);
-
-// Error handling
 app.use(errorMiddleware);
 
 const PORT = config.PORT || 3000;
 
 const startServer = async () => {
   try {
-    // 1. Connect to MongoDB
     await connectDB();
     logger.info('MongoDB connected');
 
-    // 2. Start job recovery scheduler
-    startJobRecovery();
+    // // Optional: stuck job recovery for other job types
+    // if (typeof startJobRecovery === 'function') {
+    //   startJobRecovery();
+    // }
 
-    // 3. Start SMS worker (Celcom pipeline)
-    //    This is the critical link: worker must actually run.
+    // Requeue known low-credit unknowns onto celcom route (once at boot)
+    try {
+      const n = await smsService.recoverLowCreditJobs();
+      if (n > 0) {
+        logger.info(`Requeued ${n} low-credit SMS job(s) for Celcom`);
+      }
+    } catch (e) {
+      logger.warn('recoverLowCreditJobs failed at startup', { error: e.message });
+    }
+
     await startSmsWorker();
-    logger.info('SMS worker started');
+    logger.info('SMS worker started (Celcom deliveryRoute only)');
 
-    // 4. Start HTTP server
     server.listen(PORT, () => {
       logger.info(`Server started on port ${PORT}`);
     });
@@ -64,7 +67,6 @@ const startServer = async () => {
 
 startServer();
 
-// Graceful shutdown
 const shutdown = async (signal) => {
   logger.info(`${signal} received, shutting down gracefully`);
   try {
@@ -81,4 +83,4 @@ const shutdown = async (signal) => {
 process.on('SIGTERM', () => shutdown('SIGTERM'));
 process.on('SIGINT', () => shutdown('SIGINT'));
 
-module.exports = { app, server, io };
+module.exports = { app, server };
