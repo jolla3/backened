@@ -86,13 +86,12 @@ const getFeedPurchaseFarmer = async (identifier, cooperativeId) => {
 };
 
 const purchaseFeed = async (data, session) => {
-  const {
+  let {
     farmerId,
     products,
     adminId,
     cooperativeId,
     paymentMethod = 'balance',
-    // Required for safe mobile/admin retries
     clientIdempotencyKey,
   } = data;
 
@@ -105,8 +104,18 @@ const purchaseFeed = async (data, session) => {
   if (!Array.isArray(products) || products.length === 0) {
     throw new Error('No products specified');
   }
+
+  // ── Server-side idempotency key when client does not send one ──
+  // Note: this does NOT protect against double-submit of the same user action
+  // unless the client later sends a stable key. It only keeps each request unique.
   if (!clientIdempotencyKey) {
-    throw new Error('clientIdempotencyKey is required for feed purchases');
+    const crypto = require('crypto');
+    clientIdempotencyKey = `feed:server:${cooperativeId}:${farmerId}:${Date.now()}:${crypto.randomBytes(8).toString('hex')}`;
+    logger.warn('feed purchase missing clientIdempotencyKey – generated server fallback', {
+      farmerId,
+      cooperativeId,
+      clientIdempotencyKey,
+    });
   }
 
   // ── Request-level idempotency ─────────────────────────
@@ -117,9 +126,7 @@ const purchaseFeed = async (data, session) => {
   }).session(session);
 
   if (existing) {
-    // Idempotent replay
     const farmer = await Farmer.findById(farmerId).session(session).lean();
-    const cooperative = await Cooperative.findById(cooperativeId).session(session).lean();
 
     return {
       success: true,
@@ -140,6 +147,7 @@ const purchaseFeed = async (data, session) => {
       receipt: null,
     };
   }
+
 
   const cooperative = await Cooperative.findById(cooperativeId).session(session);
   if (!cooperative) throw new Error('Cooperative not found');
