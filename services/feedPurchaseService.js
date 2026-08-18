@@ -116,7 +116,7 @@ const purchaseFeed = async (data, session) => {
     });
   }
 
-  // Request-level idempotency
+  // Request-level idempotency (primary line item key)
   const existing = await Transaction.findOne({
     cooperativeId,
     idempotency_key: clientIdempotencyKey,
@@ -125,21 +125,44 @@ const purchaseFeed = async (data, session) => {
 
   if (existing) {
     const farmerDoc = await Farmer.findById(farmerId).session(session).lean();
+    const balanceAfter =
+      existing.wallet_balance_after != null
+        ? existing.wallet_balance_after
+        : (farmerDoc?.currentBalance || 0);
+    const balanceBefore =
+      existing.wallet_balance_before != null
+        ? existing.wallet_balance_before
+        : null;
+
+    // Load sibling line items for same purchase if present
+    let related = [existing];
+    if (existing.purchaseId) {
+      related = await Transaction.find({
+        cooperativeId,
+        purchaseId: existing.purchaseId,
+        type: 'feed',
+      })
+        .session(session)
+        .lean();
+    }
+
+    const totalCost = related.reduce((sum, t) => sum + (t.cost || 0), 0);
+
     return {
       success: true,
       duplicate: true,
       farmerId,
       farmerName: farmerDoc?.name,
-      transactions: [existing],
-      totalCost: existing.cost,
+      transactions: related,
+      totalCost,
       paymentMethod: existing.paymentMethod,
-      balanceBefore: null,
-      balanceAfter: farmerDoc?.currentBalance,
+      balanceBefore,
+      balanceAfter,
       paymentSummary: {
         method: existing.paymentMethod,
-        amount: existing.cost,
+        amount: totalCost,
         balanceAdjusted: existing.paymentMethod === 'balance',
-        newBalance: farmerDoc?.currentBalance,
+        newBalance: balanceAfter,
       },
       receipt: null,
     };
@@ -160,6 +183,7 @@ const purchaseFeed = async (data, session) => {
   const transactions = [];
   const receiptItems = [];
   const branchId = cooperative._id.toString();
+  const purchaseId = new mongoose.Types.ObjectId();
 
   const ALLOW_NEGATIVE_BALANCE =
     process.env.ALLOW_FARMER_DEBT === 'true' ||
@@ -240,10 +264,10 @@ const purchaseFeed = async (data, session) => {
       timestamp_local: new Date(),
       paymentMethod,
       balanceAdjusted: paymentMethod === 'balance',
-      // Required by Transaction schema
       createdBy: adminId,
       collectionDate,
       collectionShift,
+      purchaseId,
     };
 
     const [tx] = await Transaction.create([transactionData], { session });
@@ -305,6 +329,7 @@ const purchaseFeed = async (data, session) => {
           })),
           paymentMethod: 'balance',
           clientIdempotencyKey,
+          purchaseId: purchaseId.toString(),
         },
         timestamp: new Date(),
       }],
@@ -323,42 +348,31 @@ const purchaseFeed = async (data, session) => {
       ledgerId: ledgerEntry._id,
     });
   } else {
-    const [ledgerEntry] = await Ledger.create(
-      [{
-        cooperativeId: cooperative._id,
-        farmerId: farmer._id,
-        transactionId: transactions[0]._id,
-        type: 'FEED_CASH_SALE',
-        amount: totalCost,
-        runningBalance: currentRunningBalance,
-        description: `Cash feed purchase - ${transactions.map((t) => t.receipt_num).join(', ')}`,
-        reference: transactions.map((t) => t.receipt_num).join(','),
-        createdBy: adminId,
-        metadata: {
-          products: products.map((p) => ({
-            productId: p.productId,
-            quantity: p.quantity,
-          })),
-          paymentMethod: 'cash',
-          clientIdempotencyKey,
-        },
-        timestamp: new Date(),
-      }],
-      { session }
-    );
-
+    // Cash: no farmer wallet ledger entry
     balanceBefore = currentRunningBalance;
     balanceAfter = currentRunningBalance;
 
-    logger.info('Ledger entry created for feed purchase (cash)', {
+    logger.info('Cash feed purchase – no farmer ledger entry', {
       farmerId,
-      amount: totalCost,
-      runningBalance: currentRunningBalance,
-      ledgerId: ledgerEntry._id,
+      totalCost,
+      receiptNums: transactions.map((t) => t.receipt_num),
     });
   }
 
-  // Receipt
+  // Persist historical balance snapshot on all line items
+  await Transaction.updateMany(
+    { _id: { $in: transactions.map((t) => t._id) } },
+    {
+      $set: {
+        wallet_balance_before: balanceBefore,
+        wallet_balance_after: balanceAfter,
+        purchaseId,
+      },
+    },
+    { session }
+  );
+
+  // Receipt (compact SMS via formatFeedReceipt)
   const receipt = formatFeedReceipt({
     cooperativeName: cooperative.name,
     receiptNumber: transactions[0].receipt_num,
@@ -387,6 +401,7 @@ const purchaseFeed = async (data, session) => {
         idempotencyKey: `feed_purchase:${primaryTxId}`,
         metadata: {
           transactionIds: transactions.map((t) => t._id.toString()),
+          purchaseId: purchaseId.toString(),
           receiptNumber: transactions[0].receipt_num,
           totalCost,
           paymentMethod,
@@ -418,6 +433,7 @@ const purchaseFeed = async (data, session) => {
     balanceBefore,
     balanceAfter,
     receiptNums: transactions.map((t) => t.receipt_num),
+    purchaseId: purchaseId.toString(),
     clientIdempotencyKey,
   });
 

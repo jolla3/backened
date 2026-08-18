@@ -15,6 +15,7 @@ const SMS_STATUS = {
   EXPIRED: 'expired',
   DELIVERED: 'delivered',
   UNDELIVERED: 'undelivered',
+  UNKNOWN: 'unknown',
 };
 
 const SMS_PRIORITY = {
@@ -25,6 +26,20 @@ const SMS_PRIORITY = {
   MONTHLY_SUMMARY: 60,
   GENERAL: 50,
   SYSTEM: 40,
+};
+
+/**
+ * SMS capacity (characters)
+ * Single GSM-7: 160
+ * Concat GSM-7: 153 per segment (UDH overhead)
+ * Single UCS-2: 70
+ * Concat UCS-2: 67 per segment
+ */
+const SMS_LENGTH = {
+  GSM7_SINGLE: 160,
+  GSM7_CONCAT: 153,
+  UNICODE_SINGLE: 70,
+  UNICODE_CONCAT: 67,
 };
 
 const SMS_WORKER_CONFIG = {
@@ -48,6 +63,7 @@ module.exports = {
   SMS_TYPES,
   SMS_STATUS,
   SMS_PRIORITY,
+  SMS_LENGTH,
   SMS_WORKER_CONFIG,
   IDEMPOTENCY_KEY_PREFIX,
 };

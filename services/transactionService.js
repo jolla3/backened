@@ -134,7 +134,6 @@ const recordMilkTransaction = async (data) => {
       timestamp_local,
       cooperativeId: coopId,
       userId,
-      // Optional client-supplied key for request-level idempotency
       clientIdempotencyKey,
     } = data;
 
@@ -157,8 +156,7 @@ const recordMilkTransaction = async (data) => {
       throw new Error(`Milk quantity cannot exceed ${FRAUD_CONFIG.MAX_MILK_PER_TRANSACTION}L per transaction`);
     }
 
-    // ── Request-level idempotency (device_id + device_seq_num) ──
-    // Prefer explicit client key when provided; otherwise use device sequence.
+    // ── Request-level idempotency ───────────────────────
     const requestIdempotencyKey =
       clientIdempotencyKey ||
       (device_seq_num != null
@@ -173,12 +171,24 @@ const recordMilkTransaction = async (data) => {
       }).session(session);
 
       if (existing) {
-        // Idempotent replay – return the already-committed transaction
         await session.abortTransaction();
         session.endSession();
 
         const cooperative = await Cooperative.findById(cooperativeId).lean();
         const farmerDoc = await Farmer.findById(farmer_id).lean();
+
+        const { getCumulativeMilkForMonth } = require('./cumulativeMilkService');
+        const monthly = await getCumulativeMilkForMonth(
+          farmer_id,
+          cooperativeId,
+          existing.timestamp_server || new Date()
+        );
+
+        const historicalBalance =
+          existing.wallet_balance_after != null
+            ? existing.wallet_balance_after
+            : (farmerDoc?.currentBalance || 0);
+
         const receipt = formatMilkReceipt({
           cooperativeName: cooperative?.name || 'COOPERATIVE',
           receiptNumber: existing.receipt_num,
@@ -186,8 +196,8 @@ const recordMilkTransaction = async (data) => {
           farmerCode: farmerDoc?.farmer_code || farmerDoc?.code || '',
           litres: existing.litres,
           payout: existing.payout,
-          walletBalance: farmerDoc?.currentBalance || 0,
-          cumulativeMilk: null, // caller can recompute if needed
+          walletBalance: historicalBalance,
+          monthlyMilk: monthly.litres,
           collectionDate: existing.collectionDate,
           transactionDate: existing.timestamp_server,
         });
@@ -201,8 +211,8 @@ const recordMilkTransaction = async (data) => {
           payout: existing.payout,
           farmer_code: farmerDoc?.farmer_code || farmerDoc?.code,
           farmer_name: farmerDoc?.name,
-          previousBalance: null,
-          newBalance: farmerDoc?.currentBalance,
+          previousBalance: existing.wallet_balance_before ?? null,
+          newBalance: historicalBalance,
           ledgerEntry: null,
           receipt,
           duplicate: true,
@@ -215,7 +225,6 @@ const recordMilkTransaction = async (data) => {
       const dateObj = new Date(timestamp_local);
       if (!isNaN(dateObj.getTime())) {
         effectiveDate = getKenyaDateString(dateObj);
-        // Prefer explicit offset from device; hour is only a fallback
         const hour = dateObj.getHours();
         collectionShift = hour >= 12 ? 'PM' : 'AM';
       }
@@ -287,7 +296,9 @@ const recordMilkTransaction = async (data) => {
     newBalance = previousBalance + payout;
 
     // ── Create Transaction ──────────────────────────────
-    const finalKey = requestIdempotencyKey || `${device_id}-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+    const finalKey =
+      requestIdempotencyKey ||
+      `${device_id}-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
 
     [transaction] = await Transaction.create(
       [{
@@ -315,8 +326,10 @@ const recordMilkTransaction = async (data) => {
         branch_id,
         cooperativeId,
         createdBy: userId,
-        collectionDate: effectiveDate, // always YYYY-MM-DD string
+        collectionDate: effectiveDate,
         collectionShift,
+        wallet_balance_before: previousBalance,
+        wallet_balance_after: newBalance,
       }],
       { session }
     );
@@ -377,9 +390,8 @@ const recordMilkTransaction = async (data) => {
       throw new Error('Cooperative not found for receipt');
     }
 
-    // Cumulative milk from Transaction collection (source of truth)
     const { getCumulativeMilkForMonth } = require('./cumulativeMilkService');
-    const cumulative = await getCumulativeMilkForMonth(
+    const monthly = await getCumulativeMilkForMonth(
       farmer_id,
       cooperativeId,
       transaction.timestamp_server || new Date()
@@ -393,12 +405,11 @@ const recordMilkTransaction = async (data) => {
       litres: litresNum,
       payout,
       walletBalance: newBalance,
-      cumulativeMilk: cumulative.litres,
+      monthlyMilk: monthly.litres,
       collectionDate: transaction.collectionDate || effectiveDate,
       transactionDate: transaction.timestamp_server,
     });
 
-    // Queue SMS
     if (farmer.phone) {
       try {
         const smsResult = await smsService.sendSMS({
@@ -415,6 +426,7 @@ const recordMilkTransaction = async (data) => {
             receiptNumber: receiptNum,
             litres: litresNum,
             payout,
+            monthlyMilk: monthly.litres,
           },
         });
 
@@ -433,10 +445,12 @@ const recordMilkTransaction = async (data) => {
       }
     }
 
-    // QR (non-critical)
     let qrImage = null;
     try {
-      const qrResult = await qrService.generateQRForTransaction(transaction._id, cooperativeId);
+      const qrResult = await qrService.generateQRForTransaction(
+        transaction._id,
+        cooperativeId
+      );
       qrImage = qrResult.qrImage;
     } catch (err) {
       logger.warn('QR generation failed', {
@@ -454,7 +468,7 @@ const recordMilkTransaction = async (data) => {
       payout,
       previousBalance,
       newBalance,
-      cumulativeMilk: cumulative.litres,
+      monthlyMilk: monthly.litres,
     });
 
     return {
@@ -484,7 +498,6 @@ const recordMilkTransaction = async (data) => {
     throw error;
   }
 };
-
 
 // ── Sync offline ────────────────────────────────────────
 const syncOfflineTransactions = async (transactions, cooperativeId) => {
