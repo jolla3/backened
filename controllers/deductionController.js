@@ -1,4 +1,3 @@
-// controllers/deductionController.js
 const { createManualDeduction } = require('../services/farmerDeductionService');
 const logger = require('../utils/logger');
 
@@ -6,15 +5,6 @@ const createDeduction = async (req, res) => {
   try {
     const { farmerId } = req.params;
     const { reason, amount, items, description } = req.body;
-
-    // Idempotency key: must come from header (we require it)
-    const idempotencyKey = req.headers['idempotency-key'];
-    if (!idempotencyKey) {
-      return res.status(400).json({
-        success: false,
-        error: 'Idempotency-Key header is required for this financial operation',
-      });
-    }
 
     const cooperativeId = req.user.cooperativeId;
     const adminId = req.user.id;
@@ -31,7 +21,6 @@ const createDeduction = async (req, res) => {
       description,
       cooperativeId,
       adminId,
-      idempotencyKey,
     });
 
     return res.status(201).json(result);
@@ -43,7 +32,10 @@ const createDeduction = async (req, res) => {
     });
 
     const status =
-      /not found|Invalid|required|Insufficient|Concurrent|Duplicate/i.test(error.message)
+      error.message.includes('not found') ||
+      error.message.includes('Invalid') ||
+      error.message.includes('required') ||
+      error.message.includes('Insufficient')
         ? 400
         : 500;
 

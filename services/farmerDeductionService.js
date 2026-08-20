@@ -5,7 +5,8 @@ const Ledger = require('../models/ledger');
 const Inventory = require('../models/inventory');
 const Cooperative = require('../models/cooperative');
 const { queueSMS } = require('../services/smsService');
-const { formatDeductionReceipt } = require('../utils/receiptFormatter'); // adjust path
+const { formatDeductionReceipt } = require('../utils/receiptFormatter');
+const { updateFarmerBalance } = require('../utils/ledgerUtils');
 const logger = require('../utils/logger');
 
 const ALLOWED_REASONS = {
@@ -24,24 +25,15 @@ function generateReference() {
 /**
  * Manual farmer balance deduction.
  *
- * Architecture:
- *   Authenticated user → cooperativeId + adminId
- *   → validate farmer
- *   → calculate amount (feeds = product price × qty, else supplied amount)
- *   → read latest Ledger (source of truth)
- *   → create NEGATIVE Ledger entry
- *   → optimistic update of Farmer.currentBalance cache
- *   → commit
- *   → format receipt → queue SMS
- *
- * Inventory is never modified.
+ * Supports multiple products for feed deductions.
+ * Inventory is READ-ONLY: product price is used for calculation.
+ * No stock is deducted – this is purely a financial transaction.
  */
 async function createManualDeduction({
   farmerId,
   reason,
   amount,
-  productId,
-  quantity,
+  items,
   description = '',
   cooperativeId,
   adminId,
@@ -66,11 +58,7 @@ async function createManualDeduction({
     const cooperative = await Cooperative.findById(cooperativeId)
       .select('name allowNegativeBalances')
       .session(session);
-
-    if (!cooperative) {
-      throw new Error('Cooperative not found');
-    }
-
+    if (!cooperative) throw new Error('Cooperative not found');
     const allowNeg = cooperative.allowNegativeBalances === true;
 
     // ─── Farmer ───────────────────────────────────────────
@@ -79,88 +67,109 @@ async function createManualDeduction({
       cooperativeId,
       isActive: true,
     }).session(session);
-
     if (!farmer) {
-      throw new Error(
-        'Farmer not found, inactive, or does not belong to this cooperative'
-      );
+      throw new Error('Farmer not found, inactive, or does not belong to this cooperative');
     }
 
     // ─── Amount calculation ───────────────────────────────
     let deductionAmount = 0;
-    let metadata = {
-      reason: normalizedReason,
-      description: description || undefined,
-    };
-    let productSnapshot = null;
+    let productSnapshots = [];
+    let metadata = { reason: normalizedReason, description: description || undefined };
 
     if (normalizedReason === 'feeds') {
-      if (!productId || quantity == null) {
-        throw new Error('productId and quantity are required for feed deductions');
+      // ─── Validate items ──────────────────────────────────
+      if (!items || !Array.isArray(items) || items.length === 0) {
+        throw new Error('For feed deductions, provide an `items` array with productId and quantity');
       }
 
-      const qty = Number(quantity);
-      if (!Number.isFinite(qty) || qty <= 0) {
-        throw new Error('quantity must be a positive number');
+      for (const [idx, item] of items.entries()) {
+        if (!item || typeof item !== 'object') {
+          throw new Error(`Item at index ${idx} must be an object`);
+        }
+        if (!item.productId) {
+          throw new Error(`Item at index ${idx} is missing productId`);
+        }
+        if (item.quantity == null || item.quantity === '') {
+          throw new Error(`Item at index ${idx} is missing quantity`);
+        }
       }
 
-      const product = await Inventory.findOne({
-        _id: productId,
+      const productIds = items.map(item => String(item.productId));
+      const dupCheck = new Set(productIds);
+      if (dupCheck.size !== productIds.length) {
+        throw new Error('Duplicate product IDs are not allowed');
+      }
+
+      for (const id of productIds) {
+        if (!mongoose.Types.ObjectId.isValid(id)) {
+          throw new Error(`Invalid product ID: ${id}`);
+        }
+      }
+
+      // ─── Fetch products (READ ONLY) ──────────────────────
+      const products = await Inventory.find({
+        _id: { $in: productIds },
         cooperativeId,
         deleted: { $ne: true },
-      }).session(session);
+      })
+        .select('name price unit')
+        .session(session);
 
-      if (!product) {
-        throw new Error('Product not found or does not belong to this cooperative');
+      const productMap = new Map(products.map(p => [p._id.toString(), p]));
+
+      for (const item of items) {
+        const productId = String(item.productId);
+        const product = productMap.get(productId);
+        if (!product) {
+          throw new Error(`Product ${productId} not found or does not belong to this cooperative`);
+        }
+
+        const qty = Number(item.quantity);
+        if (!Number.isFinite(qty) || qty <= 0) {
+          throw new Error(`Invalid quantity for product ${product.name}`);
+        }
+
+        const unitPrice = Number(product.price);
+        if (!Number.isFinite(unitPrice) || unitPrice < 0) {
+          throw new Error(`Invalid price for product ${product.name}`);
+        }
+
+        const itemTotal = qty * unitPrice;
+        deductionAmount += itemTotal;
+
+        productSnapshots.push({
+          productId: product._id,
+          productName: product.name,
+          quantity: qty,
+          unitPrice,
+          unit: product.unit || 'unit',
+          itemTotal,
+        });
       }
-
-      const unitPrice = Number(product.price);
-      if (!Number.isFinite(unitPrice) || unitPrice < 0) {
-        throw new Error('Invalid product price in database');
-      }
-
-      // Exact value – never round here
-      deductionAmount = qty * unitPrice;
-
-      productSnapshot = {
-        productId: product._id,
-        productName: product.name,
-        quantity: qty,
-        unitPrice,
-        unit: product.unit,
-      };
 
       metadata = {
         reason: 'feeds',
-        ...productSnapshot,
+        items: productSnapshots,
         description: description || undefined,
       };
     } else {
-      if (amount == null) {
-        throw new Error('amount is required for non-feed deductions');
-      }
+      // ─── Non-feed deduction ──────────────────────────────
+      if (amount == null) throw new Error('amount is required for non-feed deductions');
       deductionAmount = Number(amount);
       if (!Number.isFinite(deductionAmount) || deductionAmount <= 0) {
         throw new Error('amount must be a positive number');
       }
     }
 
-    // ─── Ledger is source of truth ────────────────────────
-    const lastLedger = await Ledger.findOne({
-      farmerId: farmer._id,
-      cooperativeId,
-    })
-      .sort({ timestamp: -1, _id: -1 })
-      .session(session);
-
-    const previousBalance = lastLedger ? lastLedger.runningBalance : 0;
+    // ─── Ledger balance calculation ──────────────────────
+    const previousBalance = farmer.currentBalance || 0;
     const newBalance = previousBalance - deductionAmount;
 
     if (!allowNeg && newBalance < 0) {
       throw new Error('Insufficient farmer balance');
     }
 
-    // ─── Create Ledger entry (NEGATIVE, full precision) ───
+    // ─── Create ONE Ledger entry ────────────────────────────
     const reference = generateReference();
     const [ledgerEntry] = await Ledger.create(
       [
@@ -180,82 +189,78 @@ async function createManualDeduction({
       { session }
     );
 
-    // ─── Optimistic concurrency on Farmer cache ───────────
-    // Succeeds only if currentBalance still equals the value
-    // we used to compute the new ledger runningBalance.
-    // If another concurrent request already changed it → null → abort.
-    const updated = await Farmer.findOneAndUpdate(
-      {
-        _id: farmer._id,
-        cooperativeId,
-        currentBalance: previousBalance,
-      },
-      {
-        $set: {
-          currentBalance: newBalance,
-          lastLedgerId: ledgerEntry._id,
-        },
-      },
-      { session, new: false }
+    // ─── Update Farmer cache using ledgerUtil ─────────────
+    const updatedFarmer = await updateFarmerBalance(
+      farmer._id,
+      newBalance,
+      ledgerEntry._id,
+      session,
+      { currentBalance: previousBalance }
     );
 
-    if (!updated) {
-      throw new Error(
-        'Concurrent modification detected. Please retry the deduction.'
-      );
+    if (!updatedFarmer) {
+      throw new Error('Concurrent modification detected. Please retry the deduction.');
     }
 
-    // ─── COMMIT ───────────────────────────────────────────
     await session.commitTransaction();
 
-    // ─── SMS after commit (using formatter) ───────────────
-// ─── SMS after commit (using formatter) ───────────────
-let smsQueued = false;
-try {
-  const receipt = formatDeductionReceipt({
-    cooperativeName: cooperative.name,
-    farmerName: farmer.name,                    // ← was missing
-    farmerCode: farmer.farmer_code,
-    reason: normalizedReason,
-    amount: deductionAmount,
-    walletBalance: newBalance,
-    productName: productSnapshot?.productName,
-    quantity: productSnapshot?.quantity,
-    unit: productSnapshot?.unit,
-    unitPrice: productSnapshot?.unitPrice,      // ← was missing (caused @ KES 0)
-    reference,                                  // optional but useful
-  });
+    // ─── SMS after commit ──────────────────────────────────
+    let smsQueued = false;
+    try {
+      let receipt;
+      if (normalizedReason === 'feeds' && productSnapshots.length > 0) {
+        receipt = formatDeductionReceipt({
+          cooperativeName: cooperative.name,
+          farmerName: farmer.name,
+          farmerCode: farmer.farmer_code,
+          reason: normalizedReason,
+          amount: deductionAmount,
+          walletBalance: newBalance,
+          items: productSnapshots,
+        });
+      } else {
+        receipt = formatDeductionReceipt({
+          cooperativeName: cooperative.name,
+          farmerName: farmer.name,
+          farmerCode: farmer.farmer_code,
+          reason: normalizedReason,
+          amount: deductionAmount,
+          walletBalance: newBalance,
+        });
+      }
 
-  if (farmer.phone) {
-    await queueSMS({
-      to: farmer.phone,
-      message: receipt.sms,
-      type: 'balance_deduction',
-      cooperativeId,
-      farmerId: farmer._id,
-      metadata: {
+      if (farmer.phone) {
+        await queueSMS({
+          to: farmer.phone,
+          message: receipt.sms,
+          type: 'balance_deduction',
+          cooperativeId,
+          farmerId: farmer._id,
+          metadata: {
+            ledgerId: ledgerEntry._id,
+            reference,
+            reason: normalizedReason,
+          },
+        });
+        smsQueued = true;
+      }
+    } catch (smsErr) {
+      logger.error('SMS queue failed after successful deduction', {
+        error: smsErr.message,
+        farmerId,
         ledgerId: ledgerEntry._id,
-        reference,
-        reason: normalizedReason,
-      },
-    });
-    smsQueued = true;
-  }
-} catch (smsErr) {
-  logger.error('SMS queue failed after successful deduction', {
-    error: smsErr.message,
-    farmerId,
-    ledgerId: ledgerEntry._id,
-    cooperativeId,
-  });
-}
+        cooperativeId,
+      });
+    }
 
-    return {
+    // ─── Response ────────────────────────────────────────────
+    const response = {
       success: true,
       deduction: {
         amount: deductionAmount,
         reason: normalizedReason,
         type: ledgerType,
+        reference,
       },
       farmer: {
         id: farmer._id,
@@ -264,12 +269,15 @@ try {
         previousBalance,
         newBalance,
       },
+      items: productSnapshots.length > 0 ? productSnapshots : undefined,
       ledgerEntry: {
         id: ledgerEntry._id,
         reference: ledgerEntry.reference,
       },
       smsQueued,
     };
+
+    return response;
   } catch (err) {
     await session.abortTransaction();
     logger.error('Manual deduction failed – rolled back', {
