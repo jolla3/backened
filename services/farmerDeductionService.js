@@ -209,42 +209,46 @@ async function createManualDeduction({
     await session.commitTransaction();
 
     // ─── SMS after commit (using formatter) ───────────────
-    let smsQueued = false;
-    try {
-      const receipt = formatDeductionReceipt({
-        cooperativeName: cooperative.name,
-        farmerCode: farmer.farmer_code,
-        reason: normalizedReason,
-        amount: deductionAmount,
-        walletBalance: newBalance,
-        productName: productSnapshot?.productName,
-        quantity: productSnapshot?.quantity,
-        unit: productSnapshot?.unit,
-      });
+// ─── SMS after commit (using formatter) ───────────────
+let smsQueued = false;
+try {
+  const receipt = formatDeductionReceipt({
+    cooperativeName: cooperative.name,
+    farmerName: farmer.name,                    // ← was missing
+    farmerCode: farmer.farmer_code,
+    reason: normalizedReason,
+    amount: deductionAmount,
+    walletBalance: newBalance,
+    productName: productSnapshot?.productName,
+    quantity: productSnapshot?.quantity,
+    unit: productSnapshot?.unit,
+    unitPrice: productSnapshot?.unitPrice,      // ← was missing (caused @ KES 0)
+    reference,                                  // optional but useful
+  });
 
-      if (farmer.phone) {
-        await queueSMS({
-          to: farmer.phone,
-          message: receipt.sms,
-          type: 'balance_deduction',
-          cooperativeId,
-          farmerId: farmer._id,
-          metadata: {
-            ledgerId: ledgerEntry._id,
-            reference,
-            reason: normalizedReason,
-          },
-        });
-        smsQueued = true;
-      }
-    } catch (smsErr) {
-      logger.error('SMS queue failed after successful deduction', {
-        error: smsErr.message,
-        farmerId,
+  if (farmer.phone) {
+    await queueSMS({
+      to: farmer.phone,
+      message: receipt.sms,
+      type: 'balance_deduction',
+      cooperativeId,
+      farmerId: farmer._id,
+      metadata: {
         ledgerId: ledgerEntry._id,
-        cooperativeId,
-      });
-    }
+        reference,
+        reason: normalizedReason,
+      },
+    });
+    smsQueued = true;
+  }
+} catch (smsErr) {
+  logger.error('SMS queue failed after successful deduction', {
+    error: smsErr.message,
+    farmerId,
+    ledgerId: ledgerEntry._id,
+    cooperativeId,
+  });
+}
 
     return {
       success: true,

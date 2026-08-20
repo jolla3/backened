@@ -9,10 +9,12 @@ const {
   deleteFarmer,
   getBalance,
   updateBalance,
-  getFarmerHistory
+  getFarmerHistory,
 } = require('../controllers/farmerController');
 
-// All routes require authentication
+const deductionRoutes = require('./deductionRoutes');
+
+// Farmer CRUD
 router.post('/', createFarmer);
 router.get('/', getAllFarmers);
 router.get('/code/:code', getFarmerByCode);
@@ -22,5 +24,9 @@ router.put('/:id', updateFarmer);
 router.delete('/:id', deleteFarmer);
 router.put('/:id/balance', updateBalance);
 router.get('/:id/history', getFarmerHistory);
+
+// Nested deduction route
+// → POST /api/farmers/:farmerId/deductions
+router.use('/:farmerId/deductions', deductionRoutes);
 
 module.exports = router;
