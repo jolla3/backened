@@ -23,7 +23,7 @@ const settlementRoutes = require('./settlementRoutes');
 const { authMiddleware, roleCheck } = require('../middlewares/authMiddleware');
 const developerRoutes = require('./developerRoutes');
 const gatewayRoutes = require('./gatewayRoutes');
-
+const deductionRoutes = require('./deductionRoutes');
 
 router.use('/dev', developerRoutes);
 // Public routes
@@ -37,6 +37,7 @@ router.use('/farmers', authMiddleware, farmerRoutes);
 router.use('/porters', authMiddleware, roleCheck('SUPER_ADMIN','ADMIN'), porterRoutes);
 router.use('/milk', authMiddleware, milkRoutes);
 router.use('/inventory', authMiddleware, inventoryRoutes);
+router.use('/deductions', authMiddleware, deductionRoutes);
 router.use('/pricing', authMiddleware, roleCheck('SUPER_ADMIN','ADMIN'), pricingRoutes);
 router.use('/feed', authMiddleware, feedPurchaseRoutes);
 router.use('/sync', syncRoutes);

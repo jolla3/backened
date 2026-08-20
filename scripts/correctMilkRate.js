@@ -9,7 +9,6 @@ const RateVersion = require('../models/rateVersion');
 // DATABASE
 // ============================================================
 
-const DB_URL = 'mongodb://Coop:El0JFkUViOdjIf80@ac-mihm0qg-shard-00-00.6bzmy3j.mongodb.net:27017,ac-mihm0qg-shard-00-01.6bzmy3j.mongodb.net:27017,ac-mihm0qg-shard-00-02.6bzmy3j.mongodb.net:27017/coop?ssl=true&replicaSet=atlas-fn50kg-shard-0&authSource=admin&retryWrites=true&w=majority&appName=Cluster0';
 
 // ============================================================
 // CONFIGURATION

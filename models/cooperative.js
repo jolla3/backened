@@ -6,6 +6,7 @@ const cooperativeSchema = new mongoose.Schema({
     required: true,
     trim: true
   },
+  allowNegativeBalances: { type: Boolean, default: false },
   registrationNumber: {
     type: String,
     unique: true,

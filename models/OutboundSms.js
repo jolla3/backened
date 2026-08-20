@@ -16,7 +16,14 @@ const outboundSmsSchema = new mongoose.Schema(
     },
     type: {
       type: String,
-      enum: ['general', 'monthly_summary', 'feed_purchase', 'milk_receipt', 'custom'],
+      enum: [
+        'general',
+        'monthly_summary',
+        'feed_purchase',
+        'milk_receipt',
+        'balance_deduction',   // ← added for manual deductions
+        'custom',
+      ],
       default: 'general',
     },
     priority: {
@@ -25,7 +32,17 @@ const outboundSmsSchema = new mongoose.Schema(
     },
     status: {
       type: String,
-      enum: ['queued', 'processing', 'sent', 'failed', 'unknown','cancelled', 'expired', 'delivered', 'undelivered'],
+      enum: [
+        'queued',
+        'processing',
+        'sent',
+        'failed',
+        'unknown',
+        'cancelled',
+        'expired',
+        'delivered',
+        'undelivered',
+      ],
       default: 'queued',
       index: true,
     },
@@ -62,9 +79,9 @@ const outboundSmsSchema = new mongoose.Schema(
     error: {
       type: String,
     },
+    // Keep only the sparse index definition below – do NOT put index:true here
     providerMessageId: {
       type: String,
-      index: true,
       sparse: true,
     },
     providerResponse: {
@@ -87,7 +104,6 @@ const outboundSmsSchema = new mongoose.Schema(
     },
     idempotencyKey: {
       type: String,
-      index: true,
     },
     deliveryRoute: {
       type: String,
@@ -104,6 +120,8 @@ const outboundSmsSchema = new mongoose.Schema(
   }
 );
 
+// ─── Indexes ────────────────────────────────────────────────
+
 // Unique idempotency key per cooperative
 outboundSmsSchema.index(
   {
@@ -118,7 +136,7 @@ outboundSmsSchema.index(
   }
 );
 
-// Main claim query index
+// Main claim query
 outboundSmsSchema.index({
   cooperativeId: 1,
   status: 1,
@@ -129,7 +147,15 @@ outboundSmsSchema.index({
 outboundSmsSchema.index({ nextRetryAt: 1 });
 outboundSmsSchema.index({ expiresAt: 1 });
 outboundSmsSchema.index({ phone: 1, createdAt: -1 });
-outboundSmsSchema.index({ providerMessageId: 1 }, { sparse: true });
 
-const OutboundSms = mongoose.models.OutboundSms || mongoose.model('OutboundSms', outboundSmsSchema);
+// Single definition of the sparse providerMessageId index
+outboundSmsSchema.index(
+  { providerMessageId: 1 },
+  { sparse: true }
+);
+
+const OutboundSms =
+  mongoose.models.OutboundSms ||
+  mongoose.model('OutboundSms', outboundSmsSchema);
+
 module.exports = OutboundSms;
