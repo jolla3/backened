@@ -258,9 +258,14 @@ const formatDeductionReceipt = ({
   productName,
   quantity,
   unit,
+  unitPrice,
 }) => {
-  const coop = (cooperativeName || 'COOPERATIVE').toUpperCase().trim();
-  const farmer = farmerName || `Farmer #${farmerCode || 'N/A'}`;
+  const coop = (cooperativeName || 'COOPERATIVE')
+    .toUpperCase()
+    .trim();
+
+  const farmer =
+    farmerName || `Farmer #${farmerCode || 'N/A'}`;
 
   const reasonLabels = {
     feeds: 'Feed',
@@ -273,21 +278,34 @@ const formatDeductionReceipt = ({
 
   const label = reasonLabels[reason] || 'Deduction';
 
-  let deductionLine;
   if (reason === 'feeds' && productName) {
+    const compactName = String(productName)
+      .trim()
+      .replace(/\s+/g, ' ')
+      .slice(0, 24);
+
     const quantityText = [quantity, unit]
       .filter((v) => v !== undefined && v !== null && v !== '')
       .join(' ');
-    deductionLine = `${productName} ${quantityText}`.trim();
-  } else {
-    deductionLine = `${label} ${formatSmsCurrency(amount)}`;
+
+    const sms = [
+      coop,
+      farmer,
+      `${compactName} ${quantityText} @ ${formatSmsCurrency(unitPrice)}`,
+      `Deducted ${formatSmsCurrency(amount)}`,
+      `Wallet ${formatSmsCurrency(walletBalance)}`,
+    ].join('\n');
+
+    return {
+      sms,
+      smsLength: sms.length,
+    };
   }
 
   const sms = [
     coop,
     farmer,
-    deductionLine,
-    `Deducted ${formatSmsCurrency(amount)}`,
+    `${label} ${formatSmsCurrency(amount)}`,
     `Wallet ${formatSmsCurrency(walletBalance)}`,
   ].join('\n');
 
