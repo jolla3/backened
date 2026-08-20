@@ -21,7 +21,7 @@ const outboundSmsSchema = new mongoose.Schema(
         'monthly_summary',
         'feed_purchase',
         'milk_receipt',
-        'balance_deduction',   // ← added for manual deductions
+        'balance_deduction',
         'custom',
       ],
       default: 'general',
@@ -79,9 +79,10 @@ const outboundSmsSchema = new mongoose.Schema(
     error: {
       type: String,
     },
-    // Keep only the sparse index definition below – do NOT put index:true here
+    // ✅ Fixed: index + sparse directly on the field, no separate index() call
     providerMessageId: {
       type: String,
+      index: true,
       sparse: true,
     },
     providerResponse: {
@@ -148,11 +149,7 @@ outboundSmsSchema.index({ nextRetryAt: 1 });
 outboundSmsSchema.index({ expiresAt: 1 });
 outboundSmsSchema.index({ phone: 1, createdAt: -1 });
 
-// Single definition of the sparse providerMessageId index
-outboundSmsSchema.index(
-  { providerMessageId: 1 },
-  { sparse: true }
-);
+// ✅ Removed duplicate index for providerMessageId
 
 const OutboundSms =
   mongoose.models.OutboundSms ||
