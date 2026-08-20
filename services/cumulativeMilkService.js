@@ -1,27 +1,53 @@
-/**
- * Cumulative Milk Service – Authoritative calculation from Transaction collection.
- * Accepts asOfDate and asOfShift to compute month‑to‑date inclusive of the current shift.
- */
+// services/cumulativeMilkService.js
 const mongoose = require('mongoose');
 const Transaction = require('../models/transaction');
 const logger = require('../utils/logger');
 
 /**
  * Get month boundaries for a given date (Africa/Nairobi).
+ * Handles both Date objects and YYYY-MM-DD strings.
  */
 const getCurrentMonthBoundaries = (referenceDate = new Date()) => {
-  const formatter = new Intl.DateTimeFormat('en-CA', {
-    timeZone: 'Africa/Nairobi',
-    year: 'numeric',
-    month: '2-digit',
-    day: '2-digit',
-  });
-  const dateString = formatter.format(referenceDate);
-  const [year, month] = dateString.split('-');
-  const startDate = `${year}-${month}-01`;
-  const lastDayOfMonth = new Date(parseInt(year, 10), parseInt(month, 10), 0).getDate();
-  const endDate = `${year}-${month}-${String(lastDayOfMonth).padStart(2, '0')}`;
-  return { startDate, endDate, year: parseInt(year, 10), month: parseInt(month, 10) };
+  let year, month;
+
+  // If referenceDate is a YYYY-MM-DD string, parse it directly.
+  if (
+    typeof referenceDate === 'string' &&
+    /^\d{4}-\d{2}-\d{2}$/.test(referenceDate)
+  ) {
+    const [y, m] = referenceDate.split('-').map(Number);
+    year = y;
+    month = m;
+  } else {
+    // Otherwise treat as a Date object or convert.
+    const date = new Date(referenceDate);
+    if (Number.isNaN(date.getTime())) {
+      throw new Error(`Invalid reference date: ${referenceDate}`);
+    }
+    // Use Africa/Nairobi timezone to extract year/month.
+    const formatter = new Intl.DateTimeFormat('en-CA', {
+      timeZone: 'Africa/Nairobi',
+      year: 'numeric',
+      month: '2-digit',
+    });
+    const parts = formatter.formatToParts(date);
+    year = Number(parts.find(p => p.type === 'year').value);
+    month = Number(parts.find(p => p.type === 'month').value);
+  }
+
+  // Build start and end dates as YYYY-MM-DD strings.
+  const startDate = `${year}-${String(month).padStart(2, '0')}-01`;
+  // Last day of month using UTC to avoid timezone shifts.
+  const lastDayOfMonth = new Date(Date.UTC(year, month, 0)).getUTCDate();
+  const endDate =
+    `${year}-${String(month).padStart(2, '0')}-${String(lastDayOfMonth).padStart(2, '0')}`;
+
+  return {
+    startDate,
+    endDate,
+    year,
+    month,
+  };
 };
 
 /**
