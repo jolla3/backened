@@ -213,6 +213,8 @@ const formatFeedReceipt = ({
 
 // ─── Manual balance deduction (compact + unit price) ────────
 
+// utils/receiptFormatter.js – formatDeductionReceipt (no truncation)
+
 const formatDeductionReceipt = ({
   cooperativeName,
   farmerName,
@@ -224,6 +226,7 @@ const formatDeductionReceipt = ({
   quantity,
   unit,
   unitPrice,
+  items, // optional array of product snapshots
 }) => {
   const coop = (cooperativeName || 'COOPERATIVE').toUpperCase().trim();
   const farmer = farmerName || `Farmer #${farmerCode || 'N/A'}`;
@@ -236,15 +239,26 @@ const formatDeductionReceipt = ({
     penalty: 'Penalty',
     other: 'Deduction',
   };
-
   const label = reasonLabels[reason] || 'Deduction';
 
+  // Multi‑product feed deduction – include ALL items
+  if (reason === 'feeds' && items && items.length > 1) {
+    const lines = [];
+    lines.push(coop);
+    lines.push(farmer);
+    for (const item of items) {
+      const qtyLabel = item.unit ? `${item.quantity} ${item.unit}` : `${item.quantity}`;
+      lines.push(`${item.productName} ${qtyLabel} @ ${formatSmsCurrency(item.unitPrice)}`);
+    }
+    lines.push(`Total ${formatSmsCurrency(amount)} Wallet ${formatSmsCurrency(walletBalance)}`);
+    const sms = lines.join('\n');
+    return { sms, smsLength: sms.length };
+  }
+
+  // Single‑product feed deduction
   if (reason === 'feeds' && productName) {
     const compactName = String(productName).trim().replace(/\s+/g, ' ').slice(0, 24);
-    const quantityText = [quantity, unit]
-      .filter((v) => v !== undefined && v !== null && v !== '')
-      .join(' '); // keep the space: "25 kg"
-
+    const quantityText = [quantity, unit].filter(v => v !== undefined && v !== null && v !== '').join(' ');
     const sms = [
       coop,
       farmer,
@@ -252,7 +266,6 @@ const formatDeductionReceipt = ({
       `Deducted ${formatSmsCurrency(amount)}`,
       `Wallet ${formatSmsCurrency(walletBalance)}`,
     ].join('\n');
-
     return { sms, smsLength: sms.length };
   }
 
@@ -263,7 +276,6 @@ const formatDeductionReceipt = ({
     `${label} ${formatSmsCurrency(amount)}`,
     `Wallet ${formatSmsCurrency(walletBalance)}`,
   ].join('\n');
-
   return { sms, smsLength: sms.length };
 };
 

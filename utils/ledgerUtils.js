@@ -1,16 +1,27 @@
 const Farmer = require('../models/farmer');
-const Ledger = require('../models/ledger'); // ← was missing
+const Ledger = require('../models/ledger');
 
 /**
  * Update a farmer's current balance and last ledger reference.
  * This is the ONLY function that should modify Farmer.currentBalance.
+ *
+ * @param {string} farmerId - Farmer ObjectId
+ * @param {number} newBalance - New balance value
+ * @param {string} ledgerId - Ledger entry ObjectId
+ * @param {object|null} session - Mongoose session for transactions
+ * @param {object} condition - Additional conditions (e.g., { currentBalance: previousBalance })
+ * @returns {object|null} The updated farmer document, or null if no document matched
  */
-const updateFarmerBalance = async (farmerId, newBalance, ledgerId, session = null) => {
+const updateFarmerBalance = async (farmerId, newBalance, ledgerId, session = null, condition = {}) => {
   const update = { currentBalance: newBalance, lastLedgerId: ledgerId };
+  const filter = { _id: farmerId, ...condition };
+
   if (session) {
-    await Farmer.findByIdAndUpdate(farmerId, update, { session });
+    const result = await Farmer.findOneAndUpdate(filter, { $set: update }, { session, new: false });
+    return result;
   } else {
-    await Farmer.findByIdAndUpdate(farmerId, update);
+    const result = await Farmer.findOneAndUpdate(filter, { $set: update }, { new: false });
+    return result;
   }
 };
 
