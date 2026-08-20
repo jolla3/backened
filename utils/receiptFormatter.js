@@ -54,7 +54,7 @@ const formatCollectionDate = (dateInput) => {
   }).format(d);
 };
 
-// SMS date – day + month only (no year)
+// SMS date – day + month only
 const formatSmsDate = (dateInput) => {
   if (!dateInput) return '';
   let d;
@@ -74,16 +74,12 @@ const formatSmsDate = (dateInput) => {
 
 /**
  * Safe SMS time formatter.
- * Accepts:
- *   - Date object
- *   - full datetime string
- *   - bare "HH:mm" or "HH:mm:ss"
- * Never throws.
+ * Accepts Date, full datetime string, or bare "HH:mm" / "HH:mm:ss".
+ * Never throws. Prefer not calling this with a pure date-only string.
  */
 const formatSmsTime = (timeInput) => {
   if (!timeInput) return '';
 
-  // Already a Date
   if (timeInput instanceof Date) {
     if (isNaN(timeInput.getTime())) return '';
     return new Intl.DateTimeFormat('en-KE', {
@@ -102,7 +98,6 @@ const formatSmsTime = (timeInput) => {
     let hour = Number(match[1]);
     const minute = Number(match[2]);
     if (hour > 23 || minute > 59) return '';
-
     const suffix = hour >= 12 ? 'PM' : 'AM';
     const displayHour = hour % 12 || 12;
     return `${displayHour}:${String(minute).padStart(2, '0')} ${suffix}`;
@@ -111,7 +106,6 @@ const formatSmsTime = (timeInput) => {
   // Full datetime string
   const d = new Date(value);
   if (isNaN(d.getTime())) return '';
-
   return new Intl.DateTimeFormat('en-KE', {
     timeZone: 'Africa/Nairobi',
     hour: 'numeric',
@@ -120,10 +114,11 @@ const formatSmsTime = (timeInput) => {
   }).format(d);
 };
 
-// ─── Milk receipt ───────────────────────────────────────────
+// ─── Milk receipt (compact) ─────────────────────────────────
 
 const formatMilkReceipt = ({
   cooperativeName,
+  receiptNumber,
   farmerName,
   farmerCode,
   litres,
@@ -132,36 +127,36 @@ const formatMilkReceipt = ({
   cumulativeMilk,
   collectionDate,
   collectionShift,
-  // collectionTime is intentionally ignored if present –
-  // we derive time from collectionDate when available
 }) => {
   const milk = Number(litres || 0);
   const cumulative = Number(cumulativeMilk || 0);
   const coop = (cooperativeName || 'COOPERATIVE').toUpperCase().trim();
   const farmer = farmerName || `Farmer #${farmerCode || 'N/A'}`;
 
-  const date = formatSmsDate(collectionDate);
-  // Prefer explicit shift if the business cares about AM/PM shifts.
-  // Otherwise fall back to actual time of day.
-  const when = [date, collectionShift || formatSmsTime(collectionDate)]
+  // Only use what we actually have: date + shift
+  const when = [formatSmsDate(collectionDate), collectionShift]
     .filter(Boolean)
     .join(' ');
 
+  // Compact: farmer + short receipt on same line
+  const farmerLine = receiptNumber
+    ? `${farmer} ${receiptNumber}`
+    : farmer;
+
   const sms = [
     coop,
-    farmer,
-    `Milk ${milk}L`,
-    `Earned ${formatSmsCurrency(payout)}`,
-    `Month ${cumulative}L`,
-    `Wallet ${formatSmsCurrency(walletBalance)}`,
+    farmerLine,
+    `Milk ${milk}L Earned ${formatSmsCurrency(payout)}`,
+    `Month ${cumulative}L Wallet ${formatSmsCurrency(walletBalance)}`,
     when,
   ].join('\n');
 
-  // Printable (verbose) – kept for completeness
+  // Printable (verbose)
   const printable = [
     coop,
     'MILK DELIVERY RECEIPT',
     '',
+    `Receipt: ${receiptNumber || 'N/A'}`,
     `Farmer: ${farmerName || ''}`,
     `Code: ${farmerCode || ''}`,
     SEPARATOR,
@@ -183,70 +178,40 @@ const formatMilkReceipt = ({
   };
 };
 
-// ─── Feed purchase receipt (existing, kept) ─────────────────
+// ─── Feed purchase receipt (compact SMS) ────────────────────
 
 const formatFeedReceipt = ({
   cooperativeName,
-  receiptNumber,
   farmerName,
   farmerCode,
-  paymentMethod,
-  items,
+  items = [],
   total,
   walletBalance,
-  transactionDate,
 }) => {
-  const header = [
-    (cooperativeName || 'COOPERATIVE').toUpperCase(),
-    'FEED PURCHASE RECEIPT',
-    '',
-    `Receipt: ${receiptNumber || ''}`,
-    '',
-    `Farmer: ${farmerName || ''}`,
-    `Code: ${farmerCode || ''}`,
-    '',
-  ];
+  const coop = (cooperativeName || 'COOPERATIVE').toUpperCase().trim();
+  const farmer = farmerName || `Farmer #${farmerCode || 'N/A'}`;
 
-  const paymentLabel = paymentMethod === 'balance' ? 'Farmer Balance' : 'Cash';
   const itemLines = (items || []).map((item) => {
     const qtyLabel = item.unit
-      ? `${item.quantity} ${item.unit} ${item.productName}`
-      : `${item.quantity} x ${item.productName}`;
-    const categoryPart = item.category ? ` (${item.category})` : '';
-    return `${qtyLabel}${categoryPart} @ ${formatCurrency(item.unitPrice)} = ${formatCurrency(item.lineTotal)}`;
+      ? `${item.quantity} ${item.unit}`
+      : `${item.quantity}`;
+    return `${item.productName} ${qtyLabel} @ ${formatSmsCurrency(item.unitPrice)}`;
   });
 
-  const smsBody = [
-    `Payment: ${paymentLabel}`,
-    '',
-    itemLines.join('\n'),
-    '',
-    `TOTAL: ${formatCurrency(total)}`,
-  ];
-
-  const footer = [
-    '',
-    `Wallet Balance: ${formatCurrency(walletBalance)}`,
-    '',
-    `Transaction Date: ${formatDate(transactionDate || new Date())}`,
-    '',
-    'Thank you.',
-  ];
-
-  const sms = [...header, ...smsBody, ...footer].join('\n');
-  const printable = [
-    ...header,
-    SEPARATOR,
-    ...smsBody,
-    SEPARATOR,
-    ...footer,
-    SEPARATOR,
+  const sms = [
+    coop,
+    farmer,
+    ...itemLines,
+    `Total ${formatSmsCurrency(total)} Wallet ${formatSmsCurrency(walletBalance)}`,
   ].join('\n');
 
-  return { sms, printable };
+  return {
+    sms,
+    smsLength: sms.length,
+  };
 };
 
-// ─── Manual balance deduction (compact) ─────────────────────
+// ─── Manual balance deduction (compact + unit price) ────────
 
 const formatDeductionReceipt = ({
   cooperativeName,
@@ -260,12 +225,8 @@ const formatDeductionReceipt = ({
   unit,
   unitPrice,
 }) => {
-  const coop = (cooperativeName || 'COOPERATIVE')
-    .toUpperCase()
-    .trim();
-
-  const farmer =
-    farmerName || `Farmer #${farmerCode || 'N/A'}`;
+  const coop = (cooperativeName || 'COOPERATIVE').toUpperCase().trim();
+  const farmer = farmerName || `Farmer #${farmerCode || 'N/A'}`;
 
   const reasonLabels = {
     feeds: 'Feed',
@@ -279,14 +240,10 @@ const formatDeductionReceipt = ({
   const label = reasonLabels[reason] || 'Deduction';
 
   if (reason === 'feeds' && productName) {
-    const compactName = String(productName)
-      .trim()
-      .replace(/\s+/g, ' ')
-      .slice(0, 24);
-
+    const compactName = String(productName).trim().replace(/\s+/g, ' ').slice(0, 24);
     const quantityText = [quantity, unit]
       .filter((v) => v !== undefined && v !== null && v !== '')
-      .join(' ');
+      .join(' '); // keep the space: "25 kg"
 
     const sms = [
       coop,
@@ -296,12 +253,10 @@ const formatDeductionReceipt = ({
       `Wallet ${formatSmsCurrency(walletBalance)}`,
     ].join('\n');
 
-    return {
-      sms,
-      smsLength: sms.length,
-    };
+    return { sms, smsLength: sms.length };
   }
 
+  // Non-feed deductions
   const sms = [
     coop,
     farmer,
@@ -309,10 +264,7 @@ const formatDeductionReceipt = ({
     `Wallet ${formatSmsCurrency(walletBalance)}`,
   ].join('\n');
 
-  return {
-    sms,
-    smsLength: sms.length,
-  };
+  return { sms, smsLength: sms.length };
 };
 
 module.exports = {
