@@ -56,34 +56,7 @@ const getActiveRateVersion = async (cooperativeId, type = 'milk', effectiveDate)
   };
 };
 
-const generateReceiptNum = async (cooperativeNameOrId, maxRetries = 8) => {
-  let prefix = 'XXX';
 
-  if (typeof cooperativeNameOrId === 'string' && cooperativeNameOrId.length === 24) {
-    // Looks like a Mongo ObjectId – look up the name once
-    const Cooperative = require('../models/cooperative');
-    const coop = await Cooperative.findById(cooperativeNameOrId).select('name').lean();
-    if (coop?.name) prefix = getCooperativePrefix(coop.name);
-  } else if (typeof cooperativeNameOrId === 'string') {
-    prefix = getCooperativePrefix(cooperativeNameOrId);
-  }
-
-  for (let attempt = 0; attempt < maxRetries; attempt++) {
-    const bytes = crypto.randomBytes(6);
-    let code = '';
-    for (let i = 0; i < 6; i++) {
-      code += RECEIPT_ALPHABET[bytes[i] % RECEIPT_ALPHABET.length];
-    }
-    const candidate = `${prefix}-${code}`;
-
-    // Quick existence check (unique index is the real guarantee)
-    const exists = await Transaction.exists({ receipt_num: candidate });
-    if (!exists) return candidate;
-  }
-
-  // Extremely unlikely; surface a clear error so the transaction aborts cleanly
-  throw new Error('Unable to generate unique receipt number after retries');
-};
 
 
 const generateServerSeqNum = async (branch_id) => {
@@ -268,7 +241,6 @@ const recordMilkTransaction = async (data) => {
     }
 
     // ── 6. Generate receipt number (new coded format) ──
-    const { generateReceiptNum } = require('../utils/receiptNumberGenerator');
     receiptNum = await generateReceiptNum(cooperative.name);
     const serverSeqNum = await generateServerSeqNum(branch_id);
 
@@ -806,7 +778,7 @@ module.exports = {
   syncOfflineTransactions,
   getFarmerHistory,
   getActiveRateVersion,
-  generateReceiptNum,
+  generateReceiptNum,          // this now comes from the import
   generateServerSeqNum,
   checkDailyFraudLimit,
 };
