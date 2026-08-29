@@ -13,15 +13,17 @@ const logger = require('../utils/logger');
 const FRAUD_CONFIG = require('../config/fraudConfig');
 const { updateFarmerBalance } = require('../utils/ledgerUtils');
 const { formatMilkReceipt } = require('../utils/receiptFormatter');
+const { generateReceiptNum } = require('../utils/receiptNumberGenerator'); // ← new
 const Cooperative = require('../models/cooperative');
 const smsService = require('./smsService');
 
-// ─── Import date utilities ────────────────────────────────
 const {
   parseKenyaDate,
   isValidDateString,
-  getKenyaDateString,   // ✅ added
+  getKenyaDateString,
 } = require('../utils/dateUtils');
+
+// ... rest of the file (getActiveRateVersion, recordMilkTransaction, etc.)
 
 // ─── Rate lookup (requires effectiveDate) ──────────────────
 const getActiveRateVersion = async (cooperativeId, type = 'milk', effectiveDate) => {
@@ -54,20 +56,35 @@ const getActiveRateVersion = async (cooperativeId, type = 'milk', effectiveDate)
   };
 };
 
-const generateReceiptNum = async () => {
-  const date = new Date();
-  const year = date.getFullYear();
-  const month = String(date.getMonth() + 1).padStart(2, '0');
-  const day = String(date.getDate()).padStart(2, '0');
-  const dateKey = `milk_receipt_seq_${year}${month}${day}`;
+const generateReceiptNum = async (cooperativeNameOrId, maxRetries = 8) => {
+  let prefix = 'XXX';
 
-  const counter = await Counter.findOneAndUpdate(
-    { _id: dateKey },
-    { $inc: { sequence: 1 } },
-    { returnDocument: 'after', upsert: true }
-  );
-  return `REC-${year}${month}${day}-${String(counter.sequence).padStart(6, '0')}`;
+  if (typeof cooperativeNameOrId === 'string' && cooperativeNameOrId.length === 24) {
+    // Looks like a Mongo ObjectId – look up the name once
+    const Cooperative = require('../models/cooperative');
+    const coop = await Cooperative.findById(cooperativeNameOrId).select('name').lean();
+    if (coop?.name) prefix = getCooperativePrefix(coop.name);
+  } else if (typeof cooperativeNameOrId === 'string') {
+    prefix = getCooperativePrefix(cooperativeNameOrId);
+  }
+
+  for (let attempt = 0; attempt < maxRetries; attempt++) {
+    const bytes = crypto.randomBytes(6);
+    let code = '';
+    for (let i = 0; i < 6; i++) {
+      code += RECEIPT_ALPHABET[bytes[i] % RECEIPT_ALPHABET.length];
+    }
+    const candidate = `${prefix}-${code}`;
+
+    // Quick existence check (unique index is the real guarantee)
+    const exists = await Transaction.exists({ receipt_num: candidate });
+    if (!exists) return candidate;
+  }
+
+  // Extremely unlikely; surface a clear error so the transaction aborts cleanly
+  throw new Error('Unable to generate unique receipt number after retries');
 };
+
 
 const generateServerSeqNum = async (branch_id) => {
   const safeBranch = branch_id || 'DEFAULT';
@@ -120,6 +137,7 @@ const recordMilkTransaction = async (data) => {
   let effectiveDate;
   let collectionShift = 'AM';
   let litresNum;
+  let cooperative; // reused later
 
   try {
     const {
@@ -156,7 +174,7 @@ const recordMilkTransaction = async (data) => {
       throw new Error(`Milk quantity cannot exceed ${FRAUD_CONFIG.MAX_MILK_PER_TRANSACTION}L per transaction`);
     }
 
-    // ── Request-level idempotency ───────────────────────
+    // ── 2. Request-level idempotency ───────────────────
     const requestIdempotencyKey =
       clientIdempotencyKey ||
       (device_seq_num != null
@@ -174,7 +192,7 @@ const recordMilkTransaction = async (data) => {
         await session.abortTransaction();
         session.endSession();
 
-        const cooperative = await Cooperative.findById(cooperativeId).lean();
+        const coopDoc = await Cooperative.findById(cooperativeId).lean();
         const farmerDoc = await Farmer.findById(farmer_id).lean();
 
         const { getCumulativeMilkForMonth } = require('./cumulativeMilkService');
@@ -189,17 +207,18 @@ const recordMilkTransaction = async (data) => {
             ? existing.wallet_balance_after
             : (farmerDoc?.currentBalance || 0);
 
+        // Return ORIGINAL receipt number – never generate a new one
         const receipt = formatMilkReceipt({
-          cooperativeName: cooperative?.name || 'COOPERATIVE',
+          cooperativeName: coopDoc?.name || 'COOPERATIVE',
           receiptNumber: existing.receipt_num,
           farmerName: farmerDoc?.name || '',
           farmerCode: farmerDoc?.farmer_code || farmerDoc?.code || '',
           litres: existing.litres,
           payout: existing.payout,
           walletBalance: historicalBalance,
-          monthlyMilk: monthly.litres,
+          cumulativeMilk: monthly.litres,
           collectionDate: existing.collectionDate,
-          transactionDate: existing.timestamp_server,
+          collectionShift: existing.collectionShift || 'AM',
         });
 
         return {
@@ -220,7 +239,7 @@ const recordMilkTransaction = async (data) => {
       }
     }
 
-    // ── Derive effective date / shift ───────────────────
+    // ── 3. Derive effective date / shift ───────────────
     if (timestamp_local) {
       const dateObj = new Date(timestamp_local);
       if (!isNaN(dateObj.getTime())) {
@@ -234,14 +253,23 @@ const recordMilkTransaction = async (data) => {
       effectiveDate = getKenyaDateString();
     }
 
-    // ── Rate lookup ─────────────────────────────────────
+    // ── 4. Rate lookup ─────────────────────────────────
     const rateInfo = await getActiveRateVersion(cooperativeId, 'milk', effectiveDate);
     payout = parseFloat((litresNum * rateInfo.rate).toFixed(2));
 
     await checkDailyFraudLimit(farmer_id, litresNum);
 
-    // ── Generate numbers ────────────────────────────────
-    receiptNum = await generateReceiptNum();
+    // ── 5. Load cooperative once (reuse later) ─────────
+    cooperative = await Cooperative.findById(cooperativeId)
+      .session(session)
+      .lean();
+    if (!cooperative) {
+      throw new Error('Cooperative not found');
+    }
+
+    // ── 6. Generate receipt number (new coded format) ──
+    const { generateReceiptNum } = require('../utils/receiptNumberGenerator');
+    receiptNum = await generateReceiptNum(cooperative.name);
     const serverSeqNum = await generateServerSeqNum(branch_id);
 
     const qrHash = qrService.generateHMAC(`${receiptNum}${serverSeqNum}`);
@@ -261,13 +289,13 @@ const recordMilkTransaction = async (data) => {
     };
     const digitalSignature = qrService.generateHMAC(signatureData);
 
-    // ── Farmer (under session) ──────────────────────────
+    // ── 7. Farmer (under session) ──────────────────────
     farmer = await Farmer.findById(farmer_id).session(session);
     if (!farmer) {
       throw new Error('Farmer not found');
     }
 
-    // ── Zone resolution ─────────────────────────────────
+    // ── 8. Zone resolution ─────────────────────────────
     let zoneId = null;
     let zoneName = '';
     if (zone) {
@@ -283,7 +311,7 @@ const recordMilkTransaction = async (data) => {
       zoneName = farmer.zoneName || '';
     }
 
-    // ── Atomic balance from latest ledger (same session) ─
+    // ── 9. Atomic balance from latest ledger ───────────
     const lastLedger = await Ledger.findOne({
       cooperativeId,
       farmerId: farmer_id,
@@ -295,7 +323,7 @@ const recordMilkTransaction = async (data) => {
     previousBalance = lastLedger ? lastLedger.runningBalance : 0;
     newBalance = previousBalance + payout;
 
-    // ── Create Transaction ──────────────────────────────
+    // ── 10. Create Transaction ─────────────────────────
     const finalKey =
       requestIdempotencyKey ||
       `${device_id}-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
@@ -334,7 +362,7 @@ const recordMilkTransaction = async (data) => {
       { session }
     );
 
-    // ── Create Ledger Entry ─────────────────────────────
+    // ── 11. Create Ledger Entry ────────────────────────
     [ledgerEntry] = await Ledger.create(
       [{
         cooperativeId,
@@ -360,10 +388,10 @@ const recordMilkTransaction = async (data) => {
       { session }
     );
 
-    // ── Update farmer balance INSIDE the same session ───
+    // ── 12. Update farmer balance ──────────────────────
     await updateFarmerBalance(farmer_id, newBalance, ledgerEntry._id, session);
 
-    // ── Porter totals ───────────────────────────────────
+    // ── 13. Porter totals ──────────────────────────────
     if (porter_id) {
       await Porter.findByIdAndUpdate(
         porter_id,
@@ -377,18 +405,13 @@ const recordMilkTransaction = async (data) => {
       );
     }
 
-    // ── Commit ──────────────────────────────────────────
+    // ── 14. Commit ─────────────────────────────────────
     await session.commitTransaction();
     session.endSession();
 
     // =====================================================
     // OUTSIDE TRANSACTION – SMS failure must not roll back
     // =====================================================
-
-    const cooperative = await Cooperative.findById(cooperativeId).lean();
-    if (!cooperative) {
-      throw new Error('Cooperative not found for receipt');
-    }
 
     const { getCumulativeMilkForMonth } = require('./cumulativeMilkService');
     const monthly = await getCumulativeMilkForMonth(
@@ -397,17 +420,18 @@ const recordMilkTransaction = async (data) => {
       transaction.timestamp_server || new Date()
     );
 
+    // Reuse the already-loaded cooperative document
     const receipt = formatMilkReceipt({
       cooperativeName: cooperative.name,
       receiptNumber: receiptNum,
       farmerName: farmer.name,
-      farmerCode: farmer.farmer_code || farmer.code,
+      farmerCode: farmer.farmer_code || farmer.code || '',
       litres: litresNum,
       payout,
       walletBalance: newBalance,
-      monthlyMilk: monthly.litres,
+      cumulativeMilk: monthly.litres,
       collectionDate: transaction.collectionDate || effectiveDate,
-      transactionDate: transaction.timestamp_server,
+      collectionShift,
     });
 
     if (farmer.phone) {
@@ -426,7 +450,7 @@ const recordMilkTransaction = async (data) => {
             receiptNumber: receiptNum,
             litres: litresNum,
             payout,
-            monthlyMilk: monthly.litres,
+            cumulativeMilk: monthly.litres,
           },
         });
 
@@ -468,7 +492,7 @@ const recordMilkTransaction = async (data) => {
       payout,
       previousBalance,
       newBalance,
-      monthlyMilk: monthly.litres,
+      cumulativeMilk: monthly.litres,
     });
 
     return {

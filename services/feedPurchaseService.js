@@ -9,6 +9,8 @@ const transactionService = require('./transactionService');
 const logger = require('../utils/logger');
 const { updateFarmerBalance } = require('../utils/ledgerUtils');
 const { formatFeedReceipt } = require('../utils/receiptFormatter');
+const { generateReceiptNum } = require('../utils/receiptNumberGenerator');
+  const { getKenyaDateString } = require('../utils/dateUtils');
 
 // ── Helper ──────────────────────────────────────────────
 const getFeedPurchaseFarmer = async (identifier, cooperativeId) => {
@@ -189,7 +191,6 @@ const purchaseFeed = async (data, session) => {
     process.env.ALLOW_FARMER_DEBT === 'true' ||
     cooperative.allowFarmerDebt === true;
 
-  const { getKenyaDateString } = require('../utils/dateUtils');
   const collectionDate = getKenyaDateString();
   const nairobiHour = Number(
     new Intl.DateTimeFormat('en-US', {
@@ -199,6 +200,9 @@ const purchaseFeed = async (data, session) => {
     }).format(new Date())
   );
   const collectionShift = nairobiHour >= 12 ? 'PM' : 'AM';
+
+  // ── Generate ONE coded receipt number for the entire purchase ──
+  const purchaseReceiptNum = await generateReceiptNum(cooperative.name);
 
   // Process each product – price from inventory only
   for (const productData of products) {
@@ -233,8 +237,9 @@ const purchaseFeed = async (data, session) => {
     const cost = quantity * unitPrice;
     totalCost += cost;
 
-    const receiptNum = await transactionService.generateReceiptNum(session);
-    const serverSeqNum = await transactionService.generateServerSeqNum(session, branchId);
+    // Reuse the same receipt number for every line item
+    const receiptNum = purchaseReceiptNum;
+    const serverSeqNum = await transactionService.generateServerSeqNum(branchId);
 
     const isPrimary = transactions.length === 0;
     const txIdempotencyKey = isPrimary
@@ -319,8 +324,8 @@ const purchaseFeed = async (data, session) => {
         type: 'FEED_DEBIT',
         amount: -totalCost,
         runningBalance: newRunningBalance,
-        description: `Feed purchase - ${transactions.map((t) => t.receipt_num).join(', ')}`,
-        reference: transactions.map((t) => t.receipt_num).join(','),
+        description: `Feed purchase - ${purchaseReceiptNum}`,
+        reference: purchaseReceiptNum,
         createdBy: adminId,
         metadata: {
           products: products.map((p) => ({
@@ -355,7 +360,7 @@ const purchaseFeed = async (data, session) => {
     logger.info('Cash feed purchase – no farmer ledger entry', {
       farmerId,
       totalCost,
-      receiptNums: transactions.map((t) => t.receipt_num),
+      receiptNum: purchaseReceiptNum,
     });
   }
 
@@ -375,14 +380,12 @@ const purchaseFeed = async (data, session) => {
   // Receipt (compact SMS via formatFeedReceipt)
   const receipt = formatFeedReceipt({
     cooperativeName: cooperative.name,
-    receiptNumber: transactions[0].receipt_num,
+    receiptNumber: purchaseReceiptNum,
     farmerName: farmer.name,
-    farmerCode: farmer.farmer_code || farmer.code,
-    paymentMethod,
+    farmerCode: farmer.farmer_code || farmer.code || '',
     items: receiptItems,
     total: totalCost,
     walletBalance: balanceAfter,
-    transactionDate: new Date(),
   });
 
   // Queue SMS (caller commits session)
@@ -402,7 +405,7 @@ const purchaseFeed = async (data, session) => {
         metadata: {
           transactionIds: transactions.map((t) => t._id.toString()),
           purchaseId: purchaseId.toString(),
-          receiptNumber: transactions[0].receipt_num,
+          receiptNumber: purchaseReceiptNum,
           totalCost,
           paymentMethod,
           clientIdempotencyKey,
@@ -432,7 +435,7 @@ const purchaseFeed = async (data, session) => {
     paymentMethod,
     balanceBefore,
     balanceAfter,
-    receiptNums: transactions.map((t) => t.receipt_num),
+    receiptNum: purchaseReceiptNum,
     purchaseId: purchaseId.toString(),
     clientIdempotencyKey,
   });

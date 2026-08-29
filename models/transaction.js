@@ -8,7 +8,12 @@ const transactionSchema = new mongoose.Schema({
   digital_signature: { type: String },
 
   // ─── Core transaction data ──────────────────────────────
-  receipt_num: { type: String, index: true },
+  receipt_num: {
+  type: String,
+  required: true,
+  unique: true,          // global uniqueness is safe because the 3-letter prefix isolates cooperatives
+  index: true,
+},
   status: {
     type: String,
     enum: ['completed', 'pending', 'failed'],

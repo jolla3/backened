@@ -6,7 +6,8 @@ const Porter = require('../models/porter');
 const RateVersion = require('../models/rateVersion');
 const Ledger = require('../models/ledger');
 const { updateFarmerBalance } = require('../utils/ledgerUtils');
-const { generateReceiptNum, generateServerSeqNum, getActiveRateVersion } = require('../services/transactionService');
+const { generateServerSeqNum, getActiveRateVersion } = require('../services/transactionService');
+const { generateReceiptNum } = require('../utils/receiptNumberGenerator'); // ← correct source
 const receiptFormatter = require('../utils/receiptFormatter');
 const smsService = require('./smsService');
 const logger = require('../utils/logger');
@@ -16,6 +17,7 @@ const {
   isValidDateString
 } = require('../utils/dateUtils');
 const { getCumulativeMilk } = require('./cumulativeMilkService');
+
 
 // ─── Read functions ──────────────────────────────────────────
 
@@ -94,7 +96,7 @@ const addManualMilkEntry = async ({
   collectionShift,
   zoneId,
   zone,
-  createdBy
+  createdBy,
 }) => {
   const session = await mongoose.startSession();
   session.startTransaction();
@@ -127,7 +129,7 @@ const addManualMilkEntry = async ({
     const farmer = await Farmer.findOne({
       _id: farmerId,
       cooperativeId: cooperative._id,
-      isActive: true
+      isActive: true,
     }).session(session);
     if (!farmer) throw new Error('Farmer not found or inactive');
 
@@ -135,11 +137,11 @@ const addManualMilkEntry = async ({
     const porter = await Porter.findOne({
       _id: porterId,
       cooperativeId: cooperative._id,
-      isActive: true
+      isActive: true,
     }).session(session);
     if (!porter) throw new Error('Porter not found or inactive');
 
-    // ── 5. Get active milk rate using shared function ──────
+    // ── 5. Get active milk rate ─────────────────────────────
     const rateInfo = await getActiveRateVersion(
       cooperativeId,
       'milk',
@@ -152,16 +154,17 @@ const addManualMilkEntry = async ({
 
     const payout = parseFloat((litresNum * rateInfo.rate).toFixed(2));
 
-    // ── 6. Generate receipt numbers ────────────────────────
-    const receiptNum = await generateReceiptNum();
+    // ── 6. Generate receipt number (new coded format) ───────
+    const receiptNum = await generateReceiptNum(cooperative.name);
     const serverSeqNum = await generateServerSeqNum(cooperativeId);
 
-    // ── 7. Generate business idempotency key ────────────────
+    // ── 7. Business idempotency key ─────────────────────────
     const idempotencyKey =
       `manual:${cooperativeId}:${farmerId}:${collectionDate}:${collectionShift}`;
 
-    // ── 8. Check duplicate (application layer) ─────────────
-    const existing = await Transaction.findOne({ idempotency_key: idempotencyKey }).session(session);
+    // ── 8. Duplicate check ──────────────────────────────────
+    const existing = await Transaction.findOne({ idempotency_key: idempotencyKey })
+      .session(session);
     if (existing) {
       const error = new Error(
         `Milk already recorded for ${farmer.name} on ${collectionDate} (${collectionShift})`
@@ -171,7 +174,7 @@ const addManualMilkEntry = async ({
       throw error;
     }
 
-    // ── 9. Create Transaction ─────────────────────────────
+    // ── 9. Create Transaction ───────────────────────────────
     const transactionData = {
       receipt_num: receiptNum,
       status: 'completed',
@@ -194,7 +197,6 @@ const addManualMilkEntry = async ({
       idempotency_key: idempotencyKey,
     };
 
-    // ── 10. Try insert, catch duplicate key error ────────
     let transaction;
     try {
       [transaction] = await Transaction.create([transactionData], { session });
@@ -210,11 +212,10 @@ const addManualMilkEntry = async ({
       throw error;
     }
 
-    // ── 11. Get previous balance ────────────────────────────
+    // ── 10. Balance & Ledger ────────────────────────────────
     const previousBalance = farmer.currentBalance || 0;
     const newBalance = previousBalance + payout;
 
-    // ── 12. Create Ledger Entry ─────────────────────────────
     const [ledgerEntry] = await Ledger.create([{
       cooperativeId: cooperative._id,
       farmerId: farmer._id,
@@ -231,35 +232,33 @@ const addManualMilkEntry = async ({
         rate_version_id: rateInfo.rate_version_id,
         porter_id: porter._id,
         collectionShift,
-        collectionDate
+        collectionDate,
       },
-      timestamp: new Date()
+      timestamp: new Date(),
     }], { session });
 
-    // ── 13. Update Farmer balance ──────────────────────────
     await updateFarmerBalance(farmer._id, newBalance, ledgerEntry._id, session);
 
-    // ── 14. Update Porter totals ──────────────────────────
+    // ── 11. Porter totals ───────────────────────────────────
     await Porter.findByIdAndUpdate(
       porter._id,
       {
         $inc: {
           'totals.litresCollected': litresNum,
           'totals.transactionsCount': 1,
-        }
+        },
       },
       { session }
     );
 
-    // ── 15. Commit transaction ────────────────────────────
+    // ── 12. Commit ──────────────────────────────────────────
     await session.commitTransaction();
     session.endSession();
 
-    // ── 16. Generate receipt and queue SMS ────────────────
+    // ── 13. Receipt + SMS (outside transaction) ─────────────
     let receipt = null;
     if (farmer.phone) {
       try {
-        // ✅ Calculate cumulative – pass asOfDate and asOfShift
         const cumulative = await getCumulativeMilk({
           farmerId: farmer._id,
           cooperativeId: cooperative._id,
@@ -268,23 +267,21 @@ const addManualMilkEntry = async ({
         });
         const cumulativeLitres = cumulative.litres;
 
-        // ✅ Build receipt data with all required fields
         const receiptData = {
-          receiptNumber: receiptNum,
           cooperativeName: cooperative.name,
+          receiptNumber: receiptNum,
           farmerName: farmer.name,
-          farmerCode: farmer.farmer_code || 'N/A',
+          farmerCode: farmer.farmer_code || farmer.code || 'N/A',
           litres: litresNum,
           payout,
           walletBalance: newBalance,
+          cumulativeMilk: cumulativeLitres,
           collectionDate,
           collectionShift,
-          cumulativeMilk: cumulativeLitres,
         };
 
         receipt = receiptFormatter.formatMilkReceipt(receiptData);
 
-        // ✅ Log final SMS for debugging
         logger.info('FINAL MILK SMS', {
           receiptNum,
           length: receipt.smsLength,
@@ -294,7 +291,6 @@ const addManualMilkEntry = async ({
           collectionShift,
         });
 
-        // ✅ Queue SMS with enriched metadata
         await smsService.queueSMS({
           to: farmer.phone,
           message: receipt.sms,
@@ -308,18 +304,18 @@ const addManualMilkEntry = async ({
             litres: litresNum,
             cumulativeMilk: cumulativeLitres,
             entryMethod: 'manual',
-          }
+          },
         });
 
         logger.info('Manual milk receipt SMS queued', {
           phone: farmer.phone,
           receiptNum,
-          cumulative: cumulativeLitres
+          cumulative: cumulativeLitres,
         });
       } catch (err) {
         logger.warn('Receipt generation or SMS queue failed (non-critical)', {
           farmerId: farmer._id,
-          error: err.message
+          error: err.message,
         });
       }
     }
@@ -333,7 +329,7 @@ const addManualMilkEntry = async ({
       porter: porter.name,
       createdBy,
       collectionShift,
-      collectionDate
+      collectionDate,
     });
 
     return {
@@ -346,11 +342,12 @@ const addManualMilkEntry = async ({
       previousBalance,
       newBalance,
       ledgerEntry,
-      receipt
+      receipt,
     };
-
   } catch (error) {
-    await session.abortTransaction();
+    if (session.inTransaction()) {
+      await session.abortTransaction();
+    }
     session.endSession();
 
     if (error.code === 'DUPLICATE_MILK_ENTRY') {

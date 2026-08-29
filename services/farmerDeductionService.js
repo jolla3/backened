@@ -1,11 +1,11 @@
 const mongoose = require('mongoose');
-const crypto = require('crypto');
 const Farmer = require('../models/farmer');
 const Ledger = require('../models/ledger');
 const Inventory = require('../models/inventory');
 const Cooperative = require('../models/cooperative');
 const { queueSMS } = require('../services/smsService');
 const { formatDeductionReceipt } = require('../utils/receiptFormatter');
+const { generateReceiptNum } = require('../utils/receiptNumberGenerator');
 const { updateFarmerBalance } = require('../utils/ledgerUtils');
 const logger = require('../utils/logger');
 
@@ -17,10 +17,6 @@ const ALLOWED_REASONS = {
   debt: 'MANUAL_ADJUSTMENT',
   other: 'MANUAL_ADJUSTMENT',
 };
-
-function generateReference() {
-  return `DED-${Date.now()}-${crypto.randomBytes(4).toString('hex').toUpperCase()}`;
-}
 
 /**
  * Manual farmer balance deduction.
@@ -169,8 +165,10 @@ async function createManualDeduction({
       throw new Error('Insufficient farmer balance');
     }
 
-    // ─── Create ONE Ledger entry ────────────────────────────
-    const reference = generateReference();
+    // ─── Generate coded receipt number ───────────────────
+    const receiptNum = await generateReceiptNum(cooperative.name);
+
+    // ─── Create ONE Ledger entry ─────────────────────────
     const [ledgerEntry] = await Ledger.create(
       [
         {
@@ -180,16 +178,19 @@ async function createManualDeduction({
           amount: -deductionAmount,
           runningBalance: newBalance,
           description: description || `${normalizedReason} deduction`,
-          reference,
+          reference: receiptNum,                 // use the coded receipt as reference
           createdBy: adminId,
-          metadata,
+          metadata: {
+            ...metadata,
+            receipt_num: receiptNum,
+          },
           timestamp: new Date(),
         },
       ],
       { session }
     );
 
-    // ─── Update Farmer cache using ledgerUtil ─────────────
+    // ─── Update Farmer cache ─────────────────────────────
     const updatedFarmer = await updateFarmerBalance(
       farmer._id,
       newBalance,
@@ -204,30 +205,19 @@ async function createManualDeduction({
 
     await session.commitTransaction();
 
-    // ─── SMS after commit ──────────────────────────────────
+    // ─── SMS after commit ────────────────────────────────
     let smsQueued = false;
     try {
-      let receipt;
-      if (normalizedReason === 'feeds' && productSnapshots.length > 0) {
-        receipt = formatDeductionReceipt({
-          cooperativeName: cooperative.name,
-          farmerName: farmer.name,
-          farmerCode: farmer.farmer_code,
-          reason: normalizedReason,
-          amount: deductionAmount,
-          walletBalance: newBalance,
-          items: productSnapshots,
-        });
-      } else {
-        receipt = formatDeductionReceipt({
-          cooperativeName: cooperative.name,
-          farmerName: farmer.name,
-          farmerCode: farmer.farmer_code,
-          reason: normalizedReason,
-          amount: deductionAmount,
-          walletBalance: newBalance,
-        });
-      }
+      const receipt = formatDeductionReceipt({
+        cooperativeName: cooperative.name,
+        receiptNumber: receiptNum,
+        farmerName: farmer.name,
+        farmerCode: farmer.farmer_code || farmer.code || '',
+        reason: normalizedReason,
+        amount: deductionAmount,
+        walletBalance: newBalance,
+        items: productSnapshots.length > 0 ? productSnapshots : undefined,
+      });
 
       if (farmer.phone) {
         await queueSMS({
@@ -238,7 +228,7 @@ async function createManualDeduction({
           farmerId: farmer._id,
           metadata: {
             ledgerId: ledgerEntry._id,
-            reference,
+            receiptNumber: receiptNum,
             reason: normalizedReason,
           },
         });
@@ -253,14 +243,15 @@ async function createManualDeduction({
       });
     }
 
-    // ─── Response ────────────────────────────────────────────
-    const response = {
+    // ─── Response ────────────────────────────────────────
+    return {
       success: true,
       deduction: {
         amount: deductionAmount,
         reason: normalizedReason,
         type: ledgerType,
-        reference,
+        reference: receiptNum,
+        receiptNumber: receiptNum,
       },
       farmer: {
         id: farmer._id,
@@ -276,10 +267,10 @@ async function createManualDeduction({
       },
       smsQueued,
     };
-
-    return response;
   } catch (err) {
-    await session.abortTransaction();
+    if (session.inTransaction()) {
+      await session.abortTransaction();
+    }
     logger.error('Manual deduction failed – rolled back', {
       error: err.message,
       farmerId,

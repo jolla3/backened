@@ -1,15 +1,83 @@
 /**
- * Receipt Formatter – pure functions, no DB or business logic.
- * SMS is compact (target 1 SMS unit). Printable retains full detail.
- * All date/time helpers are defensive against invalid values.
+ * Receipt Formatter – pure formatting only.
+ * No database calls, no business logic, no side effects.
  */
 
 const SEPARATOR = '='.repeat(40);
 
-// ─── Currency helpers ───────────────────────────────────────
+// ─── Cooperative helpers ────────────────────────────────────
+
+/**
+ * Human-readable short name for SMS / printable receipts.
+ * Deterministic and generic – never hard-coded.
+ *
+ * Examples:
+ *   "ITHITU DAIRY CO-OP SOCIETY LTD"     → "ITHITU DAIRY"
+ *   "MERU FARMERS COOPERATIVE SOCIETY"   → "MERU FARMERS"
+ *   "KIRINYAGA DAIRY FARMERS CO-OP LTD"  → "KIRINYAGA DAIRY"
+ */
+function getCooperativeShortName(cooperativeName) {
+  if (!cooperativeName || typeof cooperativeName !== 'string') return 'COOP';
+
+  let name = cooperativeName
+    .normalize('NFKC')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .toUpperCase();
+
+  // Remove common legal / organisational suffixes
+  const suffixes = [
+    /\bLIMITED\b/g,
+    /\bLTD\b\.?/g,
+    /\bPLC\b/g,
+    /\bCOMPANY\b/g,
+    /\bCO\.?\b/g,
+    /\bCOOPERATIVE\b/g,
+    /\bCO-OPERATIVE\b/g,
+    /\bCO-OP\b/g,
+    /\bSOCIETY\b/g,
+    /\bS\.?C\.?\b/g,
+  ];
+
+  for (const re of suffixes) {
+    name = name.replace(re, ' ');
+  }
+
+  name = name.replace(/\s+/g, ' ').trim();
+  const tokens = name.split(' ').filter(Boolean);
+
+  if (tokens.length === 0) return 'COOP';
+  if (tokens.length === 1) return tokens[0];
+
+  // Keep meaningful second token (DAIRY, FARMERS, etc.)
+  const identityWords = new Set(['DAIRY', 'FARMERS', 'FARMER', 'MILK', 'UNION']);
+  if (tokens.length >= 2 && identityWords.has(tokens[1])) {
+    return `${tokens[0]} ${tokens[1]}`;
+  }
+
+  // Fallback: first token only
+  return tokens[0];
+}
+
+/**
+ * Exactly 3 uppercase alphabetic characters.
+ * Deterministic. Never random. Never contains numbers.
+ */
+function getCooperativePrefix(cooperativeName) {
+  const short = getCooperativeShortName(cooperativeName).replace(/[^A-Z]/g, '');
+
+  if (short.length >= 3) return short.slice(0, 3);
+  if (short.length === 2) return short + short[0];
+  if (short.length === 1) return short.repeat(3);
+  return 'XXX';
+}
+
+// ─── Currency ───────────────────────────────────────────────
 
 const formatCurrency = (amount) => {
-  return `KES ${Number(amount).toLocaleString('en-KE', {
+  const n = Number(amount);
+  if (!Number.isFinite(n)) return 'KES 0.00';
+  return `KES ${n.toLocaleString('en-KE', {
     minimumFractionDigits: 2,
     maximumFractionDigits: 2,
   })}`;
@@ -17,104 +85,154 @@ const formatCurrency = (amount) => {
 
 const formatSmsCurrency = (amount) => {
   const rounded = Math.round(Number(amount || 0));
+  if (!Number.isFinite(rounded)) return 'KES 0';
   return `KES ${rounded.toLocaleString('en-KE')}`;
 };
 
-// ─── Date / time helpers (defensive) ────────────────────────
+// ─── Defensive date helpers (Africa/Nairobi) ────────────────
+
+function isValidDate(d) {
+  return d instanceof Date && !isNaN(d.getTime());
+}
 
 const formatDate = (date) => {
-  const d = new Date(date);
-  if (isNaN(d.getTime())) return '';
-  return new Intl.DateTimeFormat('en-KE', {
-    timeZone: 'Africa/Nairobi',
-    day: '2-digit',
-    month: 'short',
-    year: 'numeric',
-    hour: 'numeric',
-    minute: '2-digit',
-    hour12: true,
-  }).format(d);
+  try {
+    const d = date instanceof Date ? date : new Date(date);
+    if (!isValidDate(d)) return '';
+    return new Intl.DateTimeFormat('en-KE', {
+      timeZone: 'Africa/Nairobi',
+      day: '2-digit',
+      month: 'short',
+      year: 'numeric',
+      hour: 'numeric',
+      minute: '2-digit',
+      hour12: true,
+    }).format(d);
+  } catch {
+    return '';
+  }
 };
 
 const formatCollectionDate = (dateInput) => {
-  if (!dateInput) return '';
-  let d;
-  if (typeof dateInput === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(dateInput)) {
-    const [y, m, day] = dateInput.split('-').map(Number);
-    d = new Date(Date.UTC(y, m - 1, day));
-  } else {
-    d = new Date(dateInput);
+  if (dateInput == null || dateInput === '') return '';
+  try {
+    let d;
+    if (typeof dateInput === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(dateInput)) {
+      const [y, m, day] = dateInput.split('-').map(Number);
+      d = new Date(Date.UTC(y, m - 1, day)); // preserve calendar day
+    } else {
+      d = new Date(dateInput);
+    }
+    if (!isValidDate(d)) return String(dateInput);
+    return new Intl.DateTimeFormat('en-KE', {
+      timeZone: 'Africa/Nairobi',
+      day: 'numeric',
+      month: 'short',
+      year: 'numeric',
+    }).format(d);
+  } catch {
+    return String(dateInput);
   }
-  if (isNaN(d.getTime())) return String(dateInput);
-  return new Intl.DateTimeFormat('en-KE', {
-    timeZone: 'Africa/Nairobi',
-    day: 'numeric',
-    month: 'short',
-    year: 'numeric',
-  }).format(d);
 };
 
-// SMS date – day + month only
 const formatSmsDate = (dateInput) => {
-  if (!dateInput) return '';
-  let d;
-  if (typeof dateInput === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(dateInput)) {
-    const [y, m, day] = dateInput.split('-').map(Number);
-    d = new Date(Date.UTC(y, m - 1, day));
-  } else {
-    d = new Date(dateInput);
+  if (dateInput == null || dateInput === '') return '';
+  try {
+    let d;
+    if (typeof dateInput === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(dateInput)) {
+      const [y, m, day] = dateInput.split('-').map(Number);
+      d = new Date(Date.UTC(y, m - 1, day));
+    } else {
+      d = new Date(dateInput);
+    }
+    if (!isValidDate(d)) return '';
+    return new Intl.DateTimeFormat('en-KE', {
+      timeZone: 'Africa/Nairobi',
+      day: 'numeric',
+      month: 'short',
+    }).format(d);
+  } catch {
+    return '';
   }
-  if (isNaN(d.getTime())) return '';
-  return new Intl.DateTimeFormat('en-KE', {
-    timeZone: 'Africa/Nairobi',
-    day: 'numeric',
-    month: 'short',
-  }).format(d);
 };
 
-/**
- * Safe SMS time formatter.
- * Accepts Date, full datetime string, or bare "HH:mm" / "HH:mm:ss".
- * Never throws. Prefer not calling this with a pure date-only string.
- */
 const formatSmsTime = (timeInput) => {
-  if (!timeInput) return '';
+  if (timeInput == null || timeInput === '') return '';
+  try {
+    if (timeInput instanceof Date) {
+      if (!isValidDate(timeInput)) return '';
+      return new Intl.DateTimeFormat('en-KE', {
+        timeZone: 'Africa/Nairobi',
+        hour: 'numeric',
+        minute: '2-digit',
+        hour12: true,
+      }).format(timeInput);
+    }
 
-  if (timeInput instanceof Date) {
-    if (isNaN(timeInput.getTime())) return '';
+    const value = String(timeInput).trim();
+    const match = value.match(/^(\d{1,2}):(\d{2})(?::(\d{2}))?$/);
+    if (match) {
+      let hour = Number(match[1]);
+      const minute = Number(match[2]);
+      if (hour > 23 || minute > 59) return '';
+      const suffix = hour >= 12 ? 'PM' : 'AM';
+      const displayHour = hour % 12 || 12;
+      return `${displayHour}:${String(minute).padStart(2, '0')} ${suffix}`;
+    }
+
+    const d = new Date(value);
+    if (!isValidDate(d)) return '';
     return new Intl.DateTimeFormat('en-KE', {
       timeZone: 'Africa/Nairobi',
       hour: 'numeric',
       minute: '2-digit',
       hour12: true,
-    }).format(timeInput);
+    }).format(d);
+  } catch {
+    return '';
   }
-
-  const value = String(timeInput).trim();
-
-  // Bare HH:mm or HH:mm:ss
-  const match = value.match(/^(\d{1,2}):(\d{2})(?::(\d{2}))?$/);
-  if (match) {
-    let hour = Number(match[1]);
-    const minute = Number(match[2]);
-    if (hour > 23 || minute > 59) return '';
-    const suffix = hour >= 12 ? 'PM' : 'AM';
-    const displayHour = hour % 12 || 12;
-    return `${displayHour}:${String(minute).padStart(2, '0')} ${suffix}`;
-  }
-
-  // Full datetime string
-  const d = new Date(value);
-  if (isNaN(d.getTime())) return '';
-  return new Intl.DateTimeFormat('en-KE', {
-    timeZone: 'Africa/Nairobi',
-    hour: 'numeric',
-    minute: '2-digit',
-    hour12: true,
-  }).format(d);
 };
 
-// ─── Milk receipt (compact) ─────────────────────────────────
+// ─── Product & quantity helpers ─────────────────────────────
+
+function compactProductName(name, maxLen = 18) {
+  if (!name) return 'Item';
+  let s = String(name).replace(/\s+/g, ' ').trim();
+  if (s.length <= maxLen) return s;
+  const parts = s.split(' ');
+  if (parts.length > 1) {
+    const candidate = parts.slice(0, 2).join(' ');
+    if (candidate.length <= maxLen) return candidate;
+  }
+  return s.slice(0, maxLen - 1) + '…';
+}
+
+/**
+ * Safe quantity + unit formatting.
+ * Prefer "25 kg" over "25kg". Never produce "25 kg kg".
+ */
+function formatQuantity(quantity, unit) {
+  const q = quantity != null && quantity !== '' ? String(quantity).trim() : '';
+  const u = unit != null && unit !== '' ? String(unit).trim() : '';
+  if (!q && !u) return '';
+  if (!u) return q;
+  if (!q) return u;
+  return `${q} ${u}`;
+}
+
+// ─── Farmer line helper ─────────────────────────────────────
+
+function buildFarmerLine(farmerName, farmerCode) {
+  const name = (farmerName || '').trim();
+  const code = (farmerCode || '').trim();
+
+  if (name && code) return `${name} #${code}`;
+  if (name) return name;
+  if (code) return `Farmer #${code}`;
+  return 'Farmer';
+}
+
+// ─── Milk receipt ───────────────────────────────────────────
 
 const formatMilkReceipt = ({
   cooperativeName,
@@ -124,112 +242,104 @@ const formatMilkReceipt = ({
   litres,
   payout,
   walletBalance,
-  cumulativeMilk,
+  cumulativeMilk,          // standardised name
   collectionDate,
   collectionShift,
 }) => {
   const milk = Number(litres || 0);
   const cumulative = Number(cumulativeMilk || 0);
-  const coop = (cooperativeName || 'COOPERATIVE').toUpperCase().trim();
-  const farmer = farmerName || `Farmer #${farmerCode || 'N/A'}`;
+  const shortName = getCooperativeShortName(cooperativeName);
+  const farmerLine = buildFarmerLine(farmerName, farmerCode);
 
-  // Only use what we actually have: date + shift
   const when = [formatSmsDate(collectionDate), collectionShift]
     .filter(Boolean)
     .join(' ');
 
-  // Compact: farmer + short receipt on same line
-  const farmerLine = receiptNumber
-    ? `${farmer} ${receiptNumber}`
-    : farmer;
-
   const sms = [
-    coop,
+    shortName,
     farmerLine,
+    receiptNumber || '',
     `Milk ${milk}L Earned ${formatSmsCurrency(payout)}`,
     `Month ${cumulative}L Wallet ${formatSmsCurrency(walletBalance)}`,
     when,
-  ].join('\n');
+  ]
+    .filter(Boolean)
+    .join('\n');
 
-  // Printable (verbose)
   const printable = [
-    coop,
+    shortName,
     'MILK DELIVERY RECEIPT',
     '',
     `Receipt: ${receiptNumber || 'N/A'}`,
     `Farmer: ${farmerName || ''}`,
     `Code: ${farmerCode || ''}`,
     SEPARATOR,
-    `Milk Delivered: ${milk.toFixed(1)} L`,
+    `Milk: ${milk.toFixed(1)} L`,
     `Month Total: ${cumulative.toFixed(1)} L`,
-    `Amount Earned: ${formatCurrency(payout)}`,
+    `Earned: ${formatCurrency(payout)}`,
     `Collection: ${formatCollectionDate(collectionDate)}${collectionShift ? `, ${collectionShift}` : ''}`,
     SEPARATOR,
-    `Wallet Balance: ${formatCurrency(walletBalance)}`,
+    `Wallet: ${formatCurrency(walletBalance)}`,
     '',
     'Thank you.',
     SEPARATOR,
   ].join('\n');
 
-  return {
-    sms,
-    printable,
-    smsLength: sms.length,
-  };
+  return { sms, printable, smsLength: sms.length };
 };
 
-// ─── Feed purchase receipt (compact SMS) ────────────────────
+// ─── Feed purchase receipt ──────────────────────────────────
 
 const formatFeedReceipt = ({
   cooperativeName,
+  receiptNumber,
   farmerName,
   farmerCode,
   items = [],
   total,
   walletBalance,
 }) => {
-  const coop = (cooperativeName || 'COOPERATIVE').toUpperCase().trim();
-  const farmer = farmerName || `Farmer #${farmerCode || 'N/A'}`;
+  const shortName = getCooperativeShortName(cooperativeName);
+  const farmerLine = buildFarmerLine(farmerName, farmerCode);
 
   const itemLines = (items || []).map((item) => {
-    const qtyLabel = item.unit
-      ? `${item.quantity} ${item.unit}`
-      : `${item.quantity}`;
-    return `${item.productName} ${qtyLabel} @ ${formatSmsCurrency(item.unitPrice)}`;
+    const name = compactProductName(item.productName || item.name);
+    const qtyLabel = formatQuantity(item.quantity, item.unit);
+    return `${name} ${qtyLabel} @ ${formatSmsCurrency(item.unitPrice)}`.trim();
   });
 
   const sms = [
-    coop,
-    farmer,
+    shortName,
+    farmerLine,
+    receiptNumber || '',
     ...itemLines,
-    `Total ${formatSmsCurrency(total)} Wallet ${formatSmsCurrency(walletBalance)}`,
-  ].join('\n');
+    `Total ${formatSmsCurrency(total)}`,
+    `Wallet ${formatSmsCurrency(walletBalance)}`,
+  ]
+    .filter(Boolean)
+    .join('\n');
 
-  return {
-    sms,
-    smsLength: sms.length,
-  };
+  return { sms, smsLength: sms.length };
 };
 
-// ─── Manual balance deduction (compact + unit price) ────────
-
-// utils/receiptFormatter.js – formatDeductionReceipt (no truncation)
+// ─── Deduction receipt ──────────────────────────────────────
 
 const formatDeductionReceipt = ({
   cooperativeName,
+  receiptNumber,
   farmerName,
   farmerCode,
   reason,
   amount,
   walletBalance,
-  productName,
+  items = [],                 // multi-product preferred
+  productName,                // legacy single-product
   quantity,
   unit,
   unitPrice,
-  items, // optional array of product snapshots
 }) => {
-  const coop = (cooperativeName || 'COOPERATIVE').toUpperCase().trim();
-  const farmer = farmerName || `Farmer #${farmerCode || 'N/A'}`;
+  const shortName = getCooperativeShortName(cooperativeName);
+  const farmerLine = buildFarmerLine(farmerName, farmerCode);
 
   const reasonLabels = {
     feeds: 'Feed',
@@ -241,45 +351,39 @@ const formatDeductionReceipt = ({
   };
   const label = reasonLabels[reason] || 'Deduction';
 
-  // Multi‑product feed deduction – include ALL items
-  if (reason === 'feeds' && items && items.length > 1) {
-    const lines = [];
-    lines.push(coop);
-    lines.push(farmer);
-    for (const item of items) {
-      const qtyLabel = item.unit ? `${item.quantity} ${item.unit}` : `${item.quantity}`;
-      lines.push(`${item.productName} ${qtyLabel} @ ${formatSmsCurrency(item.unitPrice)}`);
-    }
-    lines.push(`Total ${formatSmsCurrency(amount)} Wallet ${formatSmsCurrency(walletBalance)}`);
-    const sms = lines.join('\n');
-    return { sms, smsLength: sms.length };
+  let productLines = [];
+
+  if (Array.isArray(items) && items.length > 0) {
+    productLines = items.map((item) => {
+      const name = compactProductName(item.productName || item.name);
+      const qtyLabel = formatQuantity(item.quantity, item.unit);
+      return `${name} ${qtyLabel} @ ${formatSmsCurrency(item.unitPrice)}`.trim();
+    });
+  } else if (reason === 'feeds' && productName) {
+    const name = compactProductName(productName, 24);
+    const qtyLabel = formatQuantity(quantity, unit);
+    productLines = [`${name} ${qtyLabel} @ ${formatSmsCurrency(unitPrice)}`.trim()];
   }
 
-  // Single‑product feed deduction
-  if (reason === 'feeds' && productName) {
-    const compactName = String(productName).trim().replace(/\s+/g, ' ').slice(0, 24);
-    const quantityText = [quantity, unit].filter(v => v !== undefined && v !== null && v !== '').join(' ');
-    const sms = [
-      coop,
-      farmer,
-      `${compactName} ${quantityText} @ ${formatSmsCurrency(unitPrice)}`,
-      `Deducted ${formatSmsCurrency(amount)}`,
-      `Wallet ${formatSmsCurrency(walletBalance)}`,
-    ].join('\n');
-    return { sms, smsLength: sms.length };
-  }
-
-  // Non-feed deductions
   const sms = [
-    coop,
-    farmer,
-    `${label} ${formatSmsCurrency(amount)}`,
+    shortName,
+    farmerLine,
+    receiptNumber || '',
+    ...productLines,
+    productLines.length
+      ? `Deducted ${formatSmsCurrency(amount)}`
+      : `${label} ${formatSmsCurrency(amount)}`,
     `Wallet ${formatSmsCurrency(walletBalance)}`,
-  ].join('\n');
+  ]
+    .filter(Boolean)
+    .join('\n');
+
   return { sms, smsLength: sms.length };
 };
 
 module.exports = {
+  getCooperativeShortName,
+  getCooperativePrefix,
   formatCurrency,
   formatSmsCurrency,
   formatDate,
@@ -289,4 +393,7 @@ module.exports = {
   formatMilkReceipt,
   formatFeedReceipt,
   formatDeductionReceipt,
+  compactProductName,
+  formatQuantity,
+  buildFarmerLine,
 };
