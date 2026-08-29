@@ -84,11 +84,17 @@ const formatCurrency = (amount) => {
 };
 
 const formatSmsCurrency = (amount) => {
-  const rounded = Math.round(Number(amount || 0));
-  if (!Number.isFinite(rounded)) return 'KES 0';
-  return `KES ${rounded.toLocaleString('en-KE')}`;
-};
+  const n = Number(amount || 0);
+  if (!Number.isFinite(n)) return 'KES 0';
 
+  const abs = Math.abs(Math.round(n));
+  const formatted = abs.toLocaleString('en-KE');
+
+  if (n < 0) {
+    return `-KES ${formatted}`;   // clearer than "KES -18,650"
+  }
+  return `KES ${formatted}`;
+};
 // ─── Defensive date helpers (Africa/Nairobi) ────────────────
 
 function isValidDate(d) {
