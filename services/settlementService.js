@@ -1,22 +1,23 @@
 // services/settlementService.js
 //
-// Multi-tenant rule: cooperativeId is required on every public entry point.
-// No batch/settlement/ledger/farmer/payment is loaded or mutated without it.
+// Multi-tenant: cooperativeId required on every public entry point.
 //
 // Accounting:
-//   periodNet        = ledger in [periodStart, nextPeriodStart) for THIS coop
-//   openingBalance   = last ledger runningBalance with timestamp < periodStart (same coop)
+//   periodNet        = ledger in [periodStart, nextPeriodStart) for this coop
+//   openingBalance   = last ledger runningBalance with timestamp < periodStart
 //   closingBalance   = openingBalance + periodNet
 //   amountPayable    = max(closingBalance, 0)
 //   amountOwedToCoop = max(-closingBalance, 0)
 //
+// Settlement numbers are cryptographic (SET-<12 chars>), not sequential.
+//
+const crypto = require('crypto');
 const mongoose = require('mongoose');
 const Farmer = require('../models/farmer');
 const Ledger = require('../models/ledger');
 const Settlement = require('../models/settlement');
 const SettlementBatch = require('../models/SettlementBatch');
 const Payment = require('../models/payment');
-const Counter = require('../models/counter');
 const Cooperative = require('../models/cooperative');
 const AuditLog = require('../models/auditLog');
 const logger = require('../utils/logger');
@@ -31,6 +32,10 @@ const {
 } = require('./settlementMath');
 
 const LOCKED_BATCH_STATUSES = ['SETTLING', 'PARTIALLY_SETTLED', 'SETTLED', 'CLOSED'];
+
+const SETTLEMENT_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+const SETTLEMENT_CODE_LENGTH = 12;
+const SETTLEMENT_NUMBER_MAX_ATTEMPTS = 8;
 
 class PeriodLockedError extends Error {
   constructor(message) {
@@ -70,7 +75,62 @@ const assertSettlementBelongsToCoop = (settlement, cooperativeId) => {
   }
 };
 
-// ─── Period lock (per cooperative) ───────────────────────────
+// ─── Cryptographic settlement numbers ────────────────────────
+const randomSettlementCode = (length = SETTLEMENT_CODE_LENGTH) => {
+  let code = '';
+  for (let i = 0; i < length; i++) {
+    code += SETTLEMENT_ALPHABET[crypto.randomInt(0, SETTLEMENT_ALPHABET.length)];
+  }
+  return code;
+};
+
+/**
+ * Format: SET-X7K9Q2M4N8P3
+ * Unbiased crypto.randomInt + unique index backstop.
+ */
+const generateSettlementNumber = async (cooperativeId, session, maxAttempts = SETTLEMENT_NUMBER_MAX_ATTEMPTS) => {
+  const coopId = requireCooperativeId(cooperativeId);
+
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    const candidate = `SET-${randomSettlementCode()}`;
+
+    // Prefer coop-scoped uniqueness. If you still have a global unique index
+    // on settlementNumber alone, this still works (exists check is coop-scoped
+    // but insert will retry on E11000 via allocateSettlementNumbers).
+    let query = Settlement.exists({
+      cooperativeId: coopId,
+      settlementNumber: candidate,
+    });
+    if (session) query = query.session(session);
+    const exists = await query;
+    if (!exists) return candidate;
+  }
+
+  throw new Error('Unable to generate unique settlement number after retries');
+};
+
+const allocateSettlementNumbers = async (cooperativeId, count, session) => {
+  if (count <= 0) return [];
+  const numbers = [];
+  const seen = new Set();
+
+  for (let i = 0; i < count; i++) {
+    let n;
+    let attempts = 0;
+    do {
+      n = await generateSettlementNumber(cooperativeId, session);
+      attempts += 1;
+      if (attempts > SETTLEMENT_NUMBER_MAX_ATTEMPTS * 3) {
+        throw new Error('Unable to allocate unique settlement numbers');
+      }
+    } while (seen.has(n));
+    seen.add(n);
+    numbers.push(n);
+  }
+  return numbers;
+};
+
+// ─── Period lock ─────────────────────────────────────────────
 const assertPeriodOpen = async (cooperativeId, timestamp, session = null) => {
   const coopId = requireCooperativeId(cooperativeId);
   const ts = timestamp instanceof Date ? timestamp : new Date(timestamp);
@@ -226,60 +286,6 @@ const getOrCreateBatch = async (cooperativeId, year, month, bounds, userId, sess
   );
 };
 
-/**
- * Per-cooperative counter. Syncs past max existing settlementNumber for this
- * coop+year+month so retries never collide (E11000).
- */
-const reserveSettlementNumbers = async (cooperativeId, year, month, count, session) => {
-  if (count <= 0) return [];
-  const coopId = requireCooperativeId(cooperativeId);
-  const yearShort = String(year).slice(2);
-  const monthStr = String(month).padStart(2, '0');
-  const prefix = `SET-${yearShort}${monthStr}-`;
-
-  const existing = await Settlement.find({
-    cooperativeId: coopId,
-    year,
-    month,
-    settlementNumber: { $regex: `^${prefix.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}` },
-  })
-    .select('settlementNumber')
-    .session(session)
-    .lean();
-
-  let maxUsed = 0;
-  for (const row of existing) {
-    const tail = String(row.settlementNumber || '').slice(prefix.length);
-    const n = parseInt(tail, 10);
-    if (Number.isFinite(n) && n > maxUsed) maxUsed = n;
-  }
-
-  const key = `settlement:${coopId.toString()}:${year}:${month}`;
-
-  const current = await Counter.findOne({ _id: key }).session(session);
-  const currentSeq = current?.sequence || 0;
-  if (currentSeq < maxUsed) {
-    await Counter.findOneAndUpdate(
-      { _id: key },
-      { $set: { sequence: maxUsed } },
-      { upsert: true, session }
-    );
-  }
-
-  const counter = await Counter.findOneAndUpdate(
-    { _id: key },
-    { $inc: { sequence: count } },
-    { upsert: true, returnDocument: 'after', session }
-  );
-
-  const start = counter.sequence - count + 1;
-  const numbers = [];
-  for (let i = 0; i < count; i++) {
-    numbers.push(`${prefix}${String(start + i).padStart(4, '0')}`);
-  }
-  return numbers;
-};
-
 const createAuditLog = async (userId, action, metadata, ip, session) => {
   if (!AuditLog) return;
   try {
@@ -365,11 +371,10 @@ const generateSettlements = async (cooperativeId, year, month, userId, ip = null
       throw new Error(`Settlement generation for ${year}-${month} is already in progress`);
     }
 
-    // Clear orphans from a previous failed generate on THIS batch only
+    // Remove orphans from a previous failed generate on this batch
     await Settlement.deleteMany({
       batchId: batch._id,
       cooperativeId: coopId,
-      status: 'GENERATED',
     }).session(session);
 
     const farmers = await Farmer.find({ cooperativeId: coopId, isActive: true })
@@ -471,14 +476,25 @@ const generateSettlements = async (cooperativeId, year, month, userId, ip = null
       if (position.amountPayable < summary.lowest) summary.lowest = position.amountPayable;
     }
 
-    const numbers = await reserveSettlementNumbers(coopId, year, month, docs.length, session);
+    const numbers = await allocateSettlementNumbers(coopId, docs.length, session);
     docs.forEach((doc, idx) => {
       doc.settlementNumber = numbers[idx];
     });
 
     let settlements = [];
     if (docs.length) {
-      settlements = await Settlement.insertMany(docs, { session, ordered: true });
+      try {
+        settlements = await Settlement.insertMany(docs, { session, ordered: true });
+      } catch (err) {
+        // Extremely unlikely crypto collision against unique index — surface clearly
+        if (err.code === 11000) {
+          throw new Error(
+            'Settlement number collision on insert; retry generation. ' +
+              'If this persists, ensure unique index is { cooperativeId: 1, settlementNumber: 1 }.'
+          );
+        }
+        throw err;
+      }
     }
 
     batch.status = 'GENERATED';
@@ -983,7 +999,7 @@ const confirmPayment = async (paymentId, userId, externalReference, cooperativeI
   return { success: true, payment };
 };
 
-// ─── Reads (always require cooperativeId) ────────────────────
+// ─── Reads ───────────────────────────────────────────────────
 const getBatch = async (batchId, cooperativeId) => {
   const coopId = requireCooperativeId(cooperativeId);
   const batch = await SettlementBatch.findOne({ _id: batchId, cooperativeId: coopId })
@@ -1003,7 +1019,6 @@ const getBatchSettlements = async (batchId, cooperativeId, query = {}) => {
   const pageSize = parseInt(limit, 10);
   const skip = (pageNumber - 1) * pageSize;
 
-  // Ensure batch is in this coop first
   const batch = await SettlementBatch.findOne({ _id: batchId, cooperativeId: coopId }).select('_id');
   if (!batch) throw new Error('Batch not found');
 
@@ -1078,6 +1093,8 @@ module.exports = {
   assertPeriodOpen,
   PeriodLockedError,
   incrementFarmerBalance,
+  generateSettlementNumber,
+  allocateSettlementNumbers,
 
   generateSettlements,
   approveBatch,
