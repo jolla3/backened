@@ -11,7 +11,8 @@ const ledgerSchema = new mongoose.Schema({
             'MILK_CREDIT',
             'FEED_DEBIT',
             'FEED_CASH_SALE',
-            'PAYMENT',              // ✅ NEW: when settlement is actually paid
+            'PAYMENT', 
+            'SETTLEMENT',             // ✅ NEW: when settlement is actually paid
             'MANUAL_ADJUSTMENT',
             'BONUS',
             'PENALTY',
