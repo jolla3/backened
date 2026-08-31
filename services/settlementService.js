@@ -1,15 +1,14 @@
 // services/settlementService.js
 //
-// Accounting model:
-//   periodNet        = ledger activity in [periodStart, nextPeriodStart) only
-//   openingBalance   = ledger runningBalance strictly before periodStart
-//   closingBalance   = openingBalance + periodNet
-//   amountPayable    = max(closingBalance, 0)   // only this may be paid
-//   amountOwedToCoop = max(-closingBalance, 0)  // debt; never paid; never zeroed by settle
+// Multi-tenant rule: cooperativeId is required on every public entry point.
+// No batch/settlement/ledger/farmer/payment is loaded or mutated without it.
 //
-// Farmer.currentBalance is a live counter — never the definition of a month.
-// Settlement posts SETTLEMENT only for amountPayable > 0.
-// Payment is separate and only allowed when amountPayable > 0.
+// Accounting:
+//   periodNet        = ledger in [periodStart, nextPeriodStart) for THIS coop
+//   openingBalance   = last ledger runningBalance with timestamp < periodStart (same coop)
+//   closingBalance   = openingBalance + periodNet
+//   amountPayable    = max(closingBalance, 0)
+//   amountOwedToCoop = max(-closingBalance, 0)
 //
 const mongoose = require('mongoose');
 const Farmer = require('../models/farmer');
@@ -29,12 +28,9 @@ const {
   getPeriodBounds,
   computePeriodSettlement,
   computeSettlementPosition,
-  splitPosition,
-  computeClosingBalances,
 } = require('./settlementMath');
 
 const LOCKED_BATCH_STATUSES = ['SETTLING', 'PARTIALLY_SETTLED', 'SETTLED', 'CLOSED'];
-const MAX_POST_GENERATION_ENTRIES = 50;
 
 class PeriodLockedError extends Error {
   constructor(message) {
@@ -49,30 +45,58 @@ const TX_OPTS = {
   writeConcern: { w: 'majority' },
 };
 
-// ─── Period lock (call from every ledger writer) ─────────────
+// ─── Tenant helpers ──────────────────────────────────────────
+const requireCooperativeId = (cooperativeId, label = 'cooperativeId') => {
+  if (!cooperativeId) throw new Error(`${label} is required`);
+  if (!mongoose.Types.ObjectId.isValid(cooperativeId)) {
+    throw new Error(`Invalid ${label}`);
+  }
+  return new mongoose.Types.ObjectId(cooperativeId);
+};
+
+const sameCoop = (a, b) => String(a) === String(b);
+
+const assertBatchBelongsToCoop = (batch, cooperativeId) => {
+  if (!batch) throw new Error('Batch not found');
+  if (!sameCoop(batch.cooperativeId, cooperativeId)) {
+    throw new Error('Batch does not belong to this cooperative');
+  }
+};
+
+const assertSettlementBelongsToCoop = (settlement, cooperativeId) => {
+  if (!settlement) throw new Error('Settlement not found');
+  if (!sameCoop(settlement.cooperativeId, cooperativeId)) {
+    throw new Error('Settlement does not belong to this cooperative');
+  }
+};
+
+// ─── Period lock (per cooperative) ───────────────────────────
 const assertPeriodOpen = async (cooperativeId, timestamp, session = null) => {
+  const coopId = requireCooperativeId(cooperativeId);
   const ts = timestamp instanceof Date ? timestamp : new Date(timestamp);
   const year = ts.getUTCFullYear();
   const month = ts.getUTCMonth() + 1;
+
   let query = SettlementBatch.findOne({
-    cooperativeId,
+    cooperativeId: coopId,
     year,
     month,
     status: { $in: LOCKED_BATCH_STATUSES },
   });
   if (session) query = query.session(session);
-  const lockedBatch = await query;
-  if (lockedBatch) {
+  const locked = await query;
+  if (locked) {
     throw new PeriodLockedError(
-      `Accounting period ${year}-${String(month).padStart(2, '0')} is ${lockedBatch.status} and locked.`
+      `Accounting period ${year}-${String(month).padStart(2, '0')} is ${locked.status} and locked for this cooperative.`
     );
   }
   return true;
 };
 
 const incrementFarmerBalance = async (farmerId, cooperativeId, amount, ledgerId, session) => {
+  const coopId = requireCooperativeId(cooperativeId);
   const updated = await Farmer.findOneAndUpdate(
-    { _id: farmerId, cooperativeId },
+    { _id: farmerId, cooperativeId: coopId },
     {
       $inc: { currentBalance: amount },
       $set: { lastLedgerId: ledgerId, balanceUpdatedAt: new Date() },
@@ -80,14 +104,15 @@ const incrementFarmerBalance = async (farmerId, cooperativeId, amount, ledgerId,
     { returnDocument: 'after', session }
   );
   if (!updated) {
-    throw new Error(`Farmer ${farmerId} not found in cooperative ${cooperativeId}`);
+    throw new Error(`Farmer ${farmerId} not found in cooperative ${coopId}`);
   }
   return round2(updated.currentBalance);
 };
 
 const getBalanceBefore = async (cooperativeId, farmerId, beforeTimestamp, session) => {
+  const coopId = requireCooperativeId(cooperativeId);
   let query = Ledger.find({
-    cooperativeId,
+    cooperativeId: coopId,
     farmerId,
     timestamp: { $lt: beforeTimestamp },
   })
@@ -98,12 +123,18 @@ const getBalanceBefore = async (cooperativeId, farmerId, beforeTimestamp, sessio
   return row ? round2(row.runningBalance) : 0;
 };
 
-/** Period activity only — never uses Farmer.currentBalance */
-const loadPeriodTotalsByFarmer = async (cooperativeId, farmerIds, periodStart, nextPeriodStart, session) => {
+const loadPeriodTotalsByFarmer = async (
+  cooperativeId,
+  farmerIds,
+  periodStart,
+  nextPeriodStart,
+  session
+) => {
+  const coopId = requireCooperativeId(cooperativeId);
   const perTypeAgg = await Ledger.aggregate([
     {
       $match: {
-        cooperativeId,
+        cooperativeId: coopId,
         farmerId: { $in: farmerIds },
         type: { $in: SETTLEABLE_TYPES },
         timestamp: { $gte: periodStart, $lt: nextPeriodStart },
@@ -137,8 +168,9 @@ const recomputeFarmerPeriodPosition = async (
   nextPeriodStart,
   session
 ) => {
+  const coopId = requireCooperativeId(cooperativeId);
   const byFarmer = await loadPeriodTotalsByFarmer(
-    cooperativeId,
+    coopId,
     [farmerId],
     periodStart,
     nextPeriodStart,
@@ -146,16 +178,20 @@ const recomputeFarmerPeriodPosition = async (
   );
   const types = byFarmer.get(farmerId.toString()) || {};
   const period = computePeriodSettlement(types);
-  const openingBalance = await getBalanceBefore(cooperativeId, farmerId, periodStart, session);
+  const openingBalance = await getBalanceBefore(coopId, farmerId, periodStart, session);
   const position = computeSettlementPosition(openingBalance, period.periodNet);
   return { period, position };
 };
 
 const getOrCreateBatch = async (cooperativeId, year, month, bounds, userId, session) => {
+  const coopId = requireCooperativeId(cooperativeId);
   return SettlementBatch.findOneAndUpdate(
-    { cooperativeId, year, month },
+    { cooperativeId: coopId, year, month },
     {
       $setOnInsert: {
+        cooperativeId: coopId,
+        year,
+        month,
         periodStart: bounds.periodStart,
         periodEnd: bounds.periodEnd,
         nextPeriodStart: bounds.nextPeriodStart,
@@ -190,20 +226,56 @@ const getOrCreateBatch = async (cooperativeId, year, month, bounds, userId, sess
   );
 };
 
+/**
+ * Per-cooperative counter. Syncs past max existing settlementNumber for this
+ * coop+year+month so retries never collide (E11000).
+ */
 const reserveSettlementNumbers = async (cooperativeId, year, month, count, session) => {
   if (count <= 0) return [];
-  const key = `${cooperativeId.toString()}-${year}-${month}`;
+  const coopId = requireCooperativeId(cooperativeId);
+  const yearShort = String(year).slice(2);
+  const monthStr = String(month).padStart(2, '0');
+  const prefix = `SET-${yearShort}${monthStr}-`;
+
+  const existing = await Settlement.find({
+    cooperativeId: coopId,
+    year,
+    month,
+    settlementNumber: { $regex: `^${prefix.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}` },
+  })
+    .select('settlementNumber')
+    .session(session)
+    .lean();
+
+  let maxUsed = 0;
+  for (const row of existing) {
+    const tail = String(row.settlementNumber || '').slice(prefix.length);
+    const n = parseInt(tail, 10);
+    if (Number.isFinite(n) && n > maxUsed) maxUsed = n;
+  }
+
+  const key = `settlement:${coopId.toString()}:${year}:${month}`;
+
+  const current = await Counter.findOne({ _id: key }).session(session);
+  const currentSeq = current?.sequence || 0;
+  if (currentSeq < maxUsed) {
+    await Counter.findOneAndUpdate(
+      { _id: key },
+      { $set: { sequence: maxUsed } },
+      { upsert: true, session }
+    );
+  }
+
   const counter = await Counter.findOneAndUpdate(
     { _id: key },
     { $inc: { sequence: count } },
     { upsert: true, returnDocument: 'after', session }
   );
+
   const start = counter.sequence - count + 1;
-  const yearShort = String(year).slice(2);
-  const monthStr = String(month).padStart(2, '0');
   const numbers = [];
   for (let i = 0; i < count; i++) {
-    numbers.push(`SET-${yearShort}${monthStr}-${String(start + i).padStart(4, '0')}`);
+    numbers.push(`${prefix}${String(start + i).padStart(4, '0')}`);
   }
   return numbers;
 };
@@ -224,12 +296,18 @@ const createAuditLog = async (userId, action, metadata, ip, session) => {
 };
 
 const insertLedgerIdempotent = async (doc, session) => {
+  if (!doc.cooperativeId) {
+    throw new Error('Ledger entry requires cooperativeId');
+  }
   try {
     const [created] = await Ledger.create([doc], { session });
     return { doc: created, wasAlreadyDone: false };
   } catch (err) {
     if (err.code === 11000 && doc.idempotencyKey) {
-      const existing = await Ledger.findOne({ idempotencyKey: doc.idempotencyKey }).session(session);
+      const existing = await Ledger.findOne({
+        cooperativeId: doc.cooperativeId,
+        idempotencyKey: doc.idempotencyKey,
+      }).session(session);
       if (existing) return { doc: existing, wasAlreadyDone: true };
     }
     throw err;
@@ -238,12 +316,12 @@ const insertLedgerIdempotent = async (doc, session) => {
 
 // ─── Generate ────────────────────────────────────────────────
 const generateSettlements = async (cooperativeId, year, month, userId, ip = null) => {
+  const coopId = requireCooperativeId(cooperativeId);
   let session;
   try {
     session = await mongoose.startSession();
     session.startTransaction(TX_OPTS);
 
-    const coopId = new mongoose.Types.ObjectId(cooperativeId);
     const cooperative = await Cooperative.findById(coopId).session(session);
     if (!cooperative) throw new Error('Cooperative not found');
 
@@ -251,13 +329,17 @@ const generateSettlements = async (cooperativeId, year, month, userId, ip = null
     const { periodStart, periodEnd, nextPeriodStart } = bounds;
 
     const existingBatch = await getOrCreateBatch(coopId, year, month, bounds, userId, session);
+    assertBatchBelongsToCoop(existingBatch, coopId);
 
     if (existingBatch.status !== 'GENERATING' && existingBatch.status !== 'GENERATED') {
       throw new Error(`Settlements for ${year}-${month} are already ${existingBatch.status}`);
     }
 
     if (existingBatch.status === 'GENERATED') {
-      const settlements = await Settlement.find({ batchId: existingBatch._id }).session(session);
+      const settlements = await Settlement.find({
+        batchId: existingBatch._id,
+        cooperativeId: coopId,
+      }).session(session);
       await session.commitTransaction();
       session.endSession();
       return {
@@ -270,13 +352,25 @@ const generateSettlements = async (cooperativeId, year, month, userId, ip = null
     }
 
     const batch = await SettlementBatch.findOneAndUpdate(
-      { _id: existingBatch._id, status: 'GENERATING', generationLockedAt: null },
+      {
+        _id: existingBatch._id,
+        cooperativeId: coopId,
+        status: 'GENERATING',
+        generationLockedAt: null,
+      },
       { $set: { generationLockedAt: new Date(), generationLockedBy: userId } },
       { returnDocument: 'after', session }
     );
     if (!batch) {
       throw new Error(`Settlement generation for ${year}-${month} is already in progress`);
     }
+
+    // Clear orphans from a previous failed generate on THIS batch only
+    await Settlement.deleteMany({
+      batchId: batch._id,
+      cooperativeId: coopId,
+      status: 'GENERATED',
+    }).session(session);
 
     const farmers = await Farmer.find({ cooperativeId: coopId, isActive: true })
       .select('_id name farmer_code phone zoneId zoneName')
@@ -324,7 +418,6 @@ const generateSettlements = async (cooperativeId, year, month, userId, ip = null
         continue;
       }
 
-      // Opening = ledger before periodStart only (not currentBalance)
       const openingBalanceRaw = await getBalanceBefore(coopId, farmer._id, periodStart, session);
       const position = computeSettlementPosition(openingBalanceRaw, period.periodNet);
 
@@ -343,27 +436,22 @@ const generateSettlements = async (cooperativeId, year, month, userId, ip = null
         nextPeriodStart,
         year,
         month,
-
         grossMilkLitres: period.grossMilkLitres,
         grossMilkEarnings: period.grossMilkEarnings,
         deductions: period.deductions,
         totalDeductions: period.totalDeductions,
         bonuses: period.bonuses,
         adjustments: period.adjustments,
-
         openingBalance: position.openingBalance,
         periodNet: position.periodNet,
         netPayable: position.periodNet,
         closingBalance: position.closingBalance,
         netPosition: position.closingBalance,
-
         amountPayable: position.amountPayable,
         amountOwedToCoop: position.amountOwedToCoop,
         payableToFarmer: position.amountPayable,
         amountOwedByFarmer: position.amountOwedToCoop,
-        // payout obligation only (>= 0)
         totalPayable: position.amountPayable,
-
         closingOutstandingBalance: position.amountOwedToCoop,
         status: 'GENERATED',
         generatedBy: userId,
@@ -432,33 +520,33 @@ const generateSettlements = async (cooperativeId, year, month, userId, ip = null
 
     await session.commitTransaction();
     session.endSession();
-    return {
-      success: true,
-      batch,
-      settlements,
-      count: settlements.length,
-      summary,
-    };
+    return { success: true, batch, settlements, count: settlements.length, summary };
   } catch (error) {
     if (session) {
       await session.abortTransaction();
       session.endSession();
     }
-    logger.error('Generate settlements error', { error: error.message, stack: error.stack });
+    logger.error('Generate settlements error', {
+      error: error.message,
+      stack: error.stack,
+      cooperativeId: String(cooperativeId),
+    });
     throw error;
   }
 };
 
-// ─── Approve (admin only — no farmer step) ───────────────────
-const approveBatch = async (batchId, userId, cooperativeId = null, ip = null) => {
+// ─── Approve ─────────────────────────────────────────────────
+const approveBatch = async (batchId, userId, cooperativeId, ip = null) => {
+  const coopId = requireCooperativeId(cooperativeId);
   const session = await mongoose.startSession();
   session.startTransaction(TX_OPTS);
   try {
-    const batch = await SettlementBatch.findById(batchId).session(session);
-    if (!batch) throw new Error('Batch not found');
-    if (cooperativeId && String(batch.cooperativeId) !== String(cooperativeId)) {
-      throw new Error('Batch does not belong to this cooperative');
-    }
+    const batch = await SettlementBatch.findOne({
+      _id: batchId,
+      cooperativeId: coopId,
+    }).session(session);
+    assertBatchBelongsToCoop(batch, coopId);
+
     if (batch.status !== 'GENERATED') {
       throw new Error(`Batch is ${batch.status}, cannot approve`);
     }
@@ -473,7 +561,7 @@ const approveBatch = async (batchId, userId, cooperativeId = null, ip = null) =>
       'SETTLEMENT_BATCH_APPROVED',
       {
         batchId: batch._id,
-        cooperativeId: batch.cooperativeId,
+        cooperativeId: coopId,
         year: batch.year,
         month: batch.month,
         totalPayableToFarmers: batch.totalPayableToFarmers ?? batch.totalPayable,
@@ -493,18 +581,17 @@ const approveBatch = async (batchId, userId, cooperativeId = null, ip = null) =>
 };
 
 // ─── Settle ──────────────────────────────────────────────────
-// Recomputes each farmer from ledger period bounds (not currentBalance).
-// Posts SETTLEMENT only for amountPayable > 0. Never zeroes debt.
-const settleBatch = async (batchId, userId, cooperativeId = null, ip = null) => {
+const settleBatch = async (batchId, userId, cooperativeId, ip = null) => {
+  const coopId = requireCooperativeId(cooperativeId);
   const session = await mongoose.startSession();
   session.startTransaction(TX_OPTS);
 
   try {
-    const batch = await SettlementBatch.findById(batchId).session(session);
-    if (!batch) throw new Error('Batch not found');
-    if (cooperativeId && String(batch.cooperativeId) !== String(cooperativeId)) {
-      throw new Error('Batch does not belong to this cooperative');
-    }
+    let batch = await SettlementBatch.findOne({
+      _id: batchId,
+      cooperativeId: coopId,
+    }).session(session);
+    assertBatchBelongsToCoop(batch, coopId);
 
     if (!batch.nextPeriodStart || !batch.periodStart) {
       const b = getPeriodBounds(batch.year, batch.month);
@@ -523,7 +610,11 @@ const settleBatch = async (batchId, userId, cooperativeId = null, ip = null) => 
     }
 
     const lockedBatch = await SettlementBatch.findOneAndUpdate(
-      { _id: batchId, status: { $in: settleableFrom } },
+      {
+        _id: batchId,
+        cooperativeId: coopId,
+        status: { $in: settleableFrom },
+      },
       {
         $set: {
           status: 'SETTLING',
@@ -538,13 +629,14 @@ const settleBatch = async (batchId, userId, cooperativeId = null, ip = null) => 
     await createAuditLog(
       userId,
       'SETTLEMENT_BATCH_SETTLING_STARTED',
-      { batchId: lockedBatch._id, cooperativeId: lockedBatch.cooperativeId },
+      { batchId: lockedBatch._id, cooperativeId: coopId },
       ip,
       session
     );
 
     const pending = await Settlement.find({
-      batchId: batch._id,
+      batchId: lockedBatch._id,
+      cooperativeId: coopId,
       status: { $in: ['GENERATED', 'MISMATCH'] },
     }).session(session);
 
@@ -552,8 +644,10 @@ const settleBatch = async (batchId, userId, cooperativeId = null, ip = null) => 
     let settledCount = 0;
 
     for (const settlement of pending) {
+      assertSettlementBelongsToCoop(settlement, coopId);
+
       const { period, position } = await recomputeFarmerPeriodPosition(
-        settlement.cooperativeId,
+        coopId,
         settlement.farmerId,
         settlement.periodStart,
         settlement.nextPeriodStart,
@@ -562,17 +656,16 @@ const settleBatch = async (batchId, userId, cooperativeId = null, ip = null) => 
 
       const amountPayable = position.amountPayable;
       const amountOwedToCoop = position.amountOwedToCoop;
-
       let ledgerEntryId = null;
 
       if (amountPayable > 0) {
-        const idempotencyKey = `SETTLEMENT:${settlement._id}`;
+        const idempotencyKey = `SETTLEMENT:${coopId}:${settlement._id}`;
         const { doc: ledgerDoc, wasAlreadyDone } = await insertLedgerIdempotent(
           {
-            cooperativeId: settlement.cooperativeId,
+            cooperativeId: coopId,
             farmerId: settlement.farmerId,
             settlementId: settlement._id,
-            batchId: batch._id,
+            batchId: lockedBatch._id,
             type: 'SETTLEMENT',
             amount: -amountPayable,
             runningBalance: 0,
@@ -597,24 +690,23 @@ const settleBatch = async (batchId, userId, cooperativeId = null, ip = null) => 
         if (!wasAlreadyDone) {
           const newBal = await incrementFarmerBalance(
             settlement.farmerId,
-            settlement.cooperativeId,
+            coopId,
             -amountPayable,
             ledgerDoc._id,
             session
           );
           await Ledger.updateOne(
-            { _id: ledgerDoc._id },
+            { _id: ledgerDoc._id, cooperativeId: coopId },
             { $set: { runningBalance: newBal } },
             { session }
           );
         }
         ledgerEntryId = ledgerDoc._id;
       }
-      // amountPayable === 0: no ledger entry; debt remains on account
 
       settledOps.push({
         updateOne: {
-          filter: { _id: settlement._id },
+          filter: { _id: settlement._id, cooperativeId: coopId },
           update: {
             $set: {
               status: 'SETTLED',
@@ -649,13 +741,19 @@ const settleBatch = async (batchId, userId, cooperativeId = null, ip = null) => 
     }
 
     const agg = await Settlement.aggregate([
-      { $match: { batchId: batch._id } },
+      { $match: { batchId: lockedBatch._id, cooperativeId: coopId } },
       {
         $group: {
           _id: null,
-          totalPayableToFarmers: { $sum: { $ifNull: ['$amountPayable', '$payableToFarmer'] } },
-          totalOwedByFarmers: { $sum: { $ifNull: ['$amountOwedToCoop', '$amountOwedByFarmer'] } },
-          settled: { $sum: { $cond: [{ $eq: ['$status', 'SETTLED'] }, 1, 0] } },
+          totalPayableToFarmers: {
+            $sum: { $ifNull: ['$amountPayable', '$payableToFarmer'] },
+          },
+          totalOwedByFarmers: {
+            $sum: { $ifNull: ['$amountOwedToCoop', '$amountOwedByFarmer'] },
+          },
+          settled: {
+            $sum: { $cond: [{ $eq: ['$status', 'SETTLED'] }, 1, 0] },
+          },
           total: { $sum: 1 },
         },
       },
@@ -686,6 +784,7 @@ const settleBatch = async (batchId, userId, cooperativeId = null, ip = null) => 
       'SETTLEMENT_BATCH_SETTLED',
       {
         batchId: lockedBatch._id,
+        cooperativeId: coopId,
         settledCount,
         totalPayableToFarmers: lockedBatch.totalPayableToFarmers,
         totalOwedByFarmers: lockedBatch.totalOwedByFarmers,
@@ -711,15 +810,17 @@ const settleBatch = async (batchId, userId, cooperativeId = null, ip = null) => 
 };
 
 // ─── Close ───────────────────────────────────────────────────
-const closeBatch = async (batchId, userId, cooperativeId = null, ip = null) => {
+const closeBatch = async (batchId, userId, cooperativeId, ip = null) => {
+  const coopId = requireCooperativeId(cooperativeId);
   const session = await mongoose.startSession();
   session.startTransaction(TX_OPTS);
   try {
-    const batch = await SettlementBatch.findById(batchId).session(session);
-    if (!batch) throw new Error('Batch not found');
-    if (cooperativeId && String(batch.cooperativeId) !== String(cooperativeId)) {
-      throw new Error('Batch does not belong to this cooperative');
-    }
+    const batch = await SettlementBatch.findOne({
+      _id: batchId,
+      cooperativeId: coopId,
+    }).session(session);
+    assertBatchBelongsToCoop(batch, coopId);
+
     if (batch.status !== 'SETTLED') {
       throw new Error(`Batch is ${batch.status}, can only close a fully SETTLED batch`);
     }
@@ -734,7 +835,7 @@ const closeBatch = async (batchId, userId, cooperativeId = null, ip = null) => {
       'SETTLEMENT_BATCH_CLOSED',
       {
         batchId: batch._id,
-        cooperativeId: batch.cooperativeId,
+        cooperativeId: coopId,
         year: batch.year,
         month: batch.month,
       },
@@ -752,20 +853,23 @@ const closeBatch = async (batchId, userId, cooperativeId = null, ip = null) => {
   }
 };
 
-// ─── Payment (physical money only) ───────────────────────────
+// ─── Payment ─────────────────────────────────────────────────
 const recordPayment = async (
   settlementId,
   { amount, method, reference, externalReference },
   userId,
-  cooperativeId = null,
+  cooperativeId,
   ip = null,
   idempotencyKey = null
 ) => {
-  const settlement = await Settlement.findById(settlementId);
-  if (!settlement) throw new Error('Settlement not found');
-  if (cooperativeId && String(settlement.cooperativeId) !== String(cooperativeId)) {
-    throw new Error('Settlement does not belong to this cooperative');
-  }
+  const coopId = requireCooperativeId(cooperativeId);
+
+  const settlement = await Settlement.findOne({
+    _id: settlementId,
+    cooperativeId: coopId,
+  });
+  assertSettlementBelongsToCoop(settlement, coopId);
+
   if (settlement.status !== 'SETTLED') {
     throw new Error(`Settlement is ${settlement.status}; cannot record payment before SETTLED`);
   }
@@ -791,7 +895,7 @@ const recordPayment = async (
   let payment;
   try {
     payment = await Payment.create({
-      cooperativeId: settlement.cooperativeId,
+      cooperativeId: coopId,
       farmerId: settlement.farmerId,
       settlementId: settlement._id,
       batchId: settlement.batchId,
@@ -805,7 +909,10 @@ const recordPayment = async (
     });
   } catch (err) {
     if (err.code === 11000 && idempotencyKey) {
-      payment = await Payment.findOne({ idempotencyKey });
+      payment = await Payment.findOne({
+        cooperativeId: coopId,
+        idempotencyKey,
+      });
       if (payment) return { success: true, payment, idempotentReplay: true };
     }
     throw err;
@@ -826,6 +933,7 @@ const recordPayment = async (
     {
       paymentId: payment._id,
       settlementId: settlement._id,
+      cooperativeId: coopId,
       amount: newAmount,
       totalPaidNow,
       amountPayable: payable,
@@ -837,10 +945,15 @@ const recordPayment = async (
   return { success: true, payment, settlement };
 };
 
-const confirmPayment = async (paymentId, userId, externalReference, cooperativeId = null, ip = null) => {
-  const payment = await Payment.findById(paymentId);
+const confirmPayment = async (paymentId, userId, externalReference, cooperativeId, ip = null) => {
+  const coopId = requireCooperativeId(cooperativeId);
+
+  const payment = await Payment.findOne({
+    _id: paymentId,
+    cooperativeId: coopId,
+  });
   if (!payment) throw new Error('Payment not found');
-  if (cooperativeId && String(payment.cooperativeId) !== String(cooperativeId)) {
+  if (!sameCoop(payment.cooperativeId, coopId)) {
     throw new Error('Payment does not belong to this cooperative');
   }
   if (payment.status !== 'PENDING') {
@@ -859,6 +972,7 @@ const confirmPayment = async (paymentId, userId, externalReference, cooperativeI
     {
       paymentId: payment._id,
       settlementId: payment.settlementId,
+      cooperativeId: coopId,
       amount: payment.amount,
       externalReference,
     },
@@ -869,10 +983,10 @@ const confirmPayment = async (paymentId, userId, externalReference, cooperativeI
   return { success: true, payment };
 };
 
-// ─── Reads ───────────────────────────────────────────────────
-const getBatch = async (batchId, cooperativeId = null) => {
-  const filter = cooperativeId ? { _id: batchId, cooperativeId } : { _id: batchId };
-  const batch = await SettlementBatch.findOne(filter)
+// ─── Reads (always require cooperativeId) ────────────────────
+const getBatch = async (batchId, cooperativeId) => {
+  const coopId = requireCooperativeId(cooperativeId);
+  const batch = await SettlementBatch.findOne({ _id: batchId, cooperativeId: coopId })
     .populate('generatedBy', 'name')
     .populate('approvedBy', 'name')
     .populate('settledBy', 'name')
@@ -882,13 +996,18 @@ const getBatch = async (batchId, cooperativeId = null) => {
   return batch;
 };
 
-const getBatchSettlements = async (batchId, cooperativeId = null, query = {}) => {
+const getBatchSettlements = async (batchId, cooperativeId, query = {}) => {
+  const coopId = requireCooperativeId(cooperativeId);
   const { page = 1, limit = 20, farmerId, status } = query;
   const pageNumber = parseInt(page, 10);
   const pageSize = parseInt(limit, 10);
   const skip = (pageNumber - 1) * pageSize;
-  const filter = { batchId };
-  if (cooperativeId) filter.cooperativeId = cooperativeId;
+
+  // Ensure batch is in this coop first
+  const batch = await SettlementBatch.findOne({ _id: batchId, cooperativeId: coopId }).select('_id');
+  if (!batch) throw new Error('Batch not found');
+
+  const filter = { batchId, cooperativeId: coopId };
   if (farmerId) filter.farmerId = farmerId;
   if (status) filter.status = status;
 
@@ -902,6 +1021,7 @@ const getBatchSettlements = async (batchId, cooperativeId = null, query = {}) =>
       .lean(),
     Settlement.countDocuments(filter),
   ]);
+
   return {
     settlements,
     total,
@@ -912,7 +1032,8 @@ const getBatchSettlements = async (batchId, cooperativeId = null, query = {}) =>
 };
 
 const getFarmerSettlements = async (farmerId, cooperativeId, limit = 12, status = null) => {
-  const filter = { cooperativeId, farmerId };
+  const coopId = requireCooperativeId(cooperativeId);
+  const filter = { cooperativeId: coopId, farmerId };
   if (status) filter.status = status;
   return Settlement.find(filter)
     .populate('settledBy', 'name')
@@ -922,11 +1043,12 @@ const getFarmerSettlements = async (farmerId, cooperativeId, limit = 12, status 
 };
 
 const getBatches = async (cooperativeId, query = {}) => {
+  const coopId = requireCooperativeId(cooperativeId);
   const { page = 1, limit = 20, status } = query;
   const pageNumber = parseInt(page, 10);
   const pageSize = parseInt(limit, 10);
   const skip = (pageNumber - 1) * pageSize;
-  const filter = { cooperativeId };
+  const filter = { cooperativeId: coopId };
   if (status) filter.status = status;
 
   const [batches, total] = await Promise.all([
@@ -941,6 +1063,7 @@ const getBatches = async (cooperativeId, query = {}) => {
       .lean(),
     SettlementBatch.countDocuments(filter),
   ]);
+
   return {
     batches,
     total,
