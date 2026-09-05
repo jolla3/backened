@@ -1,10 +1,8 @@
 const logger = require('../utils/logger');
 const notificationService = require('../services/notificationService');
-const Farmer = require('../models/farmer');
-const smsService = require('../services/smsService');
 
 /**
- * Send a single SMS (existing endpoint)
+ * Send a single SMS (manual / custom).
  */
 const triggerSMS = async (req, res) => {
   try {
@@ -54,18 +52,12 @@ const triggerSMS = async (req, res) => {
       userId: req.user?.id,
       cooperativeId: req.user?.cooperativeId,
     });
-
-    return res.status(400).json({
-      success: false,
-      error: error.message,
-    });
+    return res.status(400).json({ success: false, error: error.message });
   }
 };
 
 /**
- * Broadcast SMS to all (or selected) farmers in the cooperative.
- * Expects { message, farmerIds? } in request body.
- * If farmerIds is omitted, sends to all active farmers with phone numbers.
+ * Broadcast SMS – controller delegates entirely to notificationService.
  */
 const broadcastSMS = async (req, res) => {
   try {
@@ -91,70 +83,21 @@ const broadcastSMS = async (req, res) => {
       });
     }
 
-    // Build query for farmers
-    const query = {
+    const result = await notificationService.sendBroadcast({
+      message,
       cooperativeId,
-      isActive: true,
-      phone: { $ne: null, $ne: '' },
-    };
-    if (farmerIds && Array.isArray(farmerIds) && farmerIds.length > 0) {
-      query._id = { $in: farmerIds };
-    }
-
-    const farmers = await Farmer.find(query).select('_id phone name').lean();
-    if (farmers.length === 0) {
-      return res.status(400).json({
-        success: false,
-        error: 'No active farmers with phone numbers found',
-      });
-    }
-
-    // Queue SMS for each farmer
-    const results = [];
-    let queued = 0;
-    let failed = 0;
-
-    for (const farmer of farmers) {
-      try {
-        const result = await smsService.queueSMS({
-          to: farmer.phone,
-          message,
-          type: type || 'broadcast',
-          cooperativeId,
-          farmerId: farmer._id,
-          metadata: {
-            ...metadata,
-            broadcast: true,
-            adminId: userId,
-          },
-        });
-        results.push({ farmerId: farmer._id, jobId: result.jobId, queued: result.queued });
-        if (result.queued) queued++;
-        else failed++;
-      } catch (err) {
-        logger.error('Broadcast: failed to queue for farmer', {
-          farmerId: farmer._id,
-          error: err.message,
-        });
-        failed++;
-        results.push({ farmerId: farmer._id, error: err.message });
-      }
-    }
-
-    logger.info('Broadcast SMS completed', {
-      cooperativeId,
+      farmerIds: farmerIds || null,
       adminId: userId,
-      total: farmers.length,
-      queued,
-      failed,
+      type: type || 'broadcast',
+      metadata: metadata || {},
     });
 
     return res.json({
       success: true,
-      total: farmers.length,
-      queued,
-      failed,
-      details: results,
+      total: result.total,
+      queued: result.queued,
+      failed: result.failed,
+      details: result.details,
     });
   } catch (error) {
     logger.error('Broadcast SMS failed', {
@@ -162,7 +105,6 @@ const broadcastSMS = async (req, res) => {
       userId: req.user?.id,
       cooperativeId: req.user?.cooperativeId,
     });
-
     return res.status(500).json({
       success: false,
       error: error.message,

@@ -1,20 +1,13 @@
 const logger = require('../utils/logger');
 const smsService = require('./smsService');
+const Farmer = require('../models/farmer');
 const { normalizePhone } = require('../utils/phoneUtils');
 
 // Hard limit for SMS length (GSM-7)
 const MAX_SMS_LENGTH = 160;
 
 /**
- * Queue an SMS notification using the same queue system as milk receipts.
- *
- * @param {Object} params
- * @param {string} params.phone          - Recipient phone number
- * @param {string} params.message        - SMS text (will be validated for length)
- * @param {string} params.adminId        - ID of the authenticated admin/user
- * @param {string} params.cooperativeId  - Cooperative ID (must be valid)
- * @param {Object} params.options        - Optional: type, priority, metadata, etc.
- * @returns {Promise<Object>}            - { jobId, queued, duplicate }
+ * Generic SMS queue – used for manual / custom notifications to a single recipient.
  */
 const queueSMS = async ({
   phone,
@@ -33,17 +26,17 @@ const queueSMS = async ({
     throw new Error('Cooperative ID is required');
   }
 
-  // Normalize phone number
   const normalizedPhone = normalizePhone(phone);
+  if (!normalizedPhone) {
+    throw new Error('Invalid phone number');
+  }
 
-  // Validate SMS length – prevent unnecessary segmentation costs
   if (message.length > MAX_SMS_LENGTH) {
     throw new Error(
       `SMS is too long (${message.length} chars). Maximum is ${MAX_SMS_LENGTH} characters.`
     );
   }
 
-  // Delegate to the queue-based SMS service
   const result = await smsService.queueSMS({
     to: normalizedPhone,
     message,
@@ -65,18 +58,216 @@ const queueSMS = async ({
     jobId: result.jobId,
     cooperativeId,
     adminId,
+    type: options.type || 'notification',
   });
 
   return result;
 };
 
 /**
- * Legacy function – kept for backward compatibility, but deprecated.
- * Use queueSMS() instead.
+ * Broadcast SMS to all (or selected) farmers.
+ * Looks up farmers internally; controller does not need to import Farmer.
+ */
+const sendBroadcast = async ({
+  message,
+  cooperativeId,
+  farmerIds = null, // optional array of farmer IDs; if null, send to all active farmers
+  adminId,
+  type = 'broadcast',
+  metadata = {},
+}) => {
+  if (!message) throw new Error('Message is required');
+  if (!cooperativeId) throw new Error('Cooperative ID is required');
+  if (!adminId) throw new Error('Admin ID is required');
+
+  // Build query for farmers
+  const query = {
+    cooperativeId,
+    isActive: true,
+    phone: { $ne: null, $ne: '' },
+  };
+  if (farmerIds && Array.isArray(farmerIds) && farmerIds.length > 0) {
+    query._id = { $in: farmerIds };
+  }
+
+  const farmers = await Farmer.find(query).select('_id phone name').lean();
+
+  if (farmers.length === 0) {
+    throw new Error('No active farmers with phone numbers found');
+  }
+
+  // Queue SMS for each farmer
+  const results = [];
+  let queued = 0;
+  let failed = 0;
+
+  for (const farmer of farmers) {
+    try {
+      const result = await queueSMS({
+        phone: farmer.phone,
+        message,
+        adminId,
+        cooperativeId,
+        options: {
+          type,
+          farmerId: farmer._id,
+          notificationType: 'broadcast',
+          metadata: {
+            ...metadata,
+            broadcast: true,
+          },
+        },
+      });
+      results.push({ farmerId: farmer._id, jobId: result.jobId, queued: result.queued });
+      if (result.queued) queued++;
+      else failed++;
+    } catch (err) {
+      logger.error('Broadcast: failed to queue for farmer', {
+        farmerId: farmer._id,
+        error: err.message,
+      });
+      failed++;
+      results.push({ farmerId: farmer._id, error: err.message });
+    }
+  }
+
+  logger.info('Broadcast SMS completed', {
+    cooperativeId,
+    adminId,
+    total: farmers.length,
+    queued,
+    failed,
+  });
+
+  return {
+    total: farmers.length,
+    queued,
+    failed,
+    details: results,
+  };
+};
+
+/**
+ * Send monthly milk summary – business-level notification.
+ */
+const sendMonthlyMilkSummary = async ({
+  farmerPhone,
+  farmerName,
+  farmerId,
+  litresDelivered,
+  totalPayout,
+  totalDeductions,
+  cooperativeId,
+  period,
+  adminId = null,
+}) => {
+  if (!farmerPhone) throw new Error('Farmer phone number is required');
+  if (!farmerName) throw new Error('Farmer name is required');
+  if (!farmerId) throw new Error('Farmer ID is required');
+  if (!cooperativeId) throw new Error('Cooperative ID is required');
+  if (!period) throw new Error('Settlement period is required');
+
+  const idempotencyKey = `monthly_summary:${cooperativeId}:${farmerId}:${period}`;
+
+  const result = await smsService.sendMonthlyMilkSummary(
+    farmerPhone,
+    farmerName,
+    Number(litresDelivered),
+    Number(totalPayout),
+    Number(totalDeductions),
+    cooperativeId,
+    {
+      farmerId,
+      idempotencyKey,
+      metadata: {
+        notificationType: 'monthly_summary',
+        period,
+        adminId,
+      },
+    }
+  );
+
+  logger.info('Monthly milk summary notification queued', {
+    farmerId,
+    cooperativeId,
+    period,
+    jobId: result.jobId,
+    idempotencyKey,
+    adminId,
+  });
+
+  return result;
+};
+
+/**
+ * Send feed transaction notification – business-level notification.
+ */
+const sendFeedTransactionNotification = async ({
+  farmerPhone,
+  farmerName,
+  farmerId,
+  productName,
+  quantity,
+  pricePerUnit,
+  totalCost,
+  cooperativeName,
+  newBalance,
+  cooperativeId,
+  transactionId,
+  adminId = null,
+}) => {
+  if (!farmerPhone) throw new Error('Farmer phone number is required');
+  if (!farmerName) throw new Error('Farmer name is required');
+  if (!farmerId) throw new Error('Farmer ID is required');
+  if (!productName) throw new Error('Product name is required');
+  if (!transactionId) throw new Error('Transaction ID is required');
+  if (!cooperativeId) throw new Error('Cooperative ID is required');
+
+  const idempotencyKey = `feed_purchase:${cooperativeId}:${transactionId}`;
+
+  const result = await smsService.sendFeedTransactionNotification({
+    farmerPhone,
+    farmerName,
+    farmerId,
+    productName,
+    quantity,
+    pricePerUnit,
+    totalCost,
+    cooperativeName,
+    newBalance,
+    cooperativeId,
+    idempotencyKey,
+    metadata: {
+      notificationType: 'feed_purchase',
+      transactionId,
+      adminId,
+    },
+  });
+
+  logger.info('Feed transaction notification queued', {
+    farmerId,
+    cooperativeId,
+    transactionId,
+    jobId: result.jobId,
+    idempotencyKey,
+    adminId,
+  });
+
+  return result;
+};
+
+/**
+ * Legacy – deprecated.
  */
 const processSMS = async (job) => {
-  logger.warn('processSMS called – this is deprecated. Use queueSMS().');
+  logger.warn('processSMS called – deprecated. Use queueSMS() or sendBroadcast().');
   return { success: true };
 };
 
-module.exports = { queueSMS, processSMS };
+module.exports = {
+  queueSMS,
+  sendBroadcast,
+  sendMonthlyMilkSummary,
+  sendFeedTransactionNotification,
+  processSMS,
+};

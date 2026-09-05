@@ -3,13 +3,17 @@
 // Multi-tenant: cooperativeId required on every public entry point.
 //
 // Accounting:
-//   periodNet        = ledger in [periodStart, nextPeriodStart) for this coop
-//   openingBalance   = last ledger runningBalance with timestamp < periodStart
+//   periodNet        = ledger activity in [periodStart, nextPeriodStart)
+//   openingBalance   = sum(ledger.amount) with timestamp < periodStart
 //   closingBalance   = openingBalance + periodNet
 //   amountPayable    = max(closingBalance, 0)
 //   amountOwedToCoop = max(-closingBalance, 0)
 //
-// Settlement numbers are cryptographic (SET-<12 chars>), not sequential.
+// Before SETTLEMENT payout:
+//   Farmer.currentBalance MUST match ledger closingBalance (within 1 cent).
+//   On mismatch → status MISMATCH, no money movement.
+// After payout:
+//   Farmer.currentBalance = closingBalance - amountPayable  (via updateFarmerBalance)
 //
 const crypto = require('crypto');
 const mongoose = require('mongoose');
@@ -22,17 +26,19 @@ const Cooperative = require('../models/cooperative');
 const AuditLog = require('../models/auditLog');
 const logger = require('../utils/logger');
 const { SETTLEABLE_TYPES } = require('../models/ledgerTypes');
+const { updateFarmerBalance } = require('../utils/ledgerUtils');
 const {
   round2,
   money,
   amountsMatch,
   getPeriodBounds,
+  getNairobiYearMonth,
+  isPeriodClosed,
   computePeriodSettlement,
   computeSettlementPosition,
 } = require('./settlementMath');
 
 const LOCKED_BATCH_STATUSES = ['SETTLING', 'PARTIALLY_SETTLED', 'SETTLED', 'CLOSED'];
-
 const SETTLEMENT_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
 const SETTLEMENT_CODE_LENGTH = 12;
 const SETTLEMENT_NUMBER_MAX_ATTEMPTS = 8;
@@ -50,7 +56,7 @@ const TX_OPTS = {
   writeConcern: { w: 'majority' },
 };
 
-// ─── Tenant helpers ──────────────────────────────────────────
+// ─── Tenant ──────────────────────────────────────────────────
 const requireCooperativeId = (cooperativeId, label = 'cooperativeId') => {
   if (!cooperativeId) throw new Error(`${label} is required`);
   if (!mongoose.Types.ObjectId.isValid(cooperativeId)) {
@@ -75,7 +81,7 @@ const assertSettlementBelongsToCoop = (settlement, cooperativeId) => {
   }
 };
 
-// ─── Cryptographic settlement numbers ────────────────────────
+// ─── Settlement numbers (crypto) ─────────────────────────────
 const randomSettlementCode = (length = SETTLEMENT_CODE_LENGTH) => {
   let code = '';
   for (let i = 0; i < length; i++) {
@@ -84,28 +90,21 @@ const randomSettlementCode = (length = SETTLEMENT_CODE_LENGTH) => {
   return code;
 };
 
-/**
- * Format: SET-X7K9Q2M4N8P3
- * Unbiased crypto.randomInt + unique index backstop.
- */
-const generateSettlementNumber = async (cooperativeId, session, maxAttempts = SETTLEMENT_NUMBER_MAX_ATTEMPTS) => {
+const generateSettlementNumber = async (
+  cooperativeId,
+  session,
+  maxAttempts = SETTLEMENT_NUMBER_MAX_ATTEMPTS
+) => {
   const coopId = requireCooperativeId(cooperativeId);
-
   for (let attempt = 0; attempt < maxAttempts; attempt++) {
     const candidate = `SET-${randomSettlementCode()}`;
-
-    // Prefer coop-scoped uniqueness. If you still have a global unique index
-    // on settlementNumber alone, this still works (exists check is coop-scoped
-    // but insert will retry on E11000 via allocateSettlementNumbers).
     let query = Settlement.exists({
       cooperativeId: coopId,
       settlementNumber: candidate,
     });
     if (session) query = query.session(session);
-    const exists = await query;
-    if (!exists) return candidate;
+    if (!(await query)) return candidate;
   }
-
   throw new Error('Unable to generate unique settlement number after retries');
 };
 
@@ -113,7 +112,6 @@ const allocateSettlementNumbers = async (cooperativeId, count, session) => {
   if (count <= 0) return [];
   const numbers = [];
   const seen = new Set();
-
   for (let i = 0; i < count; i++) {
     let n;
     let attempts = 0;
@@ -134,8 +132,9 @@ const allocateSettlementNumbers = async (cooperativeId, count, session) => {
 const assertPeriodOpen = async (cooperativeId, timestamp, session = null) => {
   const coopId = requireCooperativeId(cooperativeId);
   const ts = timestamp instanceof Date ? timestamp : new Date(timestamp);
-  const year = ts.getUTCFullYear();
-  const month = ts.getUTCMonth() + 1;
+  const { year, month } = getNairobiYearMonth
+    ? getNairobiYearMonth(ts)
+    : { year: ts.getUTCFullYear(), month: ts.getUTCMonth() + 1 };
 
   let query = SettlementBatch.findOne({
     cooperativeId: coopId,
@@ -153,6 +152,10 @@ const assertPeriodOpen = async (cooperativeId, timestamp, session = null) => {
   return true;
 };
 
+/**
+ * Keep for milk / feed / ordinary ledger deltas (call sites outside this file).
+ * Settlement does NOT use $inc — it uses updateFarmerBalance after verifying books.
+ */
 const incrementFarmerBalance = async (farmerId, cooperativeId, amount, ledgerId, session) => {
   const coopId = requireCooperativeId(cooperativeId);
   const updated = await Farmer.findOneAndUpdate(
@@ -169,18 +172,20 @@ const incrementFarmerBalance = async (farmerId, cooperativeId, amount, ledgerId,
   return round2(updated.currentBalance);
 };
 
-const getBalanceBefore = async (cooperativeId, farmerId, beforeTimestamp, session) => {
+// Opening = sum of amounts before period (resistant to broken runningBalance chain)
+const getOpeningBalanceFromAmounts = async (cooperativeId, farmerId, periodStart, session) => {
   const coopId = requireCooperativeId(cooperativeId);
-  let query = Ledger.find({
-    cooperativeId: coopId,
-    farmerId,
-    timestamp: { $lt: beforeTimestamp },
-  })
-    .sort({ timestamp: -1, _id: -1 })
-    .limit(1);
-  if (session) query = query.session(session);
-  const [row] = await query;
-  return row ? round2(row.runningBalance) : 0;
+  const [row] = await Ledger.aggregate([
+    {
+      $match: {
+        cooperativeId: coopId,
+        farmerId: new mongoose.Types.ObjectId(farmerId),
+        timestamp: { $lt: periodStart },
+      },
+    },
+    { $group: { _id: null, total: { $sum: '$amount' } } },
+  ]).session(session);
+  return round2(row?.total || 0);
 };
 
 const loadPeriodTotalsByFarmer = async (
@@ -238,7 +243,12 @@ const recomputeFarmerPeriodPosition = async (
   );
   const types = byFarmer.get(farmerId.toString()) || {};
   const period = computePeriodSettlement(types);
-  const openingBalance = await getBalanceBefore(coopId, farmerId, periodStart, session);
+  const openingBalance = await getOpeningBalanceFromAmounts(
+    coopId,
+    farmerId,
+    periodStart,
+    session
+  );
   const position = computeSettlementPosition(openingBalance, period.periodNet);
   return { period, position };
 };
@@ -302,9 +312,7 @@ const createAuditLog = async (userId, action, metadata, ip, session) => {
 };
 
 const insertLedgerIdempotent = async (doc, session) => {
-  if (!doc.cooperativeId) {
-    throw new Error('Ledger entry requires cooperativeId');
-  }
+  if (!doc.cooperativeId) throw new Error('Ledger entry requires cooperativeId');
   try {
     const [created] = await Ledger.create([doc], { session });
     return { doc: created, wasAlreadyDone: false };
@@ -371,11 +379,7 @@ const generateSettlements = async (cooperativeId, year, month, userId, ip = null
       throw new Error(`Settlement generation for ${year}-${month} is already in progress`);
     }
 
-    // Remove orphans from a previous failed generate on this batch
-    await Settlement.deleteMany({
-      batchId: batch._id,
-      cooperativeId: coopId,
-    }).session(session);
+    await Settlement.deleteMany({ batchId: batch._id, cooperativeId: coopId }).session(session);
 
     const farmers = await Farmer.find({ cooperativeId: coopId, isActive: true })
       .select('_id name farmer_code phone zoneId zoneName')
@@ -423,7 +427,12 @@ const generateSettlements = async (cooperativeId, year, month, userId, ip = null
         continue;
       }
 
-      const openingBalanceRaw = await getBalanceBefore(coopId, farmer._id, periodStart, session);
+      const openingBalanceRaw = await getOpeningBalanceFromAmounts(
+        coopId,
+        farmer._id,
+        periodStart,
+        session
+      );
       const position = computeSettlementPosition(openingBalanceRaw, period.periodNet);
 
       docs.push({
@@ -486,11 +495,10 @@ const generateSettlements = async (cooperativeId, year, month, userId, ip = null
       try {
         settlements = await Settlement.insertMany(docs, { session, ordered: true });
       } catch (err) {
-        // Extremely unlikely crypto collision against unique index — surface clearly
         if (err.code === 11000) {
           throw new Error(
             'Settlement number collision on insert; retry generation. ' +
-              'If this persists, ensure unique index is { cooperativeId: 1, settlementNumber: 1 }.'
+              'Ensure unique index is { cooperativeId: 1, settlementNumber: 1 }.'
           );
         }
         throw err;
@@ -562,7 +570,6 @@ const approveBatch = async (batchId, userId, cooperativeId, ip = null) => {
       cooperativeId: coopId,
     }).session(session);
     assertBatchBelongsToCoop(batch, coopId);
-
     if (batch.status !== 'GENERATED') {
       throw new Error(`Batch is ${batch.status}, cannot approve`);
     }
@@ -621,8 +628,17 @@ const settleBatch = async (batchId, userId, cooperativeId, ip = null) => {
     if (!settleableFrom.includes(batch.status)) {
       throw new Error(`Batch is ${batch.status}, cannot settle`);
     }
-    if (batch.nextPeriodStart > new Date()) {
-      throw new Error('Cannot settle an accounting period that has not closed yet');
+
+    const periodClosed = typeof isPeriodClosed === 'function'
+      ? isPeriodClosed(batch.nextPeriodStart)
+      : !(batch.nextPeriodStart > new Date());
+
+    if (!periodClosed) {
+      throw new Error(
+        `Cannot settle ${batch.year}-${String(batch.month).padStart(2, '0')}: ` +
+          `period closes at ${new Date(batch.nextPeriodStart).toISOString()}. ` +
+          `Now ${new Date().toISOString()}.`
+      );
     }
 
     const lockedBatch = await SettlementBatch.findOneAndUpdate(
@@ -658,6 +674,7 @@ const settleBatch = async (batchId, userId, cooperativeId, ip = null) => {
 
     const settledOps = [];
     let settledCount = 0;
+    let mismatchCount = 0;
 
     for (const settlement of pending) {
       assertSettlementBelongsToCoop(settlement, coopId);
@@ -670,8 +687,66 @@ const settleBatch = async (batchId, userId, cooperativeId, ip = null) => {
         session
       );
 
+      const farmer = await Farmer.findOne({
+        _id: settlement.farmerId,
+        cooperativeId: coopId,
+      })
+        .select('_id currentBalance lastLedgerId')
+        .session(session);
+
+      if (!farmer) {
+        throw new Error(`Farmer ${settlement.farmerId} not found`);
+      }
+
+      const farmerCurrentBalance = round2(farmer.currentBalance || 0);
+      const ledgerClosingBalance = round2(position.closingBalance);
+
+      // ── INVARIANT: Farmer.currentBalance must match ledger position ──
+      if (!amountsMatch(farmerCurrentBalance, ledgerClosingBalance)) {
+        const diff = round2(ledgerClosingBalance - farmerCurrentBalance);
+        mismatchCount += 1;
+
+        logger.error('Settlement blocked: balance mismatch', {
+          farmerId: settlement.farmerId.toString(),
+          cooperativeId: coopId.toString(),
+          farmerCurrentBalance,
+          ledgerClosingBalance,
+          difference: diff,
+          settlementId: settlement._id.toString(),
+        });
+
+        settledOps.push({
+          updateOne: {
+            filter: { _id: settlement._id, cooperativeId: coopId },
+            update: {
+              $set: {
+                status: 'MISMATCH',
+                openingBalance: position.openingBalance,
+                periodNet: position.periodNet,
+                closingBalance: position.closingBalance,
+                netPosition: position.closingBalance,
+                amountPayable: position.amountPayable,
+                amountOwedToCoop: position.amountOwedToCoop,
+                payableToFarmer: position.amountPayable,
+                amountOwedByFarmer: position.amountOwedToCoop,
+                totalPayable: position.amountPayable,
+                generationMismatch: true,
+                generationDifference: diff,
+                notes:
+                  `Balance mismatch: Farmer.currentBalance=${farmerCurrentBalance}, ` +
+                  `ledgerClosingBalance=${ledgerClosingBalance}, diff=${diff}. ` +
+                  `Reconcile farmer counter to ledger before settle.`,
+              },
+            },
+          },
+        });
+        continue;
+      }
+
       const amountPayable = position.amountPayable;
       const amountOwedToCoop = position.amountOwedToCoop;
+      const balanceAfterSettlement = round2(ledgerClosingBalance - amountPayable);
+
       let ledgerEntryId = null;
 
       if (amountPayable > 0) {
@@ -684,7 +759,7 @@ const settleBatch = async (batchId, userId, cooperativeId, ip = null) => {
             batchId: lockedBatch._id,
             type: 'SETTLEMENT',
             amount: -amountPayable,
-            runningBalance: 0,
+            runningBalance: balanceAfterSettlement,
             description: `Settlement payout ${settlement.settlementNumber}`,
             reference: settlement.settlementNumber,
             createdBy: userId,
@@ -696,6 +771,8 @@ const settleBatch = async (batchId, userId, cooperativeId, ip = null) => {
               closingBalance: position.closingBalance,
               amountPayable,
               amountOwedToCoop,
+              farmerCurrentBalanceBefore: farmerCurrentBalance,
+              balanceAfterSettlement,
             },
             timestamp: new Date(),
             idempotencyKey,
@@ -704,21 +781,27 @@ const settleBatch = async (batchId, userId, cooperativeId, ip = null) => {
         );
 
         if (!wasAlreadyDone) {
-          const newBal = await incrementFarmerBalance(
+          // Ledger-derived exact balance — NOT $inc on a possibly stale counter
+          const updated = await updateFarmerBalance(
             settlement.farmerId,
-            coopId,
-            -amountPayable,
+            balanceAfterSettlement,
             ledgerDoc._id,
-            session
+            session,
+            {
+              currentBalance: farmerCurrentBalance,
+              cooperativeId: coopId,
+            }
           );
-          await Ledger.updateOne(
-            { _id: ledgerDoc._id, cooperativeId: coopId },
-            { $set: { runningBalance: newBal } },
-            { session }
-          );
+
+          if (!updated) {
+            throw new Error(
+              `Farmer balance changed concurrently during settlement: ${settlement.farmerId}`
+            );
+          }
         }
         ledgerEntryId = ledgerDoc._id;
       }
+      // amountPayable === 0: no SETTLEMENT ledger row; debt/zero stays as-is
 
       settledOps.push({
         updateOne: {
@@ -745,6 +828,8 @@ const settleBatch = async (batchId, userId, cooperativeId, ip = null) => {
               amountOwedByFarmer: amountOwedToCoop,
               totalPayable: amountPayable,
               closingOutstandingBalance: amountOwedToCoop,
+              generationMismatch: false,
+              generationDifference: 0,
             },
           },
         },
@@ -762,13 +847,28 @@ const settleBatch = async (batchId, userId, cooperativeId, ip = null) => {
         $group: {
           _id: null,
           totalPayableToFarmers: {
-            $sum: { $ifNull: ['$amountPayable', '$payableToFarmer'] },
+            $sum: {
+              $cond: [
+                { $eq: ['$status', 'SETTLED'] },
+                { $ifNull: ['$amountPayable', '$payableToFarmer'] },
+                0,
+              ],
+            },
           },
           totalOwedByFarmers: {
-            $sum: { $ifNull: ['$amountOwedToCoop', '$amountOwedByFarmer'] },
+            $sum: {
+              $cond: [
+                { $eq: ['$status', 'SETTLED'] },
+                { $ifNull: ['$amountOwedToCoop', '$amountOwedByFarmer'] },
+                0,
+              ],
+            },
           },
           settled: {
             $sum: { $cond: [{ $eq: ['$status', 'SETTLED'] }, 1, 0] },
+          },
+          mismatched: {
+            $sum: { $cond: [{ $eq: ['$status', 'MISMATCH'] }, 1, 0] },
           },
           total: { $sum: 1 },
         },
@@ -779,20 +879,26 @@ const settleBatch = async (batchId, userId, cooperativeId, ip = null) => {
       totalPayableToFarmers: 0,
       totalOwedByFarmers: 0,
       settled: 0,
+      mismatched: 0,
       total: 0,
     };
 
     lockedBatch.totalSettledFarmers = totals.settled;
-    lockedBatch.totalMismatchedFarmers = 0;
+    lockedBatch.totalMismatchedFarmers = totals.mismatched;
     lockedBatch.totalPayableToFarmers = round2(totals.totalPayableToFarmers || 0);
     lockedBatch.totalOwedByFarmers = round2(totals.totalOwedByFarmers || 0);
     lockedBatch.totalPayable = lockedBatch.totalPayableToFarmers;
-    lockedBatch.status =
-      totals.settled === totals.total && totals.total > 0 ? 'SETTLED' : 'PARTIALLY_SETTLED';
-    if (lockedBatch.status === 'SETTLED') {
+
+    if (totals.mismatched > 0) {
+      lockedBatch.status = 'PARTIALLY_SETTLED';
+    } else if (totals.settled === totals.total && totals.total > 0) {
+      lockedBatch.status = 'SETTLED';
       lockedBatch.settledBy = userId;
       lockedBatch.settledAt = new Date();
+    } else {
+      lockedBatch.status = 'PARTIALLY_SETTLED';
     }
+
     await lockedBatch.save({ session });
 
     await createAuditLog(
@@ -802,6 +908,7 @@ const settleBatch = async (batchId, userId, cooperativeId, ip = null) => {
         batchId: lockedBatch._id,
         cooperativeId: coopId,
         settledCount,
+        mismatchCount,
         totalPayableToFarmers: lockedBatch.totalPayableToFarmers,
         totalOwedByFarmers: lockedBatch.totalOwedByFarmers,
       },
@@ -815,6 +922,7 @@ const settleBatch = async (batchId, userId, cooperativeId, ip = null) => {
       success: true,
       batch: lockedBatch,
       settledCount,
+      mismatchCount,
       totalPayableToFarmers: lockedBatch.totalPayableToFarmers,
       totalOwedByFarmers: lockedBatch.totalOwedByFarmers,
     };
@@ -836,7 +944,6 @@ const closeBatch = async (batchId, userId, cooperativeId, ip = null) => {
       cooperativeId: coopId,
     }).session(session);
     assertBatchBelongsToCoop(batch, coopId);
-
     if (batch.status !== 'SETTLED') {
       throw new Error(`Batch is ${batch.status}, can only close a fully SETTLED batch`);
     }
@@ -925,10 +1032,7 @@ const recordPayment = async (
     });
   } catch (err) {
     if (err.code === 11000 && idempotencyKey) {
-      payment = await Payment.findOne({
-        cooperativeId: coopId,
-        idempotencyKey,
-      });
+      payment = await Payment.findOne({ cooperativeId: coopId, idempotencyKey });
       if (payment) return { success: true, payment, idempotentReplay: true };
     }
     throw err;
@@ -963,15 +1067,8 @@ const recordPayment = async (
 
 const confirmPayment = async (paymentId, userId, externalReference, cooperativeId, ip = null) => {
   const coopId = requireCooperativeId(cooperativeId);
-
-  const payment = await Payment.findOne({
-    _id: paymentId,
-    cooperativeId: coopId,
-  });
+  const payment = await Payment.findOne({ _id: paymentId, cooperativeId: coopId });
   if (!payment) throw new Error('Payment not found');
-  if (!sameCoop(payment.cooperativeId, coopId)) {
-    throw new Error('Payment does not belong to this cooperative');
-  }
   if (payment.status !== 'PENDING') {
     throw new Error(`Payment is ${payment.status}, cannot confirm`);
   }

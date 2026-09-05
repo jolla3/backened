@@ -1,4 +1,3 @@
-// services/smsService.js
 const mongoose = require('mongoose');
 const crypto = require('crypto');
 const OutboundSms = require('../models/OutboundSms');
@@ -49,20 +48,20 @@ const queueSMS = async ({
 
     const normalizedPhone = normalizePhone(to);
     const job = new OutboundSms({
-  phone: normalizedPhone,
-  message,
-  from: from || process.env.CELCOM_SENDER_ID || process.env.SMS_SENDER || 'JOMUGITAGRI',
-  type,
-  priority,
-  cooperativeId,
-  farmerId,
-  maxRetries,
-  metadata,
-  expiresAt,
-  idempotencyKey,
-  status: 'queued',
-  deliveryRoute: 'celcom', // direct Celcom worker only
-});
+      phone: normalizedPhone,
+      message,
+      from: from || process.env.CELCOM_SENDER_ID || process.env.SMS_SENDER || 'JOMUGITAGRI',
+      type,
+      priority,
+      cooperativeId,
+      farmerId,
+      maxRetries,
+      metadata,
+      expiresAt,
+      idempotencyKey,
+      status: 'queued',
+      deliveryRoute: 'celcom',
+    });
 
     await job.save();
     logger.info('SMS job queued', {
@@ -160,7 +159,7 @@ const claimJobsForWorker = async (limit = 50) => {
       status: 'queued',
       $or: [
         { deliveryRoute: 'celcom' },
-        { deliveryRoute: { $exists: false } }, // legacy rows
+        { deliveryRoute: { $exists: false } },
         { deliveryRoute: null },
       ],
       $and: [
@@ -291,19 +290,22 @@ const markFailed = async (jobId, gatewayId, error, meta = {}) => {
     ? { _id: jobId, gatewayId, status: { $in: ['processing', 'queued'] } }
     : { _id: jobId, status: { $in: ['processing', 'queued'] } };
 
-  // OPT-IN: only retry when explicitly true
   const retryable = meta.retryable === true;
+
+  const update = {
+    $inc: { retryCount: 1 },
+    $set: {
+      error: typeof error === 'string' ? error : (error?.message || String(error)),
+      errorCode: meta.errorCode || null,               // store machine-readable code
+      providerResponse: meta.providerResponse || null,
+      updatedAt: new Date(),
+      ...(meta.nextRetryAt ? { nextRetryAt: meta.nextRetryAt } : {}),
+    },
+  };
 
   const job = await OutboundSms.findOneAndUpdate(
     filter,
-    {
-      $inc: { retryCount: 1 },
-      $set: {
-        error: typeof error === 'string' ? error : (error?.message || String(error)),
-        providerResponse: meta.providerResponse || null,
-        updatedAt: new Date(),
-      },
-    },
+    update,
     { returnDocument: 'after' }
   );
 
@@ -313,86 +315,115 @@ const markFailed = async (jobId, gatewayId, error, meta = {}) => {
   }
 
   const canRetry = retryable && job.retryCount < job.maxRetries;
-  const update = { updatedAt: new Date() };
+  const finalUpdate = { updatedAt: new Date() };
 
   if (canRetry) {
-    const delaySeconds =
-      (smsConfig.RETRY_DELAYS && smsConfig.RETRY_DELAYS[job.retryCount - 1]) || 300;
-    update.status = 'queued';
-    update.nextRetryAt = new Date(Date.now() + delaySeconds * 1000);
+    // If nextRetryAt was already set via meta, keep it; otherwise use delay config
+    if (!job.nextRetryAt) {
+      const delaySeconds =
+        (smsConfig.RETRY_DELAYS && smsConfig.RETRY_DELAYS[job.retryCount - 1]) || 300;
+      finalUpdate.nextRetryAt = new Date(Date.now() + delaySeconds * 1000);
+    }
+    finalUpdate.status = 'queued';
     logger.info('SMS retry scheduled', {
       jobId,
       retryCount: job.retryCount,
-      nextRetryAt: update.nextRetryAt,
+      nextRetryAt: finalUpdate.nextRetryAt || job.nextRetryAt,
     });
   } else {
-    update.status = 'failed';
-    update.failedAt = new Date();
+    finalUpdate.status = 'failed';
+    finalUpdate.failedAt = new Date();
     logger.warn('SMS permanently failed', {
       jobId,
       retryCount: job.retryCount,
       error: job.error,
+      errorCode: job.errorCode,
     });
   }
 
   return OutboundSms.findOneAndUpdate(
     { _id: job._id, status: { $in: ['processing', 'queued'] } },
-    { $set: update },
+    { $set: finalUpdate },
     { returnDocument: 'after' }
   );
 };
 
-// ─── Recover stuck jobs ─────────────────────────────────────
+// ─── Recover stuck jobs (SAFE version) ──────────────────────
 const recoverStuckJobs = async (olderThanMinutes = PROCESSING_TIMEOUT_MINUTES) => {
   const cutoff = new Date(Date.now() - olderThanMinutes * 60 * 1000);
 
-  // Safe: no providerMessageId → may never have reached Celcom
-  const safe = await OutboundSms.updateMany(
+  // SAFETY: For any stuck processing job, we do NOT know if Celcom accepted it.
+  // Therefore we mark them as UNKNOWN, not queued.
+  // This prevents duplicates when the provider boundary was crossed.
+  const result = await OutboundSms.updateMany(
     {
       status: 'processing',
       processingStartedAt: { $lte: cutoff },
-      $or: [
-        { providerMessageId: null },
-        { providerMessageId: { $exists: false } },
-      ],
-    },
-    {
-      $set: {
-        status: 'queued',
-        gatewayId: null,
-        processingStartedAt: null,
-        updatedAt: new Date(),
-      },
-    }
-  );
-
-  // Unsafe: has providerMessageId → never auto-resend
-  const unsafe = await OutboundSms.updateMany(
-    {
-      status: 'processing',
-      processingStartedAt: { $lte: cutoff },
-      providerMessageId: { $exists: true, $ne: null },
     },
     {
       $set: {
         status: 'unknown',
         updatedAt: new Date(),
-        error: 'Stuck processing with providerMessageId – needs reconciliation',
+        error: 'Stuck in processing – outcome unknown, needs reconciliation',
       },
     }
   );
 
-  if (safe.modifiedCount || unsafe.modifiedCount) {
-    logger.info('Stuck job recovery', {
-      requeued: safe.modifiedCount,
-      markedUnknown: unsafe.modifiedCount,
+  if (result.modifiedCount) {
+    logger.warn('Recovered stuck jobs to UNKNOWN (safe – no auto-retry)', {
+      count: result.modifiedCount,
     });
   }
 
   return {
-    requeued: safe.modifiedCount,
-    markedUnknown: unsafe.modifiedCount,
+    markedUnknown: result.modifiedCount,
   };
+};
+
+// ─── Recover low-credit jobs ────────────────────────────────
+const recoverLowCreditJobs = async () => {
+  const now = new Date();
+
+  // Target jobs that are:
+  // - failed
+  // - no providerMessageId (not accepted)
+  // - errorCode exactly 'insufficient_credits'
+  // - nextRetryAt is null or in the past (respect cooldown)
+  const result = await OutboundSms.updateMany(
+    {
+      status: 'failed',
+      providerMessageId: { $exists: false },
+      errorCode: 'insufficient_credits',
+      $or: [
+        { nextRetryAt: null },
+        { nextRetryAt: { $lte: now } },
+      ],
+    },
+    {
+      $set: {
+        status: 'queued',
+        deliveryRoute: 'celcom',
+        retryCount: 0,
+        nextRetryAt: null,
+        gatewayId: null,
+        processingStartedAt: null,
+        error: null,
+        errorCode: null,
+        updatedAt: now,
+      },
+      $unset: {
+        providerResponse: '',
+      },
+    }
+  );
+
+  if (result.modifiedCount > 0) {
+    logger.info('Recovered low-credit SMS jobs', {
+      count: result.modifiedCount,
+    });
+  }
+
+  return result.modifiedCount;
 };
 
 // ─── Get job status ─────────────────────────────────────────
@@ -410,6 +441,7 @@ const getJobStatus = async (jobId) => {
     maxRetries: job.maxRetries,
     providerMessageId: job.providerMessageId || null,
     error: job.error || null,
+    errorCode: job.errorCode || null,
     createdAt: job.createdAt,
     sentAt: job.sentAt || null,
     failedAt: job.failedAt || null,
@@ -483,38 +515,6 @@ const sendFeedTransactionNotification = async ({
     cooperativeId,
     priority: SMS_PRIORITY.FEED_PURCHASE,
   });
-};
-
-
-const recoverLowCreditJobs = async () => {
-  const result = await OutboundSms.updateMany(
-    {
-      status: 'unknown',
-      providerMessageId: { $exists: false },
-      error: /Low credit|insufficient.?credit|1004/i,
-    },
-    {
-      $set: {
-        status: 'queued',
-        deliveryRoute: 'celcom',
-        retryCount: 0,
-        nextRetryAt: null,
-        gatewayId: null,
-        processingStartedAt: null,
-        error: null,
-        updatedAt: new Date(),
-      },
-      $unset: {
-        providerResponse: '',
-      },
-    }
-  );
-
-  logger.info('Recovered low-credit SMS jobs', {
-    count: result.modifiedCount,
-  });
-
-  return result.modifiedCount;
 };
 
 module.exports = {

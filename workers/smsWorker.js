@@ -5,6 +5,10 @@ const { normalizePhone } = require('../utils/phoneUtils');
 const logger = require('../utils/logger');
 const { SMS_WORKER_CONFIG } = require('../constants/smsConstants');
 
+// Cooldown durations (milliseconds)
+const CREDIT_BLOCK_COOLDOWN_MS = 5 * 60 * 1000;      // 5 minutes
+const BALANCE_CHECK_INTERVAL_MS = 60 * 1000;         // 1 minute
+
 class SmsWorker {
   constructor(config = {}) {
     this.config = {
@@ -23,6 +27,13 @@ class SmsWorker {
     this._pollTimer = null;
     this._activeJobs = new Set();
     this._currentBatch = null;
+
+    // ── Circuit breaker / credit state ──────────────────────
+    this.creditBlocked = false;
+    this.creditBlockedUntil = null;
+    this._balanceCheckTimer = null;
+    this._lastBalanceCheck = 0;
+    this._cachedBalance = null;
   }
 
   async start() {
@@ -35,8 +46,10 @@ class SmsWorker {
       timeout: this.config.requestTimeout,
     });
 
+    // Initial health check (only once at startup)
     try {
       const health = await this.provider.healthCheck();
+      this._cachedBalance = health.balance;
       logger.info('Celcom provider health check', {
         status: health.status,
         balance: health.balance,
@@ -49,6 +62,8 @@ class SmsWorker {
 
     this.isRunning = true;
     this._pollLoop();
+    // Start periodic balance checks (separate from main poll)
+    this._startBalanceCheckLoop();
     logger.info('SMS Worker started', { config: this.config });
   }
 
@@ -59,6 +74,10 @@ class SmsWorker {
     if (this._pollTimer) {
       clearTimeout(this._pollTimer);
       this._pollTimer = null;
+    }
+    if (this._balanceCheckTimer) {
+      clearTimeout(this._balanceCheckTimer);
+      this._balanceCheckTimer = null;
     }
 
     if (this._currentBatch) {
@@ -71,6 +90,30 @@ class SmsWorker {
     logger.info('SMS Worker stopped');
   }
 
+  // ─── Balance check loop (every 60 seconds) ────────────────
+  _startBalanceCheckLoop() {
+    this._balanceCheckTimer = setInterval(async () => {
+      if (!this.isRunning) return;
+      try {
+        const health = await this.provider.healthCheck();
+        this._cachedBalance = health.balance;
+        logger.debug('Balance check', { balance: health.balance });
+        // If we have balance and credit was blocked, maybe unblock after cooldown
+        if (this.creditBlocked && this.creditBlockedUntil) {
+          if (Date.now() > this.creditBlockedUntil) {
+            // Cooldown expired – we can unblock
+            this.creditBlocked = false;
+            this.creditBlockedUntil = null;
+            logger.info('Credit block lifted (cooldown expired)');
+          }
+        }
+      } catch (err) {
+        logger.warn('Balance check failed', { error: err.message });
+      }
+    }, BALANCE_CHECK_INTERVAL_MS);
+  }
+
+  // ─── Main poll loop ────────────────────────────────────────
   _pollLoop() {
     if (!this.isRunning) return;
 
@@ -92,8 +135,27 @@ class SmsWorker {
   }
 
   async _processBatch() {
+    // 1. Recover stuck jobs (but safely – see updated recoverStuckJobs)
     await smsService.recoverStuckJobs();
 
+    // 2. If credit is blocked, do not claim jobs – wait for cooldown
+    if (this.creditBlocked) {
+      logger.debug('Credit blocked – skipping job claim');
+      return;
+    }
+
+    // 3. Recover low‑credit jobs (only if they are due) – but only if we have credits
+    //    We rely on the cached balance check (which runs separately)
+    if (this._cachedBalance && Number(this._cachedBalance) > 0) {
+      const recovered = await smsService.recoverLowCreditJobs();
+      if (recovered > 0) {
+        logger.info('Low‑credit jobs recovered', { count: recovered });
+      }
+    } else {
+      logger.debug('Skipping low‑credit recovery – no credits or unknown');
+    }
+
+    // 4. Claim and process jobs
     const jobs = await smsService.claimJobsForWorker(this.config.batchSize);
     if (jobs.length === 0) return;
 
@@ -164,8 +226,28 @@ class SmsWorker {
         return { success: false };
       }
 
+      // ── Circuit breaker: if credit blocked, defer job ──────
+      if (this.creditBlocked) {
+        logger.info('Credit blocked – deferring job', { jobId });
+        // Mark as failed with retryable=true and set nextRetryAt to cooldown expiry
+        await smsService.markFailed(jobId, null, 'Credit temporarily blocked', {
+          retryable: true,
+          nextRetryAt: this.creditBlockedUntil || new Date(Date.now() + CREDIT_BLOCK_COOLDOWN_MS),
+          providerResponse: { status: 'blocked' },
+        });
+        return { success: false, reason: 'credit_blocked' };
+      }
+
       await this._waitForRateLimit();
       crossedProviderBoundary = true;
+
+      // Mark on the job that we have crossed provider boundary
+      // (We'll update the job in DB later, but we keep a flag in memory)
+      // We'll set a flag in the job object for recovery purposes.
+      // Since we are about to call the provider, we can store this flag in the job document
+      // by updating the job with a temporary field. To avoid extra writes, we can
+      // rely on the fact that crossedProviderBoundary is true after this point
+      // and use that in the catch block.
 
       logger.info('Sending SMS via Celcom', {
         jobId,
@@ -207,32 +289,66 @@ class SmsWorker {
         }
       }
 
-      // Provider reported unknown / non-retryable uncertainty
-      if (result.status === 'unknown' || result.retryable === false) {
-        const isClientReject =
-          result.errorCode && String(result.errorCode).startsWith('http_4');
+      // ─── CORRECTED CLASSIFICATION ──────────────────────────
 
-        if (isClientReject) {
-          await smsService.markFailed(jobId, null, result.errorMessage, {
-            retryable: false,
-            providerResponse: result,
-          });
-        } else {
-          await smsService.markUnknown(jobId, {
-            error: result.errorMessage,
-            errorCode: result.errorCode,
-            reason: result.status || 'provider_uncertain',
-          });
-        }
-        return { success: false, reason: result.status || 'unknown' };
+      // 1. Provider explicitly says the outcome is unknown (e.g., timeout, 5xx after POST)
+      if (result.status === 'unknown') {
+        await smsService.markUnknown(jobId, {
+          error: result.errorMessage || 'Provider outcome unknown',
+          errorCode: result.errorCode,
+          reason: 'provider_uncertain',
+          providerResponse: result,
+        });
+        return { success: false, reason: 'unknown' };
       }
 
-      // Explicitly safe to retry only when provider says so
-      await smsService.markFailed(jobId, null, result.errorMessage || 'Provider error', {
-        retryable: result.retryable === true,
+      // 2. Provider explicitly rejected the SMS (e.g., 1004, invalid phone, etc.)
+      if (result.status === 'failed') {
+        // If it's insufficient_credits, set the circuit breaker
+        if (result.errorCode === 'insufficient_credits') {
+          this.creditBlocked = true;
+          this.creditBlockedUntil = new Date(Date.now() + CREDIT_BLOCK_COOLDOWN_MS);
+          logger.warn('Credit blocked due to insufficient credits', {
+            jobId,
+            until: this.creditBlockedUntil,
+          });
+          // Also set nextRetryAt in meta so markFailed schedules a retry after cooldown
+          const meta = {
+            retryable: false, // we'll handle recovery separately via the circuit breaker
+            providerResponse: result,
+            errorCode: result.errorCode,
+            nextRetryAt: this.creditBlockedUntil,
+          };
+          await smsService.markFailed(jobId, null, result.errorMessage, meta);
+        } else {
+          await smsService.markFailed(
+            jobId,
+            null,
+            result.errorMessage || 'Provider rejected SMS',
+            {
+              retryable: result.retryable === true,
+              providerResponse: result,
+              errorCode: result.errorCode,
+            }
+          );
+        }
+        return { success: false, reason: 'failed' };
+      }
+
+      // 3. Defensive fallback – unexpected result.status
+      logger.warn('Unexpected provider result status', {
+        jobId,
+        status: result.status,
+        result,
+      });
+      await smsService.markUnknown(jobId, {
+        error: result.errorMessage || 'Unexpected provider response',
+        errorCode: result.errorCode,
+        reason: 'unexpected_provider_response',
         providerResponse: result,
       });
-      return { success: false };
+      return { success: false, reason: 'unknown' };
+
     } catch (err) {
       logger.error('SMS job unexpected error', {
         jobId,
@@ -241,7 +357,8 @@ class SmsWorker {
       });
 
       if (crossedProviderBoundary) {
-        // NEVER markFailed({ retryable: true }) after provider boundary
+        // We have crossed the boundary; we do not know if Celcom accepted the SMS.
+        // Mark as UNKNOWN – never retry automatically.
         try {
           await smsService.markUnknown(jobId, {
             error: err.message,
@@ -257,6 +374,7 @@ class SmsWorker {
         return { success: false, reason: 'unknown' };
       }
 
+      // Error before provider boundary – safe to mark failed (no chance of double‑send)
       try {
         await smsService.markFailed(jobId, null, err.message, {
           retryable: false,
@@ -278,6 +396,9 @@ class SmsWorker {
       isRunning: this.isRunning,
       activeJobs: this._activeJobs.size,
       config: this.config,
+      creditBlocked: this.creditBlocked,
+      creditBlockedUntil: this.creditBlockedUntil,
+      cachedBalance: this._cachedBalance,
     };
   }
 }

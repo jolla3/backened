@@ -13,7 +13,7 @@ const logger = require('./utils/logger');
 const config = require('./config');
 const smsService = require('./services/smsService');
 
-const { startJobRecovery } = require('./scheduler/jobRecovery');
+// const { startJobRecovery } = require('./scheduler/jobRecovery');
 const { startSmsWorker, stopSmsWorker } = require('./scheduler/smsWorkerScheduler');
 
 const app = express();
