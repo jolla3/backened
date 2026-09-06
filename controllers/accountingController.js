@@ -1,3 +1,4 @@
+const mongoose = require('mongoose');
 const accountingService = require('../services/accountingService');
 const logger = require('../utils/logger');
 
@@ -25,11 +26,14 @@ const getProviderStatus = async (req, res) => {
 };
 
 /**
- * Get cooperative usage summary.
+ * Get cooperative usage detail (single cooperative).
  */
 const getCooperativeUsage = async (req, res) => {
   try {
     const { cooperativeId } = req.params;
+    if (!mongoose.Types.ObjectId.isValid(cooperativeId)) {
+      return res.status(400).json({ success: false, error: 'Invalid cooperative ID' });
+    }
     const { startDate, endDate } = req.query;
     const usage = await accountingService.getCooperativeUsage(cooperativeId, startDate, endDate);
     res.json({ success: true, usage });
@@ -54,12 +58,17 @@ const getSystemUsage = async (req, res) => {
 };
 
 /**
- * Get balance history (snapshots).
+ * Get balance history (snapshots) with optional date filtering.
  */
 const getBalanceHistory = async (req, res) => {
   try {
-    const { provider = 'celcom', limit = 30 } = req.query;
-    const history = await accountingService.getBalanceHistory(provider, parseInt(limit));
+    const { provider = 'celcom', limit = 30, startDate, endDate } = req.query;
+    const history = await accountingService.getBalanceHistory(
+      provider,
+      parseInt(limit),
+      startDate,
+      endDate
+    );
     res.json({ success: true, history });
   } catch (error) {
     logger.error('Failed to get balance history', { error: error.message });
@@ -68,7 +77,7 @@ const getBalanceHistory = async (req, res) => {
 };
 
 /**
- * Get per-cooperative usage breakdown.
+ * Get per-cooperative usage breakdown (summary for all cooperatives).
  */
 const getCooperativeUsageSummary = async (req, res) => {
   try {
@@ -81,7 +90,19 @@ const getCooperativeUsageSummary = async (req, res) => {
   }
 };
 
-// ─── NEW METHODS ─────────────────────────────────────────────
+/**
+ * Get daily usage timeline (attempted, accepted, failed, unknown, billable segments, cost).
+ */
+const getUsageTimeline = async (req, res) => {
+  try {
+    const { startDate, endDate } = req.query;
+    const timeline = await accountingService.getUsageTimeline(startDate, endDate);
+    res.json({ success: true, timeline });
+  } catch (error) {
+    logger.error('Failed to get usage timeline', { error: error.message });
+    res.status(500).json({ success: false, error: error.message });
+  }
+};
 
 /**
  * Get paginated list of SMS messages with filters.
@@ -90,6 +111,12 @@ const getCooperativeUsageSummary = async (req, res) => {
 const getSmsMessages = async (req, res) => {
   try {
     const { cooperativeId, status, type, startDate, endDate, page = 1, limit = 20 } = req.query;
+
+    // Validate cooperativeId if provided
+    if (cooperativeId && !mongoose.Types.ObjectId.isValid(cooperativeId)) {
+      return res.status(400).json({ success: false, error: 'Invalid cooperative ID' });
+    }
+
     const result = await accountingService.getMessages({
       cooperativeId,
       status,
@@ -139,6 +166,7 @@ module.exports = {
   getSystemUsage,
   getBalanceHistory,
   getCooperativeUsageSummary,
+  getUsageTimeline,
   getSmsMessages,
   getReconciliation,
   refreshBalance,

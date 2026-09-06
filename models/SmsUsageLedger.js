@@ -61,7 +61,6 @@ const smsUsageLedgerSchema = new mongoose.Schema(
     },
     providerMessageId: {
       type: String,
-      index: true,
     },
     providerAcceptedAt: {
       type: Date,

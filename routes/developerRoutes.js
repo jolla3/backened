@@ -30,15 +30,26 @@ router.put('/superadmins/:id/deactivate', developerController.deactivateSuperAdm
 // ─── Impersonation ─────────────────────────────────────────
 router.post('/impersonate/:id', developerController.impersonate);
 
-// ─── SMS Accounting ──────────────────────────────────────────
-// ⚠️ SPECIFIC routes FIRST ⚠️
+// ─── SMS Accounting (all under /dev) ──────────────────────
+// Provider
 router.get('/provider/status', accountingController.getProviderStatus);
-router.get('/system/usage', accountingController.getSystemUsage);
-router.get('/balance/history', accountingController.getBalanceHistory);
-router.get('/cooperatives/usage', accountingController.getCooperativeUsageSummary); // already defined, but kept for clarity
-router.get('/cooperative/:cooperativeId/usage', accountingController.getCooperativeUsage);
-router.get('/messages', accountingController.getSmsMessages);
-router.get('/reconciliation', accountingController.getReconciliation);
 router.post('/refresh-balance', accountingController.refreshBalance);
+
+// Usage
+router.get('/system/usage', accountingController.getSystemUsage);
+router.get('/usage/timeline', accountingController.getUsageTimeline);   // ✅ NEW
+
+// Balance history
+router.get('/balance/history', accountingController.getBalanceHistory);
+
+// Cooperatives usage
+router.get('/cooperatives/usage', accountingController.getCooperativeUsageSummary);
+router.get('/cooperative/:cooperativeId/usage', accountingController.getCooperativeUsage);
+
+// Messages
+router.get('/messages', accountingController.getSmsMessages);
+
+// Reconciliation
+router.get('/reconciliation', accountingController.getReconciliation);
 
 module.exports = router;
