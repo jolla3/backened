@@ -1,6 +1,7 @@
 const pLimit = require('p-limit');
 const CelcomSmsProvider = require('../providers/CelcomSmsProvider');
 const smsService = require('../services/smsService');
+const accountingService = require('../services/accountingService'); // <-- NEW
 const { normalizePhone } = require('../utils/phoneUtils');
 const logger = require('../utils/logger');
 const { SMS_WORKER_CONFIG } = require('../constants/smsConstants');
@@ -8,6 +9,9 @@ const { SMS_WORKER_CONFIG } = require('../constants/smsConstants');
 // Cooldown durations (milliseconds)
 const CREDIT_BLOCK_COOLDOWN_MS = 5 * 60 * 1000;      // 5 minutes
 const BALANCE_CHECK_INTERVAL_MS = 60 * 1000;         // 1 minute
+
+// SMS unit cost (KES per segment) – can be overridden by env
+const SMS_UNIT_COST = parseFloat(process.env.SMS_UNIT_COST) || 0.80;
 
 class SmsWorker {
   constructor(config = {}) {
@@ -50,6 +54,12 @@ class SmsWorker {
     try {
       const health = await this.provider.healthCheck();
       this._cachedBalance = health.balance;
+      // Update provider balance in DB
+      await accountingService.updateProviderBalance({
+        provider: 'celcom',
+        balance: health.balance,
+        source: 'health_check',
+      });
       logger.info('Celcom provider health check', {
         status: health.status,
         balance: health.balance,
@@ -97,6 +107,12 @@ class SmsWorker {
       try {
         const health = await this.provider.healthCheck();
         this._cachedBalance = health.balance;
+        // Store snapshot in DB
+        await accountingService.updateProviderBalance({
+          provider: 'celcom',
+          balance: health.balance,
+          source: 'health_check',
+        });
         logger.debug('Balance check', { balance: health.balance });
         // If we have balance and credit was blocked, maybe unblock after cooldown
         if (this.creditBlocked && this.creditBlockedUntil) {
@@ -241,14 +257,6 @@ class SmsWorker {
       await this._waitForRateLimit();
       crossedProviderBoundary = true;
 
-      // Mark on the job that we have crossed provider boundary
-      // (We'll update the job in DB later, but we keep a flag in memory)
-      // We'll set a flag in the job object for recovery purposes.
-      // Since we are about to call the provider, we can store this flag in the job document
-      // by updating the job with a temporary field. To avoid extra writes, we can
-      // rely on the fact that crossedProviderBoundary is true after this point
-      // and use that in the catch block.
-
       logger.info('Sending SMS via Celcom', {
         jobId,
         phone: this._maskPhone(phone),
@@ -263,6 +271,7 @@ class SmsWorker {
 
       if (result.success) {
         try {
+          // Mark as sent first
           await smsService.markSent(jobId, null, {
             providerMessageId: result.providerMessageId,
             status: result.status,
@@ -273,6 +282,32 @@ class SmsWorker {
             jobId,
             providerMessageId: result.providerMessageId,
           });
+
+          // ── Record usage (idempotent) ──────────────────────
+          try {
+            await accountingService.recordSmsUsage({
+              smsJobId: jobId,
+              cooperativeId: job.cooperativeId,
+              farmerId: job.farmerId || null,
+              provider: 'celcom',
+              type: job.type,
+              message: job.message,
+              providerMessageId: result.providerMessageId,
+              unitCost: SMS_UNIT_COST,
+              metadata: {
+                status: 'sent',
+                responseCode: result.responseCode,
+              },
+            });
+          } catch (accountingErr) {
+            // Usage recording failure should not cause the job to be considered failed
+            // because the SMS was already sent. Log and continue.
+            logger.error('Failed to record SMS usage', {
+              jobId,
+              error: accountingErr.message,
+            });
+          }
+
           return { success: true };
         } catch (markErr) {
           logger.error('markSent failed after provider accept', {

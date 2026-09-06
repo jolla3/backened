@@ -71,7 +71,7 @@ const queueSMS = async ({
 const sendBroadcast = async ({
   message,
   cooperativeId,
-  farmerIds = null, // optional array of farmer IDs; if null, send to all active farmers
+  farmerIds = null,
   adminId,
   type = 'broadcast',
   metadata = {},
@@ -148,30 +148,56 @@ const sendBroadcast = async ({
 };
 
 /**
- * Send monthly milk summary – business-level notification.
+ * Send monthly milk summary – fetches farmer details from DB.
+ * Now only requires farmerId (and other numeric fields).
  */
 const sendMonthlyMilkSummary = async ({
-  farmerPhone,
-  farmerName,
   farmerId,
+  cooperativeId,
+  period,
   litresDelivered,
   totalPayout,
   totalDeductions,
-  cooperativeId,
-  period,
   adminId = null,
 }) => {
-  if (!farmerPhone) throw new Error('Farmer phone number is required');
-  if (!farmerName) throw new Error('Farmer name is required');
   if (!farmerId) throw new Error('Farmer ID is required');
   if (!cooperativeId) throw new Error('Cooperative ID is required');
   if (!period) throw new Error('Settlement period is required');
+  if (litresDelivered === undefined || isNaN(Number(litresDelivered))) {
+    throw new Error('Valid litresDelivered is required');
+  }
+  if (totalPayout === undefined || isNaN(Number(totalPayout))) {
+    throw new Error('Valid totalPayout is required');
+  }
+  if (totalDeductions === undefined || isNaN(Number(totalDeductions))) {
+    throw new Error('Valid totalDeductions is required');
+  }
+
+  // Fetch farmer from DB to get phone and name
+  const farmer = await Farmer.findOne({
+    _id: farmerId,
+    cooperativeId,
+    isActive: true,
+  }).select('phone name').lean();
+
+  if (!farmer) {
+    throw new Error('Farmer not found or inactive');
+  }
+  if (!farmer.phone) {
+    throw new Error('Farmer has no phone number');
+  }
+
+  const normalizedPhone = normalizePhone(farmer.phone);
+  if (!normalizedPhone) {
+    throw new Error('Invalid phone number for farmer');
+  }
 
   const idempotencyKey = `monthly_summary:${cooperativeId}:${farmerId}:${period}`;
 
+  // Call smsService with the resolved phone and name
   const result = await smsService.sendMonthlyMilkSummary(
-    farmerPhone,
-    farmerName,
+    normalizedPhone,
+    farmer.name || 'Farmer',
     Number(litresDelivered),
     Number(totalPayout),
     Number(totalDeductions),
@@ -200,41 +226,70 @@ const sendMonthlyMilkSummary = async ({
 };
 
 /**
- * Send feed transaction notification – business-level notification.
+ * Send feed transaction notification – fetches farmer details from DB.
+ * Now only requires farmerId (and other transaction fields).
  */
 const sendFeedTransactionNotification = async ({
-  farmerPhone,
-  farmerName,
   farmerId,
+  cooperativeId,
+  transactionId,
   productName,
   quantity,
   pricePerUnit,
   totalCost,
   cooperativeName,
   newBalance,
-  cooperativeId,
-  transactionId,
   adminId = null,
 }) => {
-  if (!farmerPhone) throw new Error('Farmer phone number is required');
-  if (!farmerName) throw new Error('Farmer name is required');
   if (!farmerId) throw new Error('Farmer ID is required');
-  if (!productName) throw new Error('Product name is required');
-  if (!transactionId) throw new Error('Transaction ID is required');
   if (!cooperativeId) throw new Error('Cooperative ID is required');
+  if (!transactionId) throw new Error('Transaction ID is required');
+  if (!productName) throw new Error('Product name is required');
+  if (quantity === undefined || isNaN(Number(quantity)) || Number(quantity) <= 0) {
+    throw new Error('Valid quantity is required');
+  }
+  if (pricePerUnit === undefined || isNaN(Number(pricePerUnit)) || Number(pricePerUnit) <= 0) {
+    throw new Error('Valid price per unit is required');
+  }
+  if (totalCost === undefined || isNaN(Number(totalCost)) || Number(totalCost) <= 0) {
+    throw new Error('Valid total cost is required');
+  }
+  if (newBalance === undefined || isNaN(Number(newBalance))) {
+    throw new Error('Valid new balance is required');
+  }
+
+  // Fetch farmer from DB to get phone and name
+  const farmer = await Farmer.findOne({
+    _id: farmerId,
+    cooperativeId,
+    isActive: true,
+  }).select('phone name').lean();
+
+  if (!farmer) {
+    throw new Error('Farmer not found or inactive');
+  }
+  if (!farmer.phone) {
+    throw new Error('Farmer has no phone number');
+  }
+
+  const normalizedPhone = normalizePhone(farmer.phone);
+  if (!normalizedPhone) {
+    throw new Error('Invalid phone number for farmer');
+  }
 
   const idempotencyKey = `feed_purchase:${cooperativeId}:${transactionId}`;
 
+  // Call smsService with the resolved phone and name
   const result = await smsService.sendFeedTransactionNotification({
-    farmerPhone,
-    farmerName,
+    farmerPhone: normalizedPhone,
+    farmerName: farmer.name || 'Farmer',
     farmerId,
     productName,
-    quantity,
-    pricePerUnit,
-    totalCost,
-    cooperativeName,
-    newBalance,
+    quantity: Number(quantity),
+    pricePerUnit: Number(pricePerUnit),
+    totalCost: Number(totalCost),
+    cooperativeName: cooperativeName || 'Cooperative',
+    newBalance: Number(newBalance),
     cooperativeId,
     idempotencyKey,
     metadata: {
