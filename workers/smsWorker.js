@@ -477,4 +477,19 @@ class SmsWorker {
   }
 }
 
-module.exports = SmsWorker;
+
+// ─── Singleton ──────────────────────────────────────────────
+let instance = null;
+
+function getInstance() {
+  if (!instance) {
+    instance = new SmsWorker();
+  }
+  return instance;
+}
+
+module.exports = {
+  SmsWorker,
+  getInstance,
+};
+
