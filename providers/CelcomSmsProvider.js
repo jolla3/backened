@@ -1,12 +1,3 @@
-/**
- * Celcom SMS Provider - Official Celcom Africa API
- *
- * POST https://isms.celcomafrica.com/api/services/sendsms/
- * Body: { partnerID, apikey, mobile, message, shortcode, pass_type }
- *
- * Response: { responses: [{ "respose-code", "response-description", messageid, ... }] }
- * NOTE: Celcom uses the typo "respose-code".
- */
 const axios = require('axios');
 const logger = require('../utils/logger');
 
@@ -44,11 +35,6 @@ class CelcomSmsProvider {
     };
   }
 
-  /**
-   * @param {string} mobile - E.164 (+254...)
-   * @param {string} message
-   * @param {string|null} clientReference - local idempotency key (not sent to Celcom)
-   */
   async send(mobile, message, clientReference = null) {
     if (!mobile || !message) {
       return this._errorResponse('Missing required fields: mobile, message', 'invalid_request', false);
@@ -62,7 +48,6 @@ class CelcomSmsProvider {
       });
 
       const body = this._buildRequestBody(mobile, message);
-
       const response = await axios.post(this.smsUrl, body, {
         headers: { 'Content-Type': 'application/json' },
         timeout: this.timeout,
@@ -76,7 +61,6 @@ class CelcomSmsProvider {
 
   async checkStatus(messageId) {
     if (!messageId) throw new Error('messageId is required');
-
     try {
       const body = {
         partnerID: this.partnerId,
@@ -119,97 +103,116 @@ class CelcomSmsProvider {
     }
   }
 
-// providers/CelcomSmsProvider.js  – key changes only
+  _handleSuccessResponse(response) {
+    const data = response.data;
 
-_handleSuccessResponse(response) {
-  const data = response.data;
-
-  if (!data.responses || !Array.isArray(data.responses) || data.responses.length === 0) {
-    return this._errorResponse('Invalid Celcom response structure', 'invalid_response', false);
-  }
-
-  const first = data.responses[0];
-  // Normalize Celcom typo once; never store "resposeCode" internally
-  const responseCode = first['respose-code'] ?? first['response-code'];
-  const responseDescription = first['response-description'];
-  const messageid = first.messageid;
-
-  if (responseCode === 200 || responseCode === '200') {
-    if (!messageid) {
-      // Success without message ID is unusable for DLR and dangerous for retries
-      logger.warn('Celcom success without messageid', { data });
-      return this._errorResponse(
-        'Provider accepted but returned no message ID',
-        'missing_message_id',
-        false // do not auto-retry
-      );
-    }
-
-    return {
-      success: true,
-      providerMessageId: String(messageid),
-      status: 'accepted',
-      responseCode: Number(responseCode) || responseCode,
-      raw: data,
-    };
-  }
-
-  const classification = this._classifyErrorCode(responseCode, responseDescription);
-  return this._errorResponse(
-    classification.message,
-    classification.code,
-    classification.retryable
-  );
-}
-
-// CelcomSmsProvider._handleErrorResponse
-
-_handleErrorResponse(error) {
-  if (!error.response) {
-    // Any uncertainty after the request may have left our process
-    const uncertainCodes = [
-      'ECONNABORTED', 'ETIMEDOUT', 'ECONNRESET',
-      'EPIPE', 'EAI_AGAIN', 'ENOTFOUND',
-    ];
-    if (uncertainCodes.includes(error.code)) {
+    // HTTP 200 arrived, but body is malformed / unexpected.
+    // Outcome is uncertain → treat as UNKNOWN (never automatic resend).
+    if (!data.responses || !Array.isArray(data.responses) || data.responses.length === 0) {
+      logger.warn('Celcom returned malformed success response; outcome unknown', { data });
       return {
         success: false,
         status: 'unknown',
-        errorMessage: `${error.code || 'network'} – outcome unknown, may have been accepted`,
-        errorCode: error.code || 'network_uncertain',
+        errorMessage: 'Celcom returned an invalid response structure',
+        errorCode: 'invalid_response',
         retryable: false,
-        raw: null,
+        raw: data,
       };
     }
+
+    const first = data.responses[0];
+    // Normalize both possible keys
+    const responseCode = first['respose-code'] ?? first['response-code'];
+    const responseDescription = first['response-description'];
+    const messageid = first.messageid;
+
+    if (responseCode === 200 || responseCode === '200') {
+      if (!messageid) {
+        // Provider accepted (200) but omitted message ID → UNKNOWN.
+        // Never turn a provider acceptance into a normal "failed" state.
+        logger.warn('Celcom success without messageid – treating as unknown', { data });
+        return {
+          success: false,
+          status: 'unknown',
+          errorMessage: 'Provider accepted but returned no message ID',
+          errorCode: 'missing_message_id',
+          responseCode: Number(responseCode) || responseCode,
+          retryable: false,
+          raw: data,
+        };
+      }
+
+      return {
+        success: true,
+        providerMessageId: String(messageid),
+        status: 'accepted',
+        responseCode: Number(responseCode) || responseCode,
+        raw: data,
+      };
+    }
+
+    const classification = this._classifyErrorCode(responseCode, responseDescription);
+    logger.warn('Celcom SMS rejected', {
+      responseCode,
+      responseDescription,
+      classification: classification.code,
+      raw: data,
+    });
+
     return this._errorResponse(
-      error.message || 'Network error',
-      error.code || 'network_error',
-      false // default: do not auto-retry
+      classification.message,
+      classification.code,
+      classification.retryable,
+      data,
+      Number(responseCode) || responseCode
     );
   }
 
-  const statusCode = error.response.status;
-  const data = error.response.data;
+  _handleErrorResponse(error) {
+    if (!error.response) {
+      const uncertainCodes = [
+        'ECONNABORTED', 'ETIMEDOUT', 'ECONNRESET',
+        'EPIPE', 'EAI_AGAIN', 'ENOTFOUND',
+      ];
+      if (uncertainCodes.includes(error.code)) {
+        return {
+          success: false,
+          status: 'unknown',
+          errorMessage: `${error.code || 'network'} – outcome unknown, may have been accepted`,
+          errorCode: error.code || 'network_uncertain',
+          retryable: false,
+          raw: null,
+        };
+      }
+      return this._errorResponse(
+        error.message || 'Network error',
+        error.code || 'network_error',
+        false
+      );
+    }
 
-  // 5xx after POST: Celcom may have processed the SMS
-  if (statusCode >= 500) {
-    return {
-      success: false,
-      status: 'unknown',
-      errorMessage: data?.message || `HTTP ${statusCode}`,
-      errorCode: `http_${statusCode}`,
-      retryable: false,
-      raw: data,
-    };
+    const statusCode = error.response.status;
+    const data = error.response.data;
+
+    if (statusCode >= 500) {
+      return {
+        success: false,
+        status: 'unknown',
+        errorMessage: data?.message || `HTTP ${statusCode}`,
+        errorCode: `http_${statusCode}`,
+        retryable: false,
+        raw: data,
+      };
+    }
+
+    return this._errorResponse(
+      data?.message || `HTTP ${statusCode}`,
+      `http_${statusCode}`,
+      false,
+      data,
+      statusCode
+    );
   }
-
-  // 4xx = definite rejection
-  return this._errorResponse(
-    data?.message || `HTTP ${statusCode}`,
-    `http_${statusCode}`,
-    false
-  );
-}
 
   _classifyErrorCode(code, message) {
     const codeStr = String(code);
@@ -229,7 +232,9 @@ _handleErrorResponse(error) {
       '4092': { message: 'No API KEY provided', code: 'missing_api_key', retryable: false },
       '4093': { message: 'Details not found', code: 'not_found', retryable: false },
     };
+
     if (classifications[codeStr]) return classifications[codeStr];
+
     return {
       message: message || `Unknown error code: ${code}`,
       code: 'unknown_error',
@@ -237,14 +242,15 @@ _handleErrorResponse(error) {
     };
   }
 
-  _errorResponse(message, errorCode, retryable) {
+  _errorResponse(message, errorCode, retryable, raw = null, responseCode = null) {
     return {
       success: false,
       status: 'failed',
       errorMessage: message,
       errorCode,
+      responseCode,
       retryable: !!retryable,
-      raw: null,
+      raw,
     };
   }
 
