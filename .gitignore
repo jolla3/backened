@@ -3,3 +3,5 @@ node_modules
 combined.log
 test-sms.js
 scripts/seedSmsRate.js
+winsocks.log
+combined.log

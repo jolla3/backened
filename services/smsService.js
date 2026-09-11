@@ -384,19 +384,34 @@ const recoverStuckJobs = async (olderThanMinutes = PROCESSING_TIMEOUT_MINUTES) =
 const recoverLowCreditJobs = async () => {
   const now = new Date();
 
-  // Target jobs that are:
-  // - failed
-  // - no providerMessageId (not accepted)
-  // - errorCode exactly 'insufficient_credits'
-  // - nextRetryAt is null or in the past (respect cooldown)
   const result = await OutboundSms.updateMany(
     {
       status: 'failed',
-      providerMessageId: { $exists: false },
-      errorCode: 'insufficient_credits',
-      $or: [
-        { nextRetryAt: null },
-        { nextRetryAt: { $lte: now } },
+      $and: [
+        {
+          $or: [
+            { providerMessageId: { $exists: false } },
+            { providerMessageId: null },
+          ],
+        },
+        {
+          $or: [
+            { errorCode: 'insufficient_credits' },
+            { error: /low credit/i },
+            { error: /low bulk credits/i },
+            { 'providerResponse.responseCode': 402 },
+            { 'providerResponse.responseCode': '402' },
+            { 'providerResponse.responseCode': 1004 },
+            { 'providerResponse.responseCode': '1004' },
+          ],
+        },
+        {
+          $or: [
+            { nextRetryAt: null },
+            { nextRetryAt: { $lte: now } },
+            { nextRetryAt: { $exists: false } },
+          ],
+        },
       ],
     },
     {
@@ -409,6 +424,7 @@ const recoverLowCreditJobs = async () => {
         processingStartedAt: null,
         error: null,
         errorCode: null,
+        failedAt: null,
         updatedAt: now,
       },
       $unset: {
@@ -418,9 +434,7 @@ const recoverLowCreditJobs = async () => {
   );
 
   if (result.modifiedCount > 0) {
-    logger.info('Recovered low-credit SMS jobs', {
-      count: result.modifiedCount,
-    });
+    logger.info('Recovered low-credit SMS jobs', { count: result.modifiedCount });
   }
 
   return result.modifiedCount;
