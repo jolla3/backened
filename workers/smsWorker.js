@@ -15,7 +15,7 @@ const SMS_WORKER_CONFIG = {
 };
 
 const CREDIT_BLOCK_COOLDOWN_MS = SMS_WORKER_CONFIG.creditBlockCooldownMs;
-const SMS_UNIT_COST = parseFloat(process.env.SMS_UNIT_COST || '0.80');
+const SMS_UNIT_COST = parseFloat(process.env.SMS_UNIT_COST );
 
 class SmsWorker {
   constructor() {
