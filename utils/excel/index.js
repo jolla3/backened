@@ -1,6 +1,11 @@
 // utils/excel/index.js
 const { createMonthlySummaryWorkbook } = require('./monthlySummaryExcel');
-const { createBankPaymentWorkbook } = require('./bankPaymentExcel');
+const {
+  createBankPaymentWorkbook,
+  createBankPaymentsZipByBank,
+  groupPayableByBank,
+  sanitizeBankFilePart,
+} = require('./bankPaymentExcel');
 const { createFarmersListWorkbook } = require('./farmersListExcel');
 
 const sanitizeFilenamePart = (value) =>
@@ -18,12 +23,26 @@ const buildSummaryFilename = ({ year, month, cooperativeName }) => {
     : `Monthly_Summary_${ym}.xlsx`;
 };
 
-const buildBankFilename = ({ year, month, cooperativeName }) => {
+/** Single-file name (legacy). Prefer ZIP for multi-bank. */
+const buildBankFilename = ({ year, month, cooperativeName, bankName }) => {
   const ym = `${year}_${String(month).padStart(2, '0')}`;
   const coop = sanitizeFilenamePart(cooperativeName);
+  if (bankName) {
+    const bank = sanitizeBankFilePart(bankName);
+    return coop ? `Bank_${bank}_${coop}_${ym}.xlsx` : `Bank_${bank}_${ym}.xlsx`;
+  }
   return coop
     ? `Bank_Payments_${coop}_${ym}.xlsx`
     : `Bank_Payments_${ym}.xlsx`;
+};
+
+/** Multi-bank package */
+const buildBankZipFilename = ({ year, month, cooperativeName }) => {
+  const ym = `${year}_${String(month).padStart(2, '0')}`;
+  const coop = sanitizeFilenamePart(cooperativeName);
+  return coop
+    ? `Bank_Payments_${coop}_${ym}.zip`
+    : `Bank_Payments_${ym}.zip`;
 };
 
 const buildFarmersListFilename = ({ cooperativeName }) => {
@@ -37,9 +56,13 @@ const buildFarmersListFilename = ({ cooperativeName }) => {
 module.exports = {
   createMonthlySummaryWorkbook,
   createBankPaymentWorkbook,
+  createBankPaymentsZipByBank,
+  groupPayableByBank,
   createFarmersListWorkbook,
   buildSummaryFilename,
   buildBankFilename,
+  buildBankZipFilename,
   buildFarmersListFilename,
   sanitizeFilenamePart,
+  sanitizeBankFilePart,
 };

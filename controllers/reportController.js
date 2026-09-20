@@ -2,9 +2,9 @@ const reportService = require('../services/reportService');
 const monthlyPaymentService = require('../services/monthlyPaymentService');
 const {
   createMonthlySummaryWorkbook,
-  createBankPaymentWorkbook,
+  createBankPaymentsZipByBank,
   buildSummaryFilename,
-  buildBankFilename,
+  buildBankZipFilename,
 } = require('../utils/excel');
 const logger = require('../utils/logger');
 
@@ -208,6 +208,7 @@ const exportBankPaymentExcel = async (req, res) => {
       month,
     });
 
+    // Payable farmers must have account numbers (bank file cannot omit them)
     const missingBankDetails = monthlyPaymentService.findMissingBankDetails(result);
     if (missingBankDetails.length > 0) {
       return res.status(400).json({
@@ -217,34 +218,42 @@ const exportBankPaymentExcel = async (req, res) => {
       });
     }
 
-    // Only include rows with positive net payout (nothing to pay if <= 0)
-    const bankRows = result.rows
+    // Positive net payout only — amount is authoritative netPayout
+    const payableRows = result.rows
       .filter((r) => r.netPayout > 0)
       .map((r) => ({
-        fullName: r.farmerName,
+        farmerName: r.farmerName,
         accountNumber: String(r.accountNumber).trim(),
-        amount: r.netPayout,
+        netPayout: r.netPayout,
+        bankName: String(r.bankName || '').trim(),
       }));
 
-    const workbook = await createBankPaymentWorkbook(bankRows, {
+    // One Excel per bankName, packaged as a ZIP folder
+    const { buffer, bankCount, banks } = await createBankPaymentsZipByBank(payableRows, {
       cooperativeName: result.cooperative.name,
       year,
       month,
     });
-    const filename = buildBankFilename({
+
+    const filename = buildBankZipFilename({
       year,
       month,
       cooperativeName: result.cooperative.name,
     });
 
-    res.setHeader(
-      'Content-Type',
-      'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
-    );
+    logger.info('Bank payment ZIP generated', {
+      coopId: cooperativeId,
+      year,
+      month,
+      bankCount,
+      banks,
+      payableFarmers: payableRows.length,
+    });
+
+    res.setHeader('Content-Type', 'application/zip');
     res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
-
-    await workbook.xlsx.write(res);
-    res.end();
+    res.setHeader('Content-Length', buffer.length);
+    res.send(buffer);
   } catch (error) {
     logger.error('Export bank payment excel failed', {
       error: error.message,
