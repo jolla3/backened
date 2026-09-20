@@ -8,8 +8,53 @@ const {
 } = require('../utils/excel');
 const logger = require('../utils/logger');
 
-// ✅ Move json2csv to TOP - fix dynamic import issue
-const { json2csv } = require('json2csv');
+// json2csv v6 exports { parse, Parser } — not { json2csv }
+const { parse: parseToCsv } = require('json2csv');
+
+/**
+ * Flatten the monthly report object into an array of simple rows for CSV.
+ * Nested charts/graphs are omitted; executive + operational totals are exported.
+ */
+function flattenReportForCsv(report, year, month) {
+  if (!report || typeof report !== 'object') {
+    return [{ year, month, note: 'No report data' }];
+  }
+
+  const kpis = report.executiveKpis || report.overview || {};
+  const operational = report.operational || {};
+  const financial = report.financial || {};
+
+  if (Array.isArray(report.rows) && report.rows.length) {
+    return report.rows;
+  }
+  if (Array.isArray(report) && report.length) {
+    return report;
+  }
+
+  const summary = {
+    year,
+    month,
+    cooperative:
+      (report.cooperative && report.cooperative.name) ||
+      report.cooperative ||
+      '',
+    totalLitres:
+      kpis.totalLitres ?? operational.totalLitres ?? '',
+    totalMilkPayout:
+      kpis.totalMilkPayout ??
+      operational.totalPayout ??
+      financial.totalMilkPayout ??
+      '',
+    totalFeedRevenue:
+      kpis.totalFeedRevenue ?? financial.totalFeedRevenue ?? '',
+    activeFarmers:
+      kpis.activeFarmers ?? operational.uniqueFarmersCount ?? '',
+    transactionCount:
+      kpis.transactionCount ?? operational.transactionCount ?? '',
+  };
+
+  return [summary];
+}
 
 const getMonthly = async (req, res) => {
   try {
@@ -33,8 +78,10 @@ const exportCSV = async (req, res) => {
 
     const data = await reportService.getMonthlyReport(year, month, cooperativeId);
 
-    // ✅ json2csv now available at module scope
-    const csv = json2csv.parse([data]);
+    // Flatten nested monthly report into a single CSV-friendly row of KPIs
+    // (full nested JSON is not a valid flat CSV structure)
+    const flat = flattenReportForCsv(data, year, month);
+    const csv = parseToCsv(flat);
 
     res.setHeader('Content-Type', 'text/csv');
     res.setHeader(
