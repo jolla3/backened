@@ -49,7 +49,17 @@ const farmerSchema = new mongoose.Schema({
     ref: 'Zone',
     index: true,
   },
-  zoneName: { type: String, trim: true }
+  zoneName: { type: String, trim: true },
+
+  // Optional bank details for monthly bank payment Excel
+  bankName: {
+    type: String,
+    trim: true,
+  },
+  accountNumber: {
+    type: String,
+    trim: true,
+  },
 });
 
 farmerSchema.index({ cooperativeId: 1, currentBalance: 1 });

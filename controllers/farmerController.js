@@ -1,5 +1,10 @@
 // controllers/farmerController.js
 const farmerService = require('../services/farmerService');
+const Cooperative = require('../models/cooperative');
+const {
+  createFarmersListWorkbook,
+  buildFarmersListFilename,
+} = require('../utils/excel');
 const logger = require('../utils/logger');
 
 // Create Farmer
@@ -183,6 +188,43 @@ const getFarmerHistory = async (req, res) => {
   }
 };
 
+
+// Export all farmers for this cooperative as Excel
+const exportFarmersExcel = async (req, res) => {
+  try {
+    const cooperativeId = req.user.cooperativeId;
+    if (!cooperativeId) {
+      return res.status(400).json({ error: 'Cooperative ID missing from token' });
+    }
+
+    const [farmers, cooperative] = await Promise.all([
+      farmerService.getFarmersForExport(cooperativeId),
+      Cooperative.findById(cooperativeId).select('name').lean(),
+    ]);
+
+    const cooperativeName = cooperative?.name || '';
+    const workbook = await createFarmersListWorkbook(farmers, { cooperativeName });
+    const filename = buildFarmersListFilename({ cooperativeName });
+
+    res.setHeader(
+      'Content-Type',
+      'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+    );
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+
+    await workbook.xlsx.write(res);
+    res.end();
+  } catch (error) {
+    logger.error('Export farmers excel failed', {
+      error: error.message,
+      correlationId: req.correlationId || 'unknown',
+    });
+    if (!res.headersSent) {
+      res.status(400).json({ error: error.message });
+    }
+  }
+};
+
 module.exports = {
   createFarmer,
   getFarmer,
@@ -193,4 +235,5 @@ module.exports = {
   getBalance,
   updateBalance,
   getFarmerHistory,
+  exportFarmersExcel,
 };

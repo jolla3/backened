@@ -11,12 +11,15 @@ const transactionService = require('./transactionService');
  * Convert a farmer document to a clean profile object (no Mongo IDs)
  */
 const toProfile = (farmer) => ({
+  id: farmer._id,
   farmerCode: farmer.farmer_code,
   name: farmer.name,
   phone: farmer.phone,
   location: farmer.location || '',
   active: farmer.isActive !== false,
   createdAt: farmer.createdAt,
+  bankName: farmer.bankName || '',
+  accountNumber: farmer.accountNumber || '',
 });
 
 /**
@@ -78,6 +81,19 @@ const getFarmerByCode = async (farmerCode, cooperativeId) => {
   return toProfile(farmer);
 };
 
+const ALLOWED_UPDATE_FIELDS = [
+  'name',
+  'phone',
+  'location',
+  'branch_id',
+  'farmer_code',
+  'isActive',
+  'zoneId',
+  'zoneName',
+  'bankName',
+  'accountNumber',
+];
+
 const updateFarmer = async (farmerId, data, cooperativeId) => {
   const farmer = await Farmer.findById(farmerId);
   if (!farmer) throw new Error('Farmer not found');
@@ -85,9 +101,24 @@ const updateFarmer = async (farmerId, data, cooperativeId) => {
     throw new Error('Unauthorized');
   }
 
+  const safe = {};
+  for (const key of ALLOWED_UPDATE_FIELDS) {
+    if (Object.prototype.hasOwnProperty.call(data, key)) {
+      safe[key] = data[key];
+    }
+  }
+
+  // Keep account numbers as strings (preserve leading zeros)
+  if (safe.accountNumber != null) {
+    safe.accountNumber = String(safe.accountNumber).trim();
+  }
+  if (safe.bankName != null) {
+    safe.bankName = String(safe.bankName).trim();
+  }
+
   const updated = await Farmer.findByIdAndUpdate(
     farmerId,
-    { $set: data },
+    { $set: safe },
     { new: true, runValidators: true }
   );
   logger.info('Farmer updated', { farmerCode: updated.farmer_code, cooperativeId });
@@ -126,9 +157,13 @@ const getAllFarmers = async (cooperativeId) => {
       name: f.name,
       phone: f.phone,
       location: f.location || '',
+      zoneName: f.zoneName || '',
+      branchId: f.branch_id || '',
       active: f.isActive !== false,
       currentBalance: balance,
       status,
+      bankName: f.bankName || '',
+      accountNumber: f.accountNumber || '',
     };
   });
 };
@@ -248,6 +283,20 @@ const getFarmerHistory = async (farmerId, cooperativeId, limit = 50) => {
   };
 };
 
+
+/**
+ * Farmers list for Excel export (same data as getAllFarmers, sorted by code).
+ */
+const getFarmersForExport = async (cooperativeId) => {
+  const farmers = await getAllFarmers(cooperativeId);
+  return farmers.sort((a, b) =>
+    String(a.farmerCode || '').localeCompare(String(b.farmerCode || ''), undefined, {
+      numeric: true,
+      sensitivity: 'base',
+    })
+  );
+};
+
 module.exports = {
   createFarmer,
   getFarmer,
@@ -255,6 +304,7 @@ module.exports = {
   updateFarmer,
   deleteFarmer,
   getAllFarmers,
+  getFarmersForExport,
   getBalance,
   getFarmerHistory,
 };
