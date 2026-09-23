@@ -510,8 +510,43 @@ const syncOfflineTransactions = async (transactions, cooperativeId) => {
 };
 
 // ── Get farmer history ──────────────────────────────────
-const getFarmerHistory = async (farmer_code, limit = 50, cooperativeId) => {
+const LEDGER_EVENT_LABELS = {
+  MILK_CREDIT: 'Milk credit',
+  FEED_DEBIT: 'Feed deduction',
+  FEED_CASH_SALE: 'Feed cash sale',
+  PAYMENT: 'Payment',
+  SETTLEMENT: 'Settlement paid',
+  SETTLEMENT_DEBIT: 'Settlement deduction',
+  MANUAL_ADJUSTMENT: 'Manual adjustment',
+  BONUS: 'Bonus',
+  PENALTY: 'Penalty',
+  LOAN: 'Loan',
+  INTEREST: 'Interest',
+  REVERSAL: 'Reversal',
+};
+
+/**
+ * Farmer history — money from Ledger; litres from milk transactions.
+ * Signature (backward compatible):
+ *   getFarmerHistory(farmer_code, limit, cooperativeId)
+ *   getFarmerHistory(farmer_code, { limit, startDate, endDate, cooperativeId })
+ */
+const getFarmerHistory = async (farmer_code, limitOrOptions = 50, cooperativeId) => {
   try {
+    let limit = 50;
+    let startDate = null;
+    let endDate = null;
+
+    if (typeof limitOrOptions === 'object' && limitOrOptions !== null) {
+      limit = parseInt(limitOrOptions.limit, 10) || 100;
+      startDate = limitOrOptions.startDate || null;
+      endDate = limitOrOptions.endDate || null;
+      cooperativeId = limitOrOptions.cooperativeId || cooperativeId;
+    } else {
+      limit = parseInt(limitOrOptions, 10) || 50;
+    }
+    limit = Math.min(Math.max(limit, 1), 500);
+
     const farmer = await Farmer.findOne({ farmer_code });
     if (!farmer) throw new Error('Farmer not found');
 
@@ -523,12 +558,36 @@ const getFarmerHistory = async (farmer_code, limit = 50, cooperativeId) => {
 
     const farmerId = farmer._id;
     const coopId = farmerCoop;
+    const coopOid = new mongoose.Types.ObjectId(coopId);
 
-    // ─── 1. Financial summary from Ledger ──────────────────────
+    // Month boundaries (Africa/Nairobi)
+    const { getCurrentMonthBoundaries, getCumulativeMilkForMonth } = require('./cumulativeMilkService');
+    const monthBounds = getCurrentMonthBoundaries(new Date());
+
+    const buildTsFilter = (from, to) => {
+      if (!from && !to) return {};
+      const f = {};
+      if (from) {
+        const s = new Date(from);
+        s.setHours(0, 0, 0, 0);
+        f.$gte = s;
+      }
+      if (to) {
+        const e = new Date(to);
+        e.setHours(23, 59, 59, 999);
+        f.$lte = e;
+      }
+      return { timestamp: f };
+    };
+
+    const periodTs = buildTsFilter(startDate, endDate);
+    const monthTs = buildTsFilter(monthBounds.startDate, monthBounds.endDate);
+
+    // ─── 1. Lifetime financial summary from Ledger ─────────────
     const ledgerSummary = await Ledger.aggregate([
       {
         $match: {
-          cooperativeId: new mongoose.Types.ObjectId(coopId),
+          cooperativeId: coopOid,
           farmerId: farmerId,
         },
       },
@@ -542,7 +601,13 @@ const getFarmerHistory = async (farmer_code, limit = 50, cooperativeId) => {
             $sum: { $cond: [{ $eq: ['$type', 'FEED_DEBIT'] }, { $abs: '$amount' }, 0] },
           },
           settlementDeductions: {
-            $sum: { $cond: [{ $eq: ['$type', 'SETTLEMENT_DEBIT'] }, { $abs: '$amount' }, 0] },
+            $sum: {
+              $cond: [
+                { $in: ['$type', ['SETTLEMENT_DEBIT', 'SETTLEMENT']] },
+                { $abs: '$amount' },
+                0,
+              ],
+            },
           },
           bonuses: {
             $sum: { $cond: [{ $eq: ['$type', 'BONUS'] }, '$amount', 0] },
@@ -574,7 +639,70 @@ const getFarmerHistory = async (farmer_code, limit = 50, cooperativeId) => {
       manualAdjustments: 0,
     };
 
-    // ─── 2. Current balance from latest Ledger entry ────────────
+    // Real deductions only (NOT settlements / payouts)
+    const lifetimeDeductions =
+      (summary.penalties || 0) +
+      (summary.loans || 0) +
+      (summary.interest || 0) +
+      (summary.manualAdjustments < 0 ? Math.abs(summary.manualAdjustments) : 0);
+    const lifetimeSettlements = summary.settlementDeductions || 0;
+
+    // ─── 2. This-month money from Ledger ───────────────────────
+    // Deductions = LOAN / INTEREST / PENALTY / MANUAL_ADJUSTMENT only
+    // Settlements = SETTLEMENT / SETTLEMENT_DEBIT (payouts — not deductions)
+    // Feed = FEED_DEBIT (shown separately)
+    const monthLedgerSummary = await Ledger.aggregate([
+      {
+        $match: {
+          cooperativeId: coopOid,
+          farmerId: farmerId,
+          ...monthTs,
+        },
+      },
+      {
+        $group: {
+          _id: null,
+          milkIncome: {
+            $sum: { $cond: [{ $eq: ['$type', 'MILK_CREDIT'] }, '$amount', 0] },
+          },
+          feedCost: {
+            $sum: { $cond: [{ $eq: ['$type', 'FEED_DEBIT'] }, { $abs: '$amount' }, 0] },
+          },
+          deductions: {
+            $sum: {
+              $cond: [
+                {
+                  $in: ['$type', ['LOAN', 'INTEREST', 'PENALTY', 'MANUAL_ADJUSTMENT']],
+                },
+                { $abs: '$amount' },
+                0,
+              ],
+            },
+          },
+          settlements: {
+            $sum: {
+              $cond: [
+                { $in: ['$type', ['SETTLEMENT', 'SETTLEMENT_DEBIT']] },
+                { $abs: '$amount' },
+                0,
+              ],
+            },
+          },
+          bonuses: {
+            $sum: { $cond: [{ $eq: ['$type', 'BONUS'] }, '$amount', 0] },
+          },
+        },
+      },
+    ]);
+    const monthMoney = monthLedgerSummary[0] || {
+      milkIncome: 0,
+      feedCost: 0,
+      deductions: 0,
+      settlements: 0,
+      bonuses: 0,
+    };
+
+    // ─── 3. Current balance (latest ledger) ────────────────────
     const lastLedger = await Ledger.findOne({
       cooperativeId: coopId,
       farmerId: farmerId,
@@ -583,17 +711,16 @@ const getFarmerHistory = async (farmer_code, limit = 50, cooperativeId) => {
       .lean();
 
     const currentBalance = lastLedger ? lastLedger.runningBalance : 0;
-
     let status = 'SETTLED';
     if (currentBalance > 0) status = 'PAYABLE';
     else if (currentBalance < 0) status = 'OWES_COOPERATIVE';
 
-    // ─── 3. Lifetime operational metrics from Transactions ──────
+    // ─── 4. Lifetime litres from milk transactions ─────────────
     const operationalStats = await Transaction.aggregate([
       {
         $match: {
           farmer_id: farmerId,
-          cooperativeId: new mongoose.Types.ObjectId(coopId),
+          cooperativeId: coopOid,
         },
       },
       {
@@ -642,45 +769,113 @@ const getFarmerHistory = async (farmer_code, limit = 50, cooperativeId) => {
     };
     const totalTransactions = stats.all?.[0]?.total || 0;
 
-    // ─── 4. Opening balance ──────────────────────────────────────
+    // ─── 5. This-month cumulative litres ────────────────────────
+    let monthLitres = 0;
+    try {
+      const cum = await getCumulativeMilkForMonth(farmerId, coopId, new Date(), null);
+      monthLitres = Number(cum.litres || 0);
+    } catch (err) {
+      logger.warn('Month cumulative milk failed, falling back', { error: err.message });
+      const m = await Transaction.aggregate([
+        {
+          $match: {
+            farmer_id: farmerId,
+            cooperativeId: coopOid,
+            type: 'milk',
+            collectionDate: {
+              $gte: monthBounds.startDate,
+              $lte: monthBounds.endDate,
+            },
+          },
+        },
+        { $group: { _id: null, litres: { $sum: '$litres' } } },
+      ]);
+      monthLitres = m[0]?.litres || 0;
+    }
+
+    // ─── 6. Period litres (when date filter applied) ───────────
+    let periodLitres = null;
+    if (startDate || endDate) {
+      const milkMatch = {
+        farmer_id: farmerId,
+        cooperativeId: coopOid,
+        type: 'milk',
+      };
+      milkMatch.collectionDate = {};
+      if (startDate) milkMatch.collectionDate.$gte = String(startDate).slice(0, 10);
+      if (endDate) milkMatch.collectionDate.$lte = String(endDate).slice(0, 10);
+      const pl = await Transaction.aggregate([
+        { $match: milkMatch },
+        { $group: { _id: null, litres: { $sum: '$litres' }, deliveries: { $sum: 1 } } },
+      ]);
+      periodLitres = pl[0]?.litres || 0;
+    }
+
+    // ─── 7. Opening balance ────────────────────────────────────
     const firstLedger = await Ledger.findOne({
       cooperativeId: coopId,
       farmerId: farmerId,
     })
       .sort({ timestamp: 1 })
       .lean();
-    const openingBalance = firstLedger ? firstLedger.runningBalance - firstLedger.amount : 0;
+    const openingBalance = firstLedger
+      ? firstLedger.runningBalance - firstLedger.amount
+      : 0;
 
-    // ─── 5. Ledger history (financial statement) ──────────────────
-    const ledgerHistory = await Ledger.find({
-      cooperativeId: coopId,
+    // ─── 8. Ledger history (PRIMARY money list, optional date filter) ──
+    const ledgerQuery = {
+      cooperativeId: coopOid,
       farmerId: farmerId,
-    })
+      ...periodTs,
+    };
+
+    const ledgerHistory = await Ledger.find(ledgerQuery)
       .sort({ timestamp: -1 })
       .limit(limit)
       .lean();
 
-    const formattedLedgerHistory = ledgerHistory.map(entry => ({
+    const formattedLedgerHistory = ledgerHistory.map((entry) => ({
+      id: entry._id,
       date: entry.timestamp,
       type: entry.type,
+      label: LEDGER_EVENT_LABELS[entry.type] || entry.type,
       amount: entry.amount,
       balanceAfter: entry.runningBalance,
-      description: entry.description || entry.reference || '',
-      reference: entry.reference,
+      description: entry.description || '',
+      reference: entry.reference || '',
+      isCredit: entry.amount > 0,
     }));
 
-    // ─── 6. Transaction history (operational) with porter name ──
-    const transactions = await Transaction.aggregate([
+    // Period money totals for filter
+    const periodAgg = await Ledger.aggregate([
+      { $match: ledgerQuery },
       {
-        $match: {
-          farmer_id: farmerId,
-          cooperativeId: new mongoose.Types.ObjectId(coopId),
+        $group: {
+          _id: null,
+          milkIncome: {
+            $sum: { $cond: [{ $eq: ['$type', 'MILK_CREDIT'] }, '$amount', 0] },
+          },
+          credits: {
+            $sum: { $cond: [{ $gt: ['$amount', 0] }, '$amount', 0] },
+          },
+          debits: {
+            $sum: { $cond: [{ $lt: ['$amount', 0] }, { $abs: '$amount' }, 0] },
+          },
         },
       },
-      {
-        $sort: { timestamp_server: -1 },
-      },
-      { $limit: parseInt(limit) },
+    ]);
+    const periodMoney = periodAgg[0] || { milkIncome: 0, credits: 0, debits: 0 };
+
+    // ─── 9. Optional operational transactions (secondary; not primary UI) ──
+    const txMatch = {
+      farmer_id: farmerId,
+      cooperativeId: coopOid,
+    };
+    // If date filter: still return txs for same window for debugging; primary remains ledger
+    const transactions = await Transaction.aggregate([
+      { $match: txMatch },
+      { $sort: { timestamp_server: -1 } },
+      { $limit: limit },
       {
         $lookup: {
           from: 'porters',
@@ -689,9 +884,7 @@ const getFarmerHistory = async (farmer_code, limit = 50, cooperativeId) => {
           as: 'porterInfo',
         },
       },
-      {
-        $unwind: { path: '$porterInfo', preserveNullAndEmptyArrays: true },
-      },
+      { $unwind: { path: '$porterInfo', preserveNullAndEmptyArrays: true } },
       {
         $project: {
           receipt: '$receipt_num',
@@ -710,24 +903,34 @@ const getFarmerHistory = async (farmer_code, limit = 50, cooperativeId) => {
       },
     ]);
 
-    // Format transactions for frontend
-    const cleanTransactions = transactions.map(t => ({
-      receipt: t.receipt || '',
-      date: t.date,
-      event: t.type === 'milk' ? 'Milk Delivery' : 'Feed Purchase',
-      litres: t.litres || 0,
-      quantity: t.quantity || 0,
-      amount: t.type === 'milk' ? (t.payout || 0) : (t.cost || 0),
-      paymentMethod: t.paymentMethod || 'balance',
-      zone: t.zone || '',
-      porter: t.porterName || 'Unknown',
-      device_id: t.device_id,
+    const cleanTransactions = transactions.map((tx) => ({
+      receipt: tx.receipt || '',
+      date: tx.date,
+      event: tx.type === 'milk' ? 'Milk Delivery' : 'Feed Purchase',
+      litres: tx.litres || 0,
+      quantity: tx.quantity || 0,
+      amount: tx.type === 'milk' ? tx.payout || 0 : tx.cost || 0,
+      paymentMethod: tx.paymentMethod || 'balance',
+      zone: tx.zone || '',
+      porter: tx.porterName || 'Unknown',
+      device_id: tx.device_id,
     }));
 
-    // ─── 7. Net earnings ──────────────────────────────────────────
-    const netEarnings = summary.milkIncome - summary.feedCost - summary.settlementDeductions;
+    // Lifetime net position style: credits - feed - real deductions - settlements paid
+    const netEarnings =
+      summary.milkIncome +
+      (summary.bonuses || 0) -
+      summary.feedCost -
+      lifetimeDeductions -
+      lifetimeSettlements;
 
-    // ─── 8. Assemble response ────────────────────────────────────
+    // This-month operational net (before settlement payouts)
+    const monthNet =
+      (monthMoney.milkIncome || 0) +
+      (monthMoney.bonuses || 0) -
+      (monthMoney.feedCost || 0) -
+      (monthMoney.deductions || 0);
+
     return {
       farmer: {
         id: farmer._id,
@@ -748,6 +951,7 @@ const getFarmerHistory = async (farmer_code, limit = 50, cooperativeId) => {
         loans: summary.loans,
         interest: summary.interest,
         manualAdjustments: summary.manualAdjustments,
+        lifetimeDeductions,
         netEarnings,
         lifetimeLitres: milkStats.totalLitres,
         deliveries: milkStats.count,
@@ -757,15 +961,48 @@ const getFarmerHistory = async (farmer_code, limit = 50, cooperativeId) => {
         feedPurchases: feedStats.count,
         totalFeedQuantity: feedStats.totalQuantity,
         totalTransactions,
+        // this month
+        monthMilkIncome: monthMoney.milkIncome || 0,
+        monthFeedCost: monthMoney.feedCost || 0,
+        monthDeductions: monthMoney.deductions || 0,
+        monthSettlements: monthMoney.settlements || 0,
+        monthBonuses: monthMoney.bonuses || 0,
+        monthNet,
+        lifetimeSettlements,
+        monthLitres,
+        monthYear: monthBounds.year,
+        monthNumber: monthBounds.month,
+        // period filter
+        periodMilkIncome: periodMoney.milkIncome || 0,
+        periodCredits: periodMoney.credits || 0,
+        periodDebits: periodMoney.debits || 0,
+        periodLitres,
+      },
+      period: {
+        startDate: startDate || null,
+        endDate: endDate || null,
+        monthStart: monthBounds.startDate,
+        monthEnd: monthBounds.endDate,
       },
       statement: {
         openingBalance,
-        credits: summary.milkIncome + summary.bonuses + (summary.manualAdjustments > 0 ? summary.manualAdjustments : 0),
-        debits: summary.feedCost + summary.settlementDeductions + summary.penalties + summary.loans + summary.interest + (summary.manualAdjustments < 0 ? Math.abs(summary.manualAdjustments) : 0),
+        credits:
+          summary.milkIncome +
+          summary.bonuses +
+          (summary.manualAdjustments > 0 ? summary.manualAdjustments : 0),
+        debits:
+          summary.feedCost +
+          summary.settlementDeductions +
+          summary.penalties +
+          summary.loans +
+          summary.interest +
+          (summary.manualAdjustments < 0 ? Math.abs(summary.manualAdjustments) : 0),
         closingBalance: currentBalance,
       },
-      transactions: cleanTransactions,
+      // Primary money history
       ledgerHistory: formattedLedgerHistory,
+      // Secondary operational list (optional)
+      transactions: cleanTransactions,
     };
   } catch (error) {
     logger.error('FarmerHistory failed', { error: error.message, farmer_code, cooperativeId });

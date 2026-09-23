@@ -2,6 +2,7 @@
 const mongoose = require('mongoose');
 const Farmer = require('../models/farmer');
 const Ledger = require('../models/ledger');
+const Transaction = require('../models/transaction');
 const logger = require('../utils/logger');
 const transactionService = require('./transactionService');
 
@@ -202,14 +203,21 @@ const getBalance = async (farmerId, cooperativeId) => {
     feedCost: summary.feedCost || 0,
     lifetimeLitres: summary.lifetimeLitres || 0,
     netEarnings: summary.netEarnings || 0,
-    deliveries: summary.deliveries || 0,
   };
 };
 
-// ─── Get farmer history ──────────────────────────────────────────
-
-const getFarmerHistory = async (farmerId, cooperativeId, limit = 50) => {
+/**
+ * Farmer history for API — delegates to transactionService (Ledger = money source).
+ * Maps result into the shape the Farmers UI expects.
+ */
+const getFarmerHistory = async (farmerId, cooperativeId, options = {}) => {
   if (!farmerId) throw new Error('Farmer ID is required');
+
+  const {
+    startDate = null,
+    endDate = null,
+    limit = 100,
+  } = options;
 
   const farmer = await Farmer.findById(farmerId);
   if (!farmer) throw new Error('Farmer not found');
@@ -217,72 +225,77 @@ const getFarmerHistory = async (farmerId, cooperativeId, limit = 50) => {
     throw new Error('Unauthorized');
   }
 
-  // Use transactionService to get the full history
-  const raw = await transactionService.getFarmerHistory(
-    farmer.farmer_code,
+  const raw = await transactionService.getFarmerHistory(farmer.farmer_code, {
     limit,
-    cooperativeId
-  );
+    startDate,
+    endDate,
+    cooperativeId,
+  });
+
   if (raw.error) throw new Error(raw.error);
 
   const summary = raw.summary || {};
-  const transactions = raw.transactions || [];
-  const ledgerHistory = raw.ledgerHistory || [];
-
-  const profile = {
-    farmerCode: farmer.farmer_code,
-    name: farmer.name,
-    phone: farmer.phone,
-    location: farmer.location || '',
-    active: farmer.isActive !== false,
-  };
-
-  const financial = {
-    currentBalance: summary.currentBalance || 0,
-    status: summary.status || 'SETTLED',
-    lifetimeMilkIncome: summary.milkIncome || 0,
-    totalFeedPurchases: summary.feedCost || 0,
-    totalSettlements: summary.settlementDeductions || 0,
-    netEarnings: summary.netEarnings || 0,
-  };
-
-  const production = {
-    lifetimeLitres: summary.lifetimeLitres || 0,
-    deliveries: summary.deliveries || 0,
-    averageLitresPerDelivery: summary.averageLitresPerDelivery || 0,
-    firstDelivery: summary.firstDelivery,
-    lastDelivery: summary.lastDelivery,
-  };
-
-  const statement = ledgerHistory.map(entry => ({
+  const ledgerHistory = (raw.ledgerHistory || []).map((entry) => ({
+    id: entry.id,
     date: entry.date,
     type: entry.type,
+    label: entry.label || entry.type,
     amount: entry.amount,
     balanceAfter: entry.balanceAfter,
-    description: entry.description || entry.reference || '',
-  }));
-
-  const cleanTransactions = transactions.map(t => ({
-    receipt: t.receipt || '',
-    date: t.date || t.timestamp_server,
-    event: t.event || (t.type === 'milk' ? 'Milk Delivery' : 'Feed Purchase'),
-    litres: t.litres || 0,
-    quantity: t.quantity || 0,
-    amount: t.amount || t.payout || t.cost || 0,
-    paymentMethod: t.paymentMethod || 'balance',
-    zone: t.zone || '',
-    porter: t.porter || '',
+    description: entry.description || '',
+    reference: entry.reference || '',
+    isCredit: entry.amount > 0,
   }));
 
   return {
-    profile,
-    financial,
-    production,
-    statement: statement.slice(0, limit),
-    transactions: cleanTransactions.slice(0, limit),
+    profile: {
+      farmerCode: farmer.farmer_code,
+      name: farmer.name,
+      phone: farmer.phone,
+      location: farmer.location || '',
+      active: farmer.isActive !== false,
+    },
+    financial: {
+      currentBalance: summary.currentBalance || 0,
+      status: summary.status || 'SETTLED',
+      lifetimeMilkIncome: summary.milkIncome || 0,
+      lifetimeFeedCost: summary.feedCost || 0,
+      lifetimeDeductions: summary.lifetimeDeductions || 0,
+      lifetimeBonuses: summary.bonuses || 0,
+      lifetimeNet: summary.netEarnings || 0,
+      monthMilkIncome: summary.monthMilkIncome || 0,
+      monthFeedCost: summary.monthFeedCost || 0,
+      monthDeductions: summary.monthDeductions || 0,
+      monthBonuses: summary.monthBonuses || 0,
+      monthNet: summary.monthNet || 0,
+      periodMilkIncome: summary.periodMilkIncome || 0,
+      periodCredits: summary.periodCredits || 0,
+      periodDebits: summary.periodDebits || 0,
+      totalFeedPurchases: summary.feedCost || 0,
+      totalSettlements: summary.settlementDeductions || 0,
+      netEarnings: summary.netEarnings || 0,
+    },
+    production: {
+      lifetimeLitres: summary.lifetimeLitres || 0,
+      lifetimeDeliveries: summary.deliveries || 0,
+      deliveries: summary.deliveries || 0,
+      averageLitresPerDelivery: summary.averageLitresPerDelivery || 0,
+      firstDelivery: summary.firstDelivery,
+      lastDelivery: summary.lastDelivery,
+      monthLitres: summary.monthLitres || 0,
+      monthYear: summary.monthYear,
+      monthNumber: summary.monthNumber,
+      periodLitres: summary.periodLitres,
+    },
+    period: raw.period || {
+      startDate: startDate || null,
+      endDate: endDate || null,
+    },
+    ledgerHistory,
+    statement: ledgerHistory,
+    transactions: raw.transactions || [],
   };
 };
-
 
 /**
  * Farmers list for Excel export (same data as getAllFarmers, sorted by code).

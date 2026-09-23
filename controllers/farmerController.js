@@ -175,8 +175,12 @@ const getFarmerHistory = async (req, res) => {
       return res.status(400).json({ error: 'Valid farmer ID is required' });
     }
 
-    const { limit = 50 } = req.query;
-    const result = await farmerService.getFarmerHistory(farmerId, cooperativeId, parseInt(limit));
+    const { limit = 100, startDate, endDate } = req.query;
+    const result = await farmerService.getFarmerHistory(farmerId, cooperativeId, {
+      limit: parseInt(limit, 10) || 100,
+      startDate: startDate || null,
+      endDate: endDate || null,
+    });
     res.json(result);
   } catch (error) {
     logger.error('Get farmer history failed', {
