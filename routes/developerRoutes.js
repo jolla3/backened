@@ -48,6 +48,7 @@ router.get('/cooperative/:cooperativeId/usage', accountingController.getCooperat
 
 // Messages
 router.get('/messages', accountingController.getSmsMessages);
+router.get('/messages/:id', accountingController.getSmsMessageById);
 
 // Reconciliation
 router.get('/reconciliation', accountingController.getReconciliation);

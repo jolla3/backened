@@ -108,6 +108,24 @@ const getUsageTimeline = async (req, res) => {
  * Get paginated list of SMS messages with filters.
  * Query params: cooperativeId, status, type, startDate, endDate, page, limit
  */
+
+/**
+ * Get a single SMS message by id (enriched).
+ */
+const getSmsMessageById = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const message = await accountingService.getMessageById(id);
+    if (!message) {
+      return res.status(404).json({ success: false, error: 'Message not found' });
+    }
+    res.json({ success: true, message });
+  } catch (error) {
+    logger.error('Failed to get SMS message', { error: error.message });
+    res.status(400).json({ success: false, error: error.message });
+  }
+};
+
 const getSmsMessages = async (req, res) => {
   try {
     const { cooperativeId, status, type, startDate, endDate, page = 1, limit = 20 } = req.query;
@@ -168,6 +186,7 @@ module.exports = {
   getCooperativeUsageSummary,
   getUsageTimeline,
   getSmsMessages,
+  getSmsMessageById,
   getReconciliation,
   refreshBalance,
 };

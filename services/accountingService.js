@@ -165,14 +165,27 @@ const updateProviderBalance = async ({
   currency = 'KES',
   source = 'health_check',
 }) => {
+  // Normalize balance so "4116.00000" and 4116 compare equal (stops snapshot spam)
+  const normalizedBalance =
+    balance === null || balance === undefined || balance === ''
+      ? null
+      : Number(balance);
+  if (normalizedBalance !== null && !Number.isFinite(normalizedBalance)) {
+    throw new Error(`Invalid provider balance: ${balance}`);
+  }
+
   const existingAccount = await SmsProviderAccount.findOne({ provider });
-  const oldBalance = existingAccount ? existingAccount.currentBalance : null;
+  const oldBalanceRaw = existingAccount ? existingAccount.currentBalance : null;
+  const oldBalance =
+    oldBalanceRaw === null || oldBalanceRaw === undefined
+      ? null
+      : Number(oldBalanceRaw);
 
   const account = await SmsProviderAccount.findOneAndUpdate(
     { provider },
     {
       $set: {
-        currentBalance: balance,
+        currentBalance: normalizedBalance,
         currency,
         lastCheckedAt: new Date(),
         status: 'healthy',
@@ -185,37 +198,50 @@ const updateProviderBalance = async ({
     { upsert: true, returnDocument: 'after', setDefaultsOnInsert: true }
   );
 
+  const balancesEqual =
+    oldBalance !== null &&
+    normalizedBalance !== null &&
+    Math.abs(oldBalance - normalizedBalance) < 0.00001;
+
   const shouldSnapshot =
     source === 'manual_refresh' ||
     source === 'manual' ||
     oldBalance === null ||
-    oldBalance !== balance;
+    !balancesEqual;
 
-  if (shouldSnapshot) {
+  if (shouldSnapshot && normalizedBalance !== null) {
     const snapshot = new SmsBalanceSnapshot({
       provider,
-      balance,
+      balance: normalizedBalance,
       currency,
       checkedAt: new Date(),
       source,
-      dedupKey: `${provider}:${balance}:${Math.floor(Date.now() / (15 * 60 * 1000))}`,
+      // 1-hour dedupe window for identical balance from health_check
+      dedupKey: `${provider}:${normalizedBalance}:${Math.floor(Date.now() / (60 * 60 * 1000))}`,
     });
-    await snapshot.save();
+    try {
+      await snapshot.save();
+    } catch (err) {
+      // Duplicate dedupKey → ignore (throttle spam)
+      if (err.code !== 11000) throw err;
+      logger.debug('Balance snapshot deduped', { provider, balance: normalizedBalance });
+      return { account, balanceChanged: false };
+    }
 
     logger.info('Provider balance snapshot created', {
       provider,
       source,
       oldBalance,
-      newBalance: balance,
-      changed: oldBalance !== balance,
+      newBalance: normalizedBalance,
+      changed: !balancesEqual,
     });
 
-    return { account, snapshot, balanceChanged: oldBalance !== balance };
+    return { account, snapshot, balanceChanged: !balancesEqual };
   }
 
   logger.debug('Provider balance unchanged – no snapshot created', {
     provider,
-    balance,
+    balance: normalizedBalance,
   });
 
   return { account, balanceChanged: false };
@@ -333,7 +359,10 @@ const getCooperativeUsage = async (cooperativeId, startDate, endDate) => {
     ...buildDateFilter(startDate, endDate),
   };
 
-  const [ledgerResult, outboundCount] = await Promise.all([
+  const coopOid = new mongoose.Types.ObjectId(cooperativeId);
+  const dateFilter = buildDateFilter(startDate, endDate);
+
+  const [ledgerResult, statusCounts, coop] = await Promise.all([
     SmsUsageLedger.aggregate([
       { $match: match },
       {
@@ -345,21 +374,38 @@ const getCooperativeUsage = async (cooperativeId, startDate, endDate) => {
         },
       },
     ]),
-    OutboundSms.countDocuments({
-      cooperativeId,
-      ...buildDateFilter(startDate, endDate),
-      status: { $in: ['sent', 'delivered', 'failed', 'unknown'] },
-    }),
+    OutboundSms.aggregate([
+      {
+        $match: {
+          cooperativeId: coopOid,
+          ...dateFilter,
+          status: { $in: ['sent', 'delivered', 'failed', 'unknown'] },
+        },
+      },
+      { $group: { _id: '$status', count: { $sum: 1 } } },
+    ]),
+    Cooperative.findById(coopOid).select('name').lean(),
   ]);
 
   const ledgerData = ledgerResult[0] || { totalMessages: 0, totalSegments: 0, totalCost: 0 };
+  const byStatus = Object.fromEntries(statusCounts.map((r) => [r._id, r.count]));
+  const outboundCount =
+    (byStatus.sent || 0) +
+    (byStatus.delivered || 0) +
+    (byStatus.failed || 0) +
+    (byStatus.unknown || 0);
 
   return {
+    cooperativeId,
+    cooperativeName: coop?.name || 'Unknown',
     totalMessages: outboundCount,
     totalSegments: ledgerData.totalSegments,
     totalCost: ledgerData.totalCost,
     outboundMessages: outboundCount,
     ledgerMessages: ledgerData.totalMessages,
+    failedCount: byStatus.failed || 0,
+    unknownCount: byStatus.unknown || 0,
+    acceptedMessages: (byStatus.sent || 0) + (byStatus.delivered || 0),
   };
 };
 
@@ -501,17 +547,40 @@ const getMessages = async ({ cooperativeId, status, type, startDate, endDate, pa
     },
     { $unwind: { path: '$ledger', preserveNullAndEmptyArrays: true } },
     {
+      $lookup: {
+        from: 'farmers',
+        localField: 'farmerId',
+        foreignField: '_id',
+        as: 'farmer',
+      },
+    },
+    { $unwind: { path: '$farmer', preserveNullAndEmptyArrays: true } },
+    {
       $project: {
         _id: 1,
         createdAt: 1,
+        updatedAt: 1,
+        sentAt: 1,
         phone: 1,
+        message: 1,
+        from: 1,
         type: 1,
         status: 1,
+        priority: 1,
+        deliveryRoute: 1,
+        cooperativeId: 1,
         cooperativeName: '$coop.name',
         farmerId: 1,
+        farmerName: '$farmer.name',
+        farmerCode: '$farmer.farmer_code',
         segments: { $ifNull: ['$ledger.segments', 0] },
         totalCost: { $ifNull: ['$ledger.totalCost', 0] },
         providerMessageId: 1,
+        providerResponse: 1,
+        error: 1,
+        errorCode: 1,
+        retryCount: 1,
+        metadata: 1,
       },
     },
   ];
@@ -522,6 +591,78 @@ const getMessages = async ({ cooperativeId, status, type, startDate, endDate, pa
   ]);
 
   return { messages, total, page, limit };
+};
+
+/**
+ * Single message with farmer + cooperative names (for detail page by id).
+ */
+const getMessageById = async (messageId) => {
+  if (!mongoose.Types.ObjectId.isValid(messageId)) {
+    throw new Error('Invalid message ID');
+  }
+  const oid = new mongoose.Types.ObjectId(messageId);
+  const pipeline = [
+    { $match: { _id: oid } },
+    {
+      $lookup: {
+        from: 'cooperatives',
+        localField: 'cooperativeId',
+        foreignField: '_id',
+        as: 'coop',
+      },
+    },
+    { $unwind: { path: '$coop', preserveNullAndEmptyArrays: true } },
+    {
+      $lookup: {
+        from: 'farmers',
+        localField: 'farmerId',
+        foreignField: '_id',
+        as: 'farmer',
+      },
+    },
+    { $unwind: { path: '$farmer', preserveNullAndEmptyArrays: true } },
+    {
+      $lookup: {
+        from: 'smsusageledgers',
+        localField: '_id',
+        foreignField: 'smsJobId',
+        as: 'ledger',
+      },
+    },
+    { $unwind: { path: '$ledger', preserveNullAndEmptyArrays: true } },
+    {
+      $project: {
+        _id: 1,
+        createdAt: 1,
+        updatedAt: 1,
+        sentAt: 1,
+        phone: 1,
+        message: 1,
+        from: 1,
+        type: 1,
+        status: 1,
+        priority: 1,
+        deliveryRoute: 1,
+        cooperativeId: 1,
+        cooperativeName: '$coop.name',
+        farmerId: 1,
+        farmerName: '$farmer.name',
+        farmerCode: '$farmer.farmer_code',
+        segments: { $ifNull: ['$ledger.segments', 0] },
+        totalCost: { $ifNull: ['$ledger.totalCost', 0] },
+        providerMessageId: 1,
+        providerResponse: 1,
+        error: 1,
+        errorCode: 1,
+        retryCount: 1,
+        maxRetries: 1,
+        metadata: 1,
+        idempotencyKey: 1,
+      },
+    },
+  ];
+  const rows = await OutboundSms.aggregate(pipeline);
+  return rows[0] || null;
 };
 
 // ─── Usage Timeline (daily aggregates, outbound + ledger) ──
@@ -654,4 +795,5 @@ module.exports = {
   getUsageTimeline,
   getReconciliation,
   refreshProviderBalance,
+  getMessageById,
 };
