@@ -49,6 +49,8 @@ const computeInventory = (context) => {
     Medicine: { type: 'stock', items: [] },
     Equipment: { type: 'stock', items: [] },
     Supplies: { type: 'stock', items: [] },
+    Supplements: { type: 'stock', items: [] },
+    Mineral: { type: 'stock', items: [] },
     Other: { type: 'stock', items: [] },
   };
 

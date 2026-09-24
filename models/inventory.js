@@ -5,7 +5,7 @@ const inventorySchema = new mongoose.Schema({
   category: { 
     type: String, 
     required: true, 
-    enum: ['Feed', 'Medicine', 'Equipment', 'Supplies', 'Other'] 
+    enum: ['Feed', 'Medicine', 'Equipment', 'Supplies', 'Supplements', 'Mineral', 'Other'] 
   },
   stock: { type: Number, required: true, min: -1, index: true }, // -1 = deleted
   price: { type: Number, required: true, min: 0 },
