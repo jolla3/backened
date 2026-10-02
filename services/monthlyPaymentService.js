@@ -4,11 +4,17 @@
 // Source of truth: Ledger
 // Accounting model (same as settlementMath / settlementService):
 //
-//   openingBalance  = sum(ledger.amount) where timestamp < periodStart
-//   periodNet       = settleable activity in [periodStart, nextPeriodStart)
-//   closingBalance  = openingBalance + periodNet
-//   amountPayable   = max(closingBalance, 0)   → exposed as netPayout
-//   amountOwedToCoop = max(-closingBalance, 0)
+//   openingBalance  = sum(ledger.amount) where timestamp < periodStart  (audit only)
+//   periodNet       = settleable activity in [periodStart, nextPeriodStart) ONLY
+//   closingBalance  = openingBalance + periodNet  (wallet position, audit only)
+//
+// MONTH ISOLATION (business rule):
+//   Monthly report / bank payout must NOT mix prior months into this month.
+//   netPayout       = max(periodNet, 0)     ← THIS MONTH only
+//   amountOwedToCoop (month) = max(-periodNet, 0)
+//
+// Wallet carry (opening/closing) is still computed for reconciliation, but is
+// NOT used as the bank/SMS monthly payout amount.
 //
 // Does NOT use Settlement documents as the calculation source.
 // Does NOT use farmer.currentBalance as opening (that is live, not historical).
@@ -111,9 +117,9 @@ const loadPeriodTotalsByFarmer = async (
  * Calculate monthly payment rows for a cooperative.
  *
  * Monthly breakdown (activity): milkLitres, grossEarnings, deductions,
- *   bonuses, adjustments, periodNet
- * Accounting position: openingBalance, closingBalance, netPayout (amountPayable),
- *   amountOwedToCooperative
+ *   bonuses, adjustments, periodNet  — all THIS MONTH only (Ledger timestamp window)
+ * netPayout = max(periodNet, 0)  — month-isolated; does NOT include opening balance
+ * openingBalance / closingBalance returned for audit only
  */
 const calculateMonthlyPayments = async ({ cooperativeId, year, month }) => {
   const coopId = requireCooperativeId(cooperativeId);
@@ -143,15 +149,18 @@ const calculateMonthlyPayments = async ({ cooperativeId, year, month }) => {
     const period = computePeriodSettlement(types);
     const openingBalance = openingByFarmer.get(idStr) || 0;
 
-    // Include farmers with period activity OR non-zero opening position
-    // (carry-in alone can produce a payable amount with zero activity).
-    if (!period.hadActivity && openingBalance === 0) continue;
+    // Month isolation: only farmers with THIS MONTH ledger activity appear.
+    // Prior-month wallet alone must not create a row or a payout.
+    if (!period.hadActivity) continue;
 
-    // Same helper used by settlement generation
+    // Wallet position (opening + period) kept for audit / reconciliation only
     const position = computeSettlementPosition(openingBalance, period.periodNet);
 
-    // Integrity: opening + periodNet === closing (within settlement tolerance)
-    // computeSettlementPosition already enforces this via round2.
+    // ── PAYOUT = THIS MONTH ONLY ─────────────────────────────
+    // periodNet = grossEarnings + bonuses + adjustments - deductions (period)
+    // Never add openingBalance into netPayout (would mix last month in).
+    const monthNetPayout = period.periodNet > 0 ? period.periodNet : 0;
+    const monthOwedToCoop = period.periodNet < 0 ? round2(-period.periodNet) : 0;
 
     rows.push({
       farmerId: farmer._id,
@@ -159,7 +168,7 @@ const calculateMonthlyPayments = async ({ cooperativeId, year, month }) => {
       farmerName: farmer.name || '',
       phone: farmer.phone || '',
 
-      // ── Monthly activity breakdown ───────────────────────
+      // ── Monthly activity breakdown (Ledger, this period only) ──
       milkLitres: round2(period.grossMilkLitres),
       grossEarnings: period.grossMilkEarnings,
       deductions: period.totalDeductions,
@@ -167,12 +176,13 @@ const calculateMonthlyPayments = async ({ cooperativeId, year, month }) => {
       adjustments: period.adjustments,
       periodNet: period.periodNet,
 
-      // ── Accounting position (settlement model) ───────────
+      // ── Audit: wallet position (not used for bank amount) ──
       openingBalance: position.openingBalance,
       closingBalance: position.closingBalance,
-      // netPayout = amountPayable = max(closingBalance, 0)
-      netPayout: position.amountPayable,
-      amountOwedToCooperative: position.amountOwedToCoop,
+
+      // ── Bank / report Net Payout = THIS MONTH only ──
+      netPayout: monthNetPayout,
+      amountOwedToCooperative: monthOwedToCoop,
 
       bankName: farmer.bankName || '',
       accountNumber: farmer.accountNumber || '',

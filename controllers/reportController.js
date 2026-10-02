@@ -136,7 +136,12 @@ const getMonthlyPayment = async (req, res) => {
         deductions: r.deductions,
         bonuses: r.bonuses,
         adjustments: r.adjustments,
+        periodNet: r.periodNet,
+        // Month-isolated payout (does not include prior-month opening)
         netPayout: r.netPayout,
+        openingBalance: r.openingBalance,
+        closingBalance: r.closingBalance,
+        amountOwedToCooperative: r.amountOwedToCooperative,
         hasBankAccount: Boolean(String(r.accountNumber || '').trim()),
       })),
     });
