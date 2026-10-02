@@ -296,16 +296,21 @@ const getOrCreateBatch = async (cooperativeId, year, month, bounds, userId, sess
   );
 };
 
-const createAuditLog = async (userId, action, metadata, ip, session) => {
+const createAuditLog = async (userId, action, metadata, ip, session = null) => {
   if (!AuditLog) return;
   try {
-    await new AuditLog({
+    const doc = new AuditLog({
       userId,
       action,
       metadata,
       ipAddress: ip,
       timestamp: new Date(),
-    }).save({ session });
+    });
+    if (session) {
+      await doc.save({ session });
+    } else {
+      await doc.save();
+    }
   } catch (e) {
     logger.warn('Audit log failed', { error: e.message });
   }
@@ -699,18 +704,33 @@ const settleBatch = async (batchId, userId, cooperativeId, ip = null) => {
       }
 
       const farmerCurrentBalance = round2(farmer.currentBalance || 0);
-      const ledgerClosingBalance = round2(position.closingBalance);
 
-      // ── INVARIANT: Farmer.currentBalance must match ledger position ──
-      if (!amountsMatch(farmerCurrentBalance, ledgerClosingBalance)) {
-        const diff = round2(ledgerClosingBalance - farmerCurrentBalance);
+      // Live ledger wallet (ALL time) — must match farmer.currentBalance.
+      // Do NOT compare currentBalance to *period* closing: by the time we settle
+      // last month, this month may already have milk/feed on the wallet.
+      const lastLedger = await Ledger.findOne({
+        cooperativeId: coopId,
+        farmerId: settlement.farmerId,
+      })
+        .sort({ timestamp: -1, _id: -1 })
+        .select('runningBalance')
+        .session(session)
+        .lean();
+
+      const liveLedgerBalance = lastLedger
+        ? round2(lastLedger.runningBalance)
+        : 0;
+
+      if (!amountsMatch(farmerCurrentBalance, liveLedgerBalance)) {
+        const diff = round2(liveLedgerBalance - farmerCurrentBalance);
         mismatchCount += 1;
 
-        logger.error('Settlement blocked: balance mismatch', {
+        logger.error('Settlement blocked: wallet counter ≠ live ledger', {
           farmerId: settlement.farmerId.toString(),
           cooperativeId: coopId.toString(),
           farmerCurrentBalance,
-          ledgerClosingBalance,
+          liveLedgerBalance,
+          periodClosingBalance: position.closingBalance,
           difference: diff,
           settlementId: settlement._id.toString(),
         });
@@ -733,8 +753,9 @@ const settleBatch = async (batchId, userId, cooperativeId, ip = null) => {
                 generationMismatch: true,
                 generationDifference: diff,
                 notes:
-                  `Balance mismatch: Farmer.currentBalance=${farmerCurrentBalance}, ` +
-                  `ledgerClosingBalance=${ledgerClosingBalance}, diff=${diff}. ` +
+                  `Wallet mismatch: Farmer.currentBalance=${farmerCurrentBalance}, ` +
+                  `liveLedgerBalance=${liveLedgerBalance}, diff=${diff}. ` +
+                  `Period closing (audit)=${position.closingBalance}. ` +
                   `Reconcile farmer counter to ledger before settle.`,
               },
             },
@@ -743,13 +764,30 @@ const settleBatch = async (batchId, userId, cooperativeId, ip = null) => {
         continue;
       }
 
+      // ── Period position (the month being settled) ───────────
+      // amountPayable = max(periodClosing, 0)  — money coop may pay for THAT month
+      // amountOwedToCoop = max(-periodClosing, 0) — debt; NEVER cleared by settlement
       const amountPayable = position.amountPayable;
       const amountOwedToCoop = position.amountOwedToCoop;
-      const balanceAfterSettlement = round2(ledgerClosingBalance - amountPayable);
+
+      // ── Negative balance stays ─────────────────────────────
+      // Debt to cooperative is not paid out and not zeroed.
+      // If wallet is already ≤ 0, there is nothing to pay.
+      let payout = 0;
+      if (amountPayable > 0 && farmerCurrentBalance > 0) {
+        // Pay last month's positive payable, but never more than live wallet
+        // so we do not invent extra debt just to "force" period math.
+        payout = round2(Math.min(amountPayable, farmerCurrentBalance));
+      }
+
+      // Wallet after settle = live balance − payout only.
+      // This month's collections already on the wallet are preserved.
+      // Example: settle Sept on Oct 16 → Oct 1–16 milk remains in the balance.
+      const balanceAfterSettlement = round2(farmerCurrentBalance - payout);
 
       let ledgerEntryId = null;
 
-      if (amountPayable > 0) {
+      if (payout > 0) {
         const idempotencyKey = `SETTLEMENT:${coopId}:${settlement._id}`;
         const { doc: ledgerDoc, wasAlreadyDone } = await insertLedgerIdempotent(
           {
@@ -758,7 +796,7 @@ const settleBatch = async (batchId, userId, cooperativeId, ip = null) => {
             settlementId: settlement._id,
             batchId: lockedBatch._id,
             type: 'SETTLEMENT',
-            amount: -amountPayable,
+            amount: -payout,
             runningBalance: balanceAfterSettlement,
             description: `Settlement payout ${settlement.settlementNumber}`,
             reference: settlement.settlementNumber,
@@ -771,8 +809,12 @@ const settleBatch = async (batchId, userId, cooperativeId, ip = null) => {
               closingBalance: position.closingBalance,
               amountPayable,
               amountOwedToCoop,
+              payout,
               farmerCurrentBalanceBefore: farmerCurrentBalance,
               balanceAfterSettlement,
+              note:
+                'Payout clears period positive payable only; does not clear debt; ' +
+                'does not wipe later-month activity already on the wallet',
             },
             timestamp: new Date(),
             idempotencyKey,
@@ -781,7 +823,6 @@ const settleBatch = async (batchId, userId, cooperativeId, ip = null) => {
         );
 
         if (!wasAlreadyDone) {
-          // Ledger-derived exact balance — NOT $inc on a possibly stale counter
           const updated = await updateFarmerBalance(
             settlement.farmerId,
             balanceAfterSettlement,
@@ -801,7 +842,7 @@ const settleBatch = async (batchId, userId, cooperativeId, ip = null) => {
         }
         ledgerEntryId = ledgerDoc._id;
       }
-      // amountPayable === 0: no SETTLEMENT ledger row; debt/zero stays as-is
+      // payout === 0: debt or zero — no SETTLEMENT row; negative stays negative
 
       settledOps.push({
         updateOne: {
@@ -1185,6 +1226,371 @@ const getBatches = async (cooperativeId, query = {}) => {
   };
 };
 
+
+// ─── Override flow (MISMATCH reconciliation) ─────────────────
+//
+// Settlement purpose:
+//   Clear last month's amountPayable from the farmer wallet via a SETTLEMENT
+//   ledger debit, so the next month's opening does not still "owe" that money
+//   as if it were unpaid activity.
+//
+// Override is only for rows stuck in MISMATCH (farmer.currentBalance ≠ ledger).
+
+const requestSettlementOverride = async (
+  settlementId,
+  userId,
+  reason,
+  cooperativeId,
+  ip = null
+) => {
+  const coopId = requireCooperativeId(cooperativeId);
+  if (!reason || !String(reason).trim()) {
+    throw new Error('Override reason is required');
+  }
+
+  const settlement = await Settlement.findOne({
+    _id: settlementId,
+    cooperativeId: coopId,
+  });
+  if (!settlement) throw new Error('Settlement not found');
+  if (!['MISMATCH', 'GENERATED'].includes(settlement.status)) {
+    throw new Error(
+      `Settlement is ${settlement.status}; override can only be requested from MISMATCH or GENERATED`
+    );
+  }
+
+  const farmer = await Farmer.findOne({
+    _id: settlement.farmerId,
+    cooperativeId: coopId,
+  })
+    .select('currentBalance name farmer_code')
+    .lean();
+  if (!farmer) throw new Error('Farmer not found');
+
+  const { position } = await recomputeFarmerPeriodPosition(
+    coopId,
+    settlement.farmerId,
+    settlement.periodStart,
+    settlement.nextPeriodStart
+  );
+
+  const expectedBalance = round2(position.closingBalance);
+  const actualBalance = round2(farmer.currentBalance || 0);
+  const difference = round2(expectedBalance - actualBalance);
+
+  settlement.status = 'OVERRIDE_REQUESTED';
+  settlement.overrideRequest = {
+    requestedBy: userId,
+    requestedAt: new Date(),
+    reason: String(reason).trim(),
+    expectedBalance,
+    actualBalance,
+    difference,
+    status: 'PENDING',
+  };
+  await settlement.save();
+
+  await createAuditLog(
+    userId,
+    'SETTLEMENT_OVERRIDE_REQUESTED',
+    {
+      settlementId: settlement._id,
+      cooperativeId: coopId,
+      reason: String(reason).trim(),
+      expectedBalance,
+      actualBalance,
+      difference,
+    },
+    ip,
+    null
+  );
+
+  return {
+    settlement,
+    expectedBalance,
+    actualBalance,
+    difference,
+  };
+};
+
+const approveSettlementOverride = async (
+  settlementId,
+  userId,
+  resolutionType,
+  manualAmount,
+  notes,
+  cooperativeId,
+  ip = null
+) => {
+  const coopId = requireCooperativeId(cooperativeId);
+  const allowed = ['ACCEPT_ACTUAL', 'KEEP_ORIGINAL', 'MANUAL_AMOUNT'];
+  if (!allowed.includes(resolutionType)) {
+    throw new Error(
+      `resolutionType must be one of: ${allowed.join(', ')}`
+    );
+  }
+
+  const session = await mongoose.startSession();
+  session.startTransaction(TX_OPTS);
+
+  try {
+    const settlement = await Settlement.findOne({
+      _id: settlementId,
+      cooperativeId: coopId,
+    }).session(session);
+    if (!settlement) throw new Error('Settlement not found');
+    if (settlement.status !== 'OVERRIDE_REQUESTED') {
+      throw new Error(
+        `Settlement is ${settlement.status}; must be OVERRIDE_REQUESTED to approve`
+      );
+    }
+    if (!settlement.overrideRequest || settlement.overrideRequest.status !== 'PENDING') {
+      throw new Error('No pending override request on this settlement');
+    }
+
+    // Prefer dual-control: approver ≠ requester when both known
+    if (
+      settlement.overrideRequest.requestedBy &&
+      String(settlement.overrideRequest.requestedBy) === String(userId)
+    ) {
+      throw new Error('Approver must be a different user from the override requester');
+    }
+
+    const { period, position } = await recomputeFarmerPeriodPosition(
+      coopId,
+      settlement.farmerId,
+      settlement.periodStart,
+      settlement.nextPeriodStart,
+      session
+    );
+
+    let resolutionAmount;
+    if (resolutionType === 'ACCEPT_ACTUAL') {
+      // Pay what ledger says is payable now
+      resolutionAmount = position.amountPayable;
+    } else if (resolutionType === 'KEEP_ORIGINAL') {
+      resolutionAmount = round2(
+        settlement.amountPayable ??
+          settlement.totalPayable ??
+          settlement.payableToFarmer ??
+          0
+      );
+    } else {
+      // MANUAL_AMOUNT
+      const n = Number(manualAmount);
+      if (!Number.isFinite(n) || n < 0) {
+        throw new Error('manualAmount must be a non-negative number');
+      }
+      resolutionAmount = round2(n);
+    }
+
+    const farmer = await Farmer.findOne({
+      _id: settlement.farmerId,
+      cooperativeId: coopId,
+    })
+      .select('_id currentBalance lastLedgerId')
+      .session(session);
+    if (!farmer) throw new Error('Farmer not found');
+
+    const farmerCurrentBalance = round2(farmer.currentBalance || 0);
+
+    // Negative balance = debt to cooperative: never pay out, debt stays.
+    let payout = 0;
+    if (resolutionAmount > 0 && farmerCurrentBalance > 0) {
+      payout = round2(Math.min(resolutionAmount, farmerCurrentBalance));
+    }
+    // Wallet after = live − payout only (preserves later activity; does not zero debt)
+    const balanceAfterSettlement = round2(farmerCurrentBalance - payout);
+
+    let ledgerEntryId = null;
+    if (payout > 0) {
+      resolutionAmount = payout; // record what was actually paid
+      const idempotencyKey = `SETTLEMENT_OVERRIDE:${coopId}:${settlement._id}`;
+      const { doc: ledgerDoc, wasAlreadyDone } = await insertLedgerIdempotent(
+        {
+          cooperativeId: coopId,
+          farmerId: settlement.farmerId,
+          settlementId: settlement._id,
+          batchId: settlement.batchId,
+          type: 'SETTLEMENT',
+          amount: -resolutionAmount,
+          runningBalance: balanceAfterSettlement,
+          description: `Settlement override payout ${settlement.settlementNumber} (${resolutionType})`,
+          reference: settlement.settlementNumber,
+          createdBy: userId,
+          metadata: {
+            year: settlement.year,
+            month: settlement.month,
+            resolutionType,
+            resolutionAmount,
+            openingBalance: position.openingBalance,
+            periodNet: position.periodNet,
+            closingBalance: position.closingBalance,
+            override: true,
+            notes: notes || '',
+          },
+          timestamp: new Date(),
+          idempotencyKey,
+        },
+        session
+      );
+
+      if (!wasAlreadyDone) {
+        const updated = await updateFarmerBalance(
+          settlement.farmerId,
+          balanceAfterSettlement,
+          ledgerDoc._id,
+          session,
+          {
+            currentBalance: farmerCurrentBalance,
+            cooperativeId: coopId,
+          }
+        );
+        if (!updated) {
+          throw new Error(
+            `Farmer balance changed concurrently during override: ${settlement.farmerId}`
+          );
+        }
+      }
+      ledgerEntryId = ledgerDoc._id;
+    }
+
+    settlement.status = 'SETTLED';
+    settlement.settledBy = userId;
+    settlement.settledAt = new Date();
+    settlement.ledgerEntryId = ledgerEntryId;
+    settlement.amountPayable = resolutionAmount;
+    settlement.totalPayable = resolutionAmount;
+    settlement.payableToFarmer = resolutionAmount;
+    settlement.openingBalance = position.openingBalance;
+    settlement.periodNet = position.periodNet;
+    settlement.netPayable = position.periodNet;
+    settlement.closingBalance = position.closingBalance;
+    settlement.amountOwedToCoop = position.amountOwedToCoop;
+    settlement.amountOwedByFarmer = position.amountOwedToCoop;
+    settlement.closingOutstandingBalance = position.amountOwedToCoop;
+    settlement.grossMilkLitres = period.grossMilkLitres;
+    settlement.grossMilkEarnings = period.grossMilkEarnings;
+    settlement.totalDeductions = period.totalDeductions;
+    settlement.bonuses = period.bonuses;
+    settlement.adjustments = period.adjustments;
+    settlement.generationMismatch = false;
+    settlement.generationDifference = 0;
+
+    settlement.overrideRequest = {
+      ...settlement.overrideRequest.toObject?.() ?? settlement.overrideRequest,
+      status: 'APPROVED',
+      approvedBy: userId,
+      approvedAt: new Date(),
+      resolutionType,
+      resolutionAmount,
+      resolutionNotes: notes ? String(notes).trim() : '',
+    };
+
+    await settlement.save({ session });
+
+    await createAuditLog(
+      userId,
+      'SETTLEMENT_OVERRIDE_APPROVED',
+      {
+        settlementId: settlement._id,
+        cooperativeId: coopId,
+        resolutionType,
+        resolutionAmount,
+        notes: notes || '',
+      },
+      ip,
+      session
+    );
+
+    await session.commitTransaction();
+    session.endSession();
+    return { settlement, resolutionAmount, resolutionType };
+  } catch (error) {
+    await session.abortTransaction();
+    session.endSession();
+    throw error;
+  }
+};
+
+const rejectSettlementOverride = async (
+  settlementId,
+  userId,
+  notes,
+  cooperativeId,
+  ip = null
+) => {
+  const coopId = requireCooperativeId(cooperativeId);
+  const settlement = await Settlement.findOne({
+    _id: settlementId,
+    cooperativeId: coopId,
+  });
+  if (!settlement) throw new Error('Settlement not found');
+  if (settlement.status !== 'OVERRIDE_REQUESTED') {
+    throw new Error(
+      `Settlement is ${settlement.status}; can only reject a pending OVERRIDE_REQUESTED`
+    );
+  }
+
+  settlement.status = 'MISMATCH';
+  if (settlement.overrideRequest) {
+    settlement.overrideRequest.status = 'REJECTED';
+    settlement.overrideRequest.approvedBy = userId;
+    settlement.overrideRequest.approvedAt = new Date();
+    settlement.overrideRequest.resolutionNotes = notes
+      ? String(notes).trim()
+      : 'Rejected';
+  }
+  await settlement.save();
+
+  await createAuditLog(
+    userId,
+    'SETTLEMENT_OVERRIDE_REJECTED',
+    {
+      settlementId: settlement._id,
+      cooperativeId: coopId,
+      notes: notes || '',
+    },
+    ip,
+    null
+  );
+
+  return { settlement };
+};
+
+const getPendingOverrides = async (cooperativeId, query = {}) => {
+  const coopId = requireCooperativeId(cooperativeId);
+  const page = parseInt(query.page, 10) || 1;
+  const limit = parseInt(query.limit, 10) || 20;
+  const skip = (page - 1) * limit;
+
+  const filter = {
+    cooperativeId: coopId,
+    status: 'OVERRIDE_REQUESTED',
+    'overrideRequest.status': 'PENDING',
+  };
+
+  const [items, total] = await Promise.all([
+    Settlement.find(filter)
+      .populate('farmerId', 'name farmer_code phone')
+      .populate('overrideRequest.requestedBy', 'name')
+      .sort({ 'overrideRequest.requestedAt': -1 })
+      .skip(skip)
+      .limit(limit)
+      .lean(),
+    Settlement.countDocuments(filter),
+  ]);
+
+  return {
+    overrides: items,
+    total,
+    page,
+    limit,
+    totalPages: Math.ceil(total / limit) || 0,
+  };
+};
+
+
 module.exports = {
   getPeriodBounds,
   assertPeriodOpen,
@@ -1199,6 +1605,11 @@ module.exports = {
   closeBatch,
   recordPayment,
   confirmPayment,
+
+  requestSettlementOverride,
+  approveSettlementOverride,
+  rejectSettlementOverride,
+  getPendingOverrides,
 
   getBatch,
   getBatchSettlements,
