@@ -69,7 +69,7 @@ function buildExecutiveKpis(opData, finData, setData) {
   const { summary: settlementSummary } = setData;
 
   // Gross milk earnings (value of milk collected)
-  const grossMilkEarnings = milkOverview.totalPayout || 0;
+  const grossMilkEarnings = milkOverview.totalMilkValue || milkOverview.totalPayout || 0;
 
   // Current farmer liability (positive balances)
   const currentFarmerLiability = outstanding.totalPositive || 0;

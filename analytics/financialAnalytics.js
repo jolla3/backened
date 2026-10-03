@@ -4,6 +4,8 @@ const Transaction = require('../models/transaction');
 const Ledger = require('../models/ledger');
 const Cooperative = require('../models/cooperative');
 const logger = require('../utils/logger');
+const { getKenyaDateString, parseKenyaDate } = require('../utils/dateUtils');
+const { getPeriodBounds } = require('../services/settlementMath');
 
 /**
  * Main financial intelligence – operations from Transactions, balances from Ledger.
@@ -13,8 +15,12 @@ const getFinancialIntelligence = async (cooperativeId) => {
   if (!cooperative) throw new Error('Cooperative not found');
 
   const now = new Date();
-  const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
-  const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  // Kenya calendar (not server-local) for month/today boundaries
+  const kenyaToday = getKenyaDateString(now);
+  const kenyaYear = Number(kenyaToday.slice(0, 4));
+  const kenyaMonth = Number(kenyaToday.slice(5, 7));
+  const { periodStart: startOfMonth } = getPeriodBounds(kenyaYear, kenyaMonth);
+  const startOfToday = parseKenyaDate(kenyaToday);
 
   // Milk litres (month)
   const milkLitresAgg = await Transaction.aggregate([
@@ -138,7 +144,7 @@ const getFarmerLifetimeLedger = async (cooperativeId, farmerIds = null) => {
         _id: '$farmerId',
         milkCredits: { $sum: { $cond: [{ $eq: ['$type', 'MILK_CREDIT'] }, '$amount', 0] } },
         feedDebits: { $sum: { $cond: [{ $eq: ['$type', 'FEED_DEBIT'] }, { $abs: '$amount' }, 0] } },
-        settlementDebits: { $sum: { $cond: [{ $eq: ['$type', 'SETTLEMENT_DEBIT'] }, { $abs: '$amount' }, 0] } },
+        settlementDebits: { $sum: { $cond: [{ $in: ['$type', ['SETTLEMENT', 'SETTLEMENT_DEBIT']] }, { $abs: '$amount' }, 0] } },
         bonuses: { $sum: { $cond: [{ $eq: ['$type', 'BONUS'] }, '$amount', 0] } },
         penalties: { $sum: { $cond: [{ $eq: ['$type', 'PENALTY'] }, { $abs: '$amount' }, 0] } },
         loans: { $sum: { $cond: [{ $eq: ['$type', 'LOAN'] }, { $abs: '$amount' }, 0] } },

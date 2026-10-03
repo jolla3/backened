@@ -13,8 +13,15 @@ const Porter = require('../../models/porter');
  * @returns {Promise<Object>} raw operational data
  */
 const fetchOperationalData = async (year, month, cooperativeId) => {
-  const startDate = new Date(year, month - 1, 1);
-  const endDate = new Date(year, month, 0, 23, 59, 59, 999);
+  // Kenya business month as collectionDate strings (YYYY-MM-DD)
+  const y = Number(year);
+  const m = Number(month);
+  const startDateStr = `${y}-${String(m).padStart(2, '0')}-01`;
+  const lastDay = new Date(Date.UTC(y, m, 0)).getUTCDate();
+  const endDateStr = `${y}-${String(m).padStart(2, '0')}-${String(lastDay).padStart(2, '0')}`;
+  // Keep Date objects for any timestamp_server fallbacks / period metadata
+  const { getPeriodBounds } = require('../settlementMath');
+  const { periodStart: startDate, periodEnd: endDate, nextPeriodStart } = getPeriodBounds(y, m);
   const coopId = new mongoose.Types.ObjectId(cooperativeId);
 
   const cooperative = await Cooperative.findById(coopId).lean();
@@ -25,7 +32,15 @@ const fetchOperationalData = async (year, month, cooperativeId) => {
     {
       $match: {
         cooperativeId: coopId,
-        timestamp_server: { $gte: startDate, $lte: endDate }
+        // Prefer Kenya collectionDate for monthly ops (falls back handled per-facet if needed)
+        $or: [
+          { collectionDate: { $gte: startDateStr, $lte: endDateStr } },
+          // legacy rows without collectionDate
+          {
+            collectionDate: { $in: [null, ''] },
+            timestamp_server: { $gte: startDate, $lte: endDate },
+          },
+        ],
       }
     },
     {
@@ -416,7 +431,14 @@ const fetchOperationalData = async (year, month, cooperativeId) => {
   const farmersWithDeliveriesIds = await Transaction.distinct('farmer_id', {
     cooperativeId: coopId,
     type: 'milk',
-    timestamp_server: { $gte: startDate, $lte: endDate }
+    status: 'completed',
+    $or: [
+      { collectionDate: { $gte: startDateStr, $lte: endDateStr } },
+      {
+        collectionDate: { $in: [null, ''] },
+        timestamp_server: { $gte: startDate, $lte: endDate },
+      },
+    ],
   });
   const farmersNoDeliveries = await Farmer.find({
     cooperativeId: coopId,
@@ -437,7 +459,7 @@ const fetchOperationalData = async (year, month, cooperativeId) => {
 
   return {
     cooperative,
-    period: { start: startDate, end: endDate },
+    period: { start: startDate, end: endDate, startDateStr, endDateStr, year: y, month: m },
     milkOverview,
     feedActivity,
     weekly: weeklyWithGrowth,

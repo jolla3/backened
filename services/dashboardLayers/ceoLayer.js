@@ -255,7 +255,7 @@ const getDefaultPayoutForecast = () => ({
   forecastNextPayout: 0,
   farmersToPay: 0,
   eligibleFarmers: [],
-  payoutRateAssumed: 'KES 45 per litre',
+  payoutRateAssumed: null, // filled from live rate when available
   historicalMonthlyLitres: []
 });
 

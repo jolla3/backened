@@ -1,10 +1,12 @@
 const mongoose = require('mongoose');
 const Transaction = require('../../models/transaction');
 
+const { getPeriodBounds } = require('../settlementMath');
+
 const buildForecast = async (year, month, cooperativeId) => {
-  const startDate = new Date(year, month - 1, 1);
+  const { periodStart: startDate } = getPeriodBounds(year, month);
   const sixMonthsAgo = new Date(startDate);
-  sixMonthsAgo.setMonth(sixMonthsAgo.getMonth() - 6);
+  sixMonthsAgo.setUTCMonth(sixMonthsAgo.getUTCMonth() - 6);
 
   const historical = await Transaction.aggregate([
     {

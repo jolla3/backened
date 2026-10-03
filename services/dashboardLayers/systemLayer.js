@@ -6,7 +6,7 @@ const Device = require('../../models/device');
 const RateVersion = require('../../models/rateVersion');
 const Cooperative = require('../../models/cooperative');
 const logger = require('../../utils/logger');
-const { getKenyaDateString, isValidDateString } = require('../../utils/dateUtils');
+const { getKenyaDateString, parseKenyaDate, isValidDateString } = require('../../utils/dateUtils');
 
 /**
  * Get system overview dashboard data.
@@ -52,13 +52,12 @@ const getSystemOverview = async (cooperativeId) => {
       last_seen: { $gte: new Date(Date.now() - 24 * 3600000) }
     });
 
-    // ── Failed transactions today (system time) ─────────────
-    const startOfDay = new Date();
-    startOfDay.setHours(0, 0, 0, 0);
+    // ── Failed transactions today (Kenya calendar day) ─────
+    const startOfDay = parseKenyaDate(todayStr);
     const failedTransactionsToday = await Transaction.countDocuments({
       cooperativeId: cooperative._id,
       timestamp_server: { $gte: startOfDay },
-      status: 'failed'
+      status: 'failed',
     });
 
     const successRate = todayMetrics.transactionsToday > 0

@@ -4,31 +4,34 @@ const Ledger = require('../../models/ledger');
 const Farmer = require('../../models/farmer');
 const Transaction = require('../../models/transaction');
 
-// ─── Constants ──────────────────────────────────────────────────────────
-const DEBIT_TYPES = ['FEED_DEBIT', 'SETTLEMENT_DEBIT', 'PENALTY', 'LOAN', 'INTEREST'];
-const LEDGER_TYPES = [
-  'MILK_CREDIT',
-  'FEED_DEBIT',
-  'FEED_CASH_SALE',
-  'SETTLEMENT_DEBIT',
-  'MANUAL_ADJUSTMENT',
-  'BONUS',
-  'PENALTY',
-  'LOAN',
-  'INTEREST',
-  'REVERSAL'
-];
+// ─── Constants — aligned with models/ledgerTypes.js ───────────────────
+const {
+  CREDIT_TYPES,
+  DEBIT_TYPES,
+  SIGNED_TYPES,
+  REVERSAL_TYPES,
+  SETTLEMENT_TYPES,
+  OTHER_TYPES,
+  ALL_TYPES,
+} = require('../../models/ledgerTypes');
 
-// ─── Date helper ──────────────────────────────────────────────────────
+const LEDGER_TYPES = ALL_TYPES;
+
+// Period bounds shared with settlement / monthly payment (UTC half-open)
+const { getPeriodBounds } = require('../settlementMath');
+
 const getMonthRange = (year, month) => {
-  const start = new Date(year, month - 1, 1);
-  const end = new Date(year, month, 0, 23, 59, 59, 999);
-  return { startDate: start, endDate: end };
+  const { periodStart, periodEnd, nextPeriodStart } = getPeriodBounds(year, month);
+  return {
+    startDate: periodStart,
+    endDate: periodEnd,
+    nextPeriodStart,
+  };
 };
 
 // ─── Main fetch ──────────────────────────────────────────────────────
 const fetchFinancialData = async (year, month, cooperativeId, farmerIds = []) => {
-  const { startDate, endDate } = getMonthRange(year, month);
+  const { startDate, endDate, nextPeriodStart } = getMonthRange(year, month);
   const coopId = new mongoose.Types.ObjectId(cooperativeId);
 
   // ── 1. Get the latest runningBalance for each farmer ──
@@ -65,7 +68,7 @@ const fetchFinancialData = async (year, month, cooperativeId, farmerIds = []) =>
     {
       $match: {
         cooperativeId: coopId,
-        timestamp: { $gte: startDate, $lte: endDate }
+        timestamp: { $gte: startDate, $lt: nextPeriodStart || new Date(endDate.getTime() + 1) }
       }
     },
     {
@@ -207,7 +210,7 @@ const getFeedRevenueByProduct = async (coopId, startDate, endDate) => {
     {
       $match: {
         cooperativeId: coopId,
-        timestamp: { $gte: startDate, $lte: endDate },
+        timestamp: { $gte: startDate, $lt: nextPeriodStart || new Date(endDate.getTime() + 1) },
         type: { $in: ['FEED_DEBIT', 'FEED_CASH_SALE'] }
       }
     },
@@ -280,7 +283,7 @@ const getFarmerLedgerSummaries = async (farmerObjectIds, startDate, endDate, coo
       $match: {
         cooperativeId: coopId,
         farmerId: { $in: farmerObjectIds },
-        timestamp: { $gte: startDate, $lte: endDate }
+        timestamp: { $gte: startDate, $lt: nextPeriodStart || new Date(endDate.getTime() + 1) }
       }
     },
     {
@@ -288,7 +291,7 @@ const getFarmerLedgerSummaries = async (farmerObjectIds, startDate, endDate, coo
         _id: '$farmerId',
         totalMilkCredits: { $sum: { $cond: [{ $eq: ['$type', 'MILK_CREDIT'] }, '$amount', 0] } },
         totalFeedDebits: { $sum: { $cond: [{ $eq: ['$type', 'FEED_DEBIT'] }, '$amount', 0] } },
-        totalSettlementDebits: { $sum: { $cond: [{ $eq: ['$type', 'SETTLEMENT_DEBIT'] }, '$amount', 0] } },
+        totalSettlementDebits: { $sum: { $cond: [{ $in: ['$type', ['SETTLEMENT', 'SETTLEMENT_DEBIT']] }, '$amount', 0] } },
         totalBonuses: { $sum: { $cond: [{ $eq: ['$type', 'BONUS'] }, '$amount', 0] } },
         totalPenalties: { $sum: { $cond: [{ $eq: ['$type', 'PENALTY'] }, '$amount', 0] } },
         totalLoans: { $sum: { $cond: [{ $eq: ['$type', 'LOAN'] }, '$amount', 0] } },
@@ -361,6 +364,7 @@ const getFarmerLedgerSummaries = async (farmerObjectIds, startDate, endDate, coo
 // ─── Build function ────────────────────────────────────────────────────
 const buildFinancial = (data) => {
   return {
+    // Current wallet position (latest runningBalance) — NOT month-only
     currentLiability: data.currentLiability || 0,
     farmerDebt: data.farmerDebt || 0,
     farmersInDebt: data.farmersInDebt || 0,

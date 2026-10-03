@@ -202,11 +202,21 @@ const getIntelligenceLayer = async (cooperativeId) => {
     }
 
     // ─── Today Summary ──────────────────────────────────────────
+    // Prefer live wallet payable from financial intelligence; never invent rate 55
+    const rate =
+      Number(financial?.activeRate) ||
+      Number(financial?.avgPricePerLiter) ||
+      0;
+    const expectedFromWallet = Number(financial?.amountToPayFarmers);
+    const expectedFromMilk =
+      rate > 0 ? Math.round((operations?.todayLitres || 0) * rate) : 0;
     const todaySummary = {
       milkCollected: operations?.todayLitres || 0,
       transactions: operations?.todayTransactions || 0,
       activeFarmers: operations?.activeFarmersToday || 0,
-      expectedSettlement: Math.round((operations?.todayLitres || 0) * (financial?.activeRate || 55)),
+      expectedSettlement: Number.isFinite(expectedFromWallet) && expectedFromWallet > 0
+        ? Math.round(expectedFromWallet)
+        : expectedFromMilk,
       lowStockItems: inventory?.summary?.lowStock || 0,
     };
 
@@ -394,9 +404,12 @@ const getDefaultIntelligenceLayer = (errorMessage = null) => ({
     milkCollected: 0,
     transactions: 0,
     activeFarmers: 0,
-    expectedSettlement: 0,
+    expectedSettlement: 0, // empty default only — live path uses wallet/rate
     lowStockItems: 0,
   },
+  degraded: Boolean(errorMessage),
+  layerError: errorMessage || null,
+
   financialIntelligence: {
     monthMilkLitres: 0,
     grossMilkValue: 0,

@@ -9,7 +9,7 @@ const Ledger = require('../../models/ledger');
 const Inventory = require('../../models/inventory');
 const Settlement = require('../../models/settlement');
 const logger = require('../../utils/logger');
-const { getKenyaDateString, isValidDateString } = require('../../utils/dateUtils');
+const { getKenyaDateString, isValidDateString, parseKenyaDate } = require('../../utils/dateUtils');
 
 const getSummary = async (cooperativeId) => {
   try {
@@ -123,7 +123,7 @@ const getSummary = async (cooperativeId) => {
     const activeBranches = branches.size;
 
     // ─── 5. Financial from Ledger (uses server timestamp for audit) ──
-    const [latestBalances, todayLedger, feedRevenue, pendingSettlements] = await Promise.all([
+    const [latestBalances, todayLedger, feedRevenue, pendingSettlements, openSettlementAgg] = await Promise.all([
       Ledger.aggregate([
         { $match: { cooperativeId: cooperative._id } },
         { $sort: { timestamp: -1 } },
@@ -133,7 +133,8 @@ const getSummary = async (cooperativeId) => {
         {
           $match: {
             cooperativeId: cooperative._id,
-            timestamp: { $gte: new Date(new Date().setHours(0, 0, 0, 0)) },
+            // Kenya calendar day start (not server-local midnight)
+            timestamp: { $gte: parseKenyaDate(todayStr) },
           },
         },
         {
@@ -157,8 +158,29 @@ const getSummary = async (cooperativeId) => {
       ]),
       Settlement.countDocuments({
         cooperativeId: cooperative._id,
-        status: 'pending',
+        status: { $in: ['GENERATED', 'MISMATCH', 'OVERRIDE_REQUESTED'] },
       }),
+      Settlement.aggregate([
+        {
+          $match: {
+            cooperativeId: cooperative._id,
+            status: { $in: ['GENERATED', 'MISMATCH', 'OVERRIDE_REQUESTED'] },
+          },
+        },
+        {
+          $group: {
+            _id: null,
+            totalPayable: {
+              $sum: {
+                $ifNull: [
+                  '$amountPayable',
+                  { $ifNull: ['$totalPayable', { $ifNull: ['$payableToFarmer', 0] }] },
+                ],
+              },
+            },
+          },
+        },
+      ]),
     ]);
 
     let farmerPayable = 0;   // positive balances: coop owes farmer
@@ -178,13 +200,16 @@ const getSummary = async (cooperativeId) => {
     }
 
     const netPayable = farmerPayable - farmerDebt;
+    const openSettlementPayable = Math.round(openSettlementAgg?.[0]?.totalPayable || 0);
+
 
     // ─── Today's ledger movements (server timestamp) ────────────
     // Note: Ledger.amount is negative for debits, positive for credits,
     // so summing is mathematically correct for net movement.
     const milkCreditsToday = todayLedger.find(l => l._id === 'MILK_CREDIT')?.total || 0;
     const feedDebitsToday = todayLedger.find(l => l._id === 'FEED_DEBIT')?.total || 0;
-    const settlementDebitsToday = todayLedger.find(l => l._id === 'SETTLEMENT_DEBIT')?.total || 0;
+    const settlementDebitsToday = (todayLedger.find(l => l._id === 'SETTLEMENT')?.total || 0)
+      + (todayLedger.find(l => l._id === 'SETTLEMENT_DEBIT')?.total || 0);
     const netWalletMovementToday = milkCreditsToday + feedDebitsToday + settlementDebitsToday;
 
     // ─── 6. Averages ──────────────────────────────────────────────
@@ -221,11 +246,16 @@ const getSummary = async (cooperativeId) => {
       alerts.production = { status: 'ok', message: 'Milk collection is stable' };
     }
 
-    // Cash alert
-    if (farmerPayable > feedRevenueMonth * 0.5 && feedRevenueMonth > 0) {
+    // Cash alert — open settlement work or material positive wallets
+    if (pendingSettlements > 0 || openSettlementPayable > 0) {
       alerts.cash = {
         status: 'warning',
-        message: `KES ${farmerPayable.toLocaleString()} required for settlements`,
+        message: `KES ${(openSettlementPayable || farmerPayable).toLocaleString()} open for settlement (${pendingSettlements} farmer row(s))`,
+      };
+    } else if (farmerPayable > 0) {
+      alerts.cash = {
+        status: 'ok',
+        message: `KES ${farmerPayable.toLocaleString()} current positive farmer wallets (no open settlement batch rows)`,
       };
     } else {
       alerts.cash = { status: 'ok', message: 'Cash position is healthy' };
@@ -264,9 +294,14 @@ const getSummary = async (cooperativeId) => {
     }
 
     // ─── 13. KPI block ──────────────────────────────────────────
+    // Prefer unsettled settlement rows; fall back to current positive wallets
+    const expectedSettlement = openSettlementPayable > 0
+      ? openSettlementPayable
+      : Math.round(farmerPayable);
+
     const kpi = {
       milkCollected: Math.round(todayLitres),
-      expectedSettlement: 0, // placeholder removed – actual calculation needed
+      expectedSettlement,
       activeFarmers: activeFarmersToday,
       healthScore: status === 'Good' ? 85 : status === 'Fair' ? 70 : 50,
     };

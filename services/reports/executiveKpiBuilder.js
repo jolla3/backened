@@ -36,7 +36,8 @@ const buildExecutiveKpis = (operational, financial, settlement) => {
   // ── Movement Breakdown ──
   const milkCredits = movementBreakdown?.MILK_CREDIT?.amount || 0;
   const feedDebits = movementBreakdown?.FEED_DEBIT?.amount || 0;
-  const settlementDebits = movementBreakdown?.SETTLEMENT_DEBIT?.amount || 0;
+  const settlementDebits = (movementBreakdown?.SETTLEMENT?.amount || 0)
+    + (movementBreakdown?.SETTLEMENT_DEBIT?.amount || 0);
   const bonuses = movementBreakdown?.BONUS?.amount || 0;
   const penalties = movementBreakdown?.PENALTY?.amount || 0;
   const loans = movementBreakdown?.LOAN?.amount || 0;
@@ -75,6 +76,7 @@ const buildExecutiveKpis = (operational, financial, settlement) => {
       MILK_CREDIT: movementBreakdown?.MILK_CREDIT || { amount: 0, count: 0 },
       FEED_DEBIT: movementBreakdown?.FEED_DEBIT || { amount: 0, count: 0 },
       FEED_CASH_SALE: movementBreakdown?.FEED_CASH_SALE || { amount: 0, count: 0 },
+      SETTLEMENT: movementBreakdown?.SETTLEMENT || { amount: 0, count: 0 },
       SETTLEMENT_DEBIT: movementBreakdown?.SETTLEMENT_DEBIT || { amount: 0, count: 0 },
       BONUS: movementBreakdown?.BONUS || { amount: 0, count: 0 },
       PENALTY: movementBreakdown?.PENALTY || { amount: 0, count: 0 },

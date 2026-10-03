@@ -2,6 +2,7 @@ const Device = require('../../models/device');
 const Transaction = require('../../models/transaction');
 const Cooperative = require('../../models/cooperative');
 const logger = require('../../utils/logger');
+const { getKenyaDateString, parseKenyaDate } = require('../../utils/dateUtils');
 
 const getDevices = async (cooperativeId) => {
   try {
@@ -23,15 +24,17 @@ const getDevices = async (cooperativeId) => {
       logger.warn('No devices found for cooperative', { cooperativeId });
       return {
         health: [],
-        summary: { 
-          totalDevices: 0, 
-          approvedDevices: 0, 
+        summary: {
+          totalDevices: 0,
+          approvedDevices: 0,
           pendingApproval: 0,
-          activeDevices: 0, 
-          inactiveDevices: 0, 
-          pendingDevices: 0, 
-          syncRate: 0 
-        }
+          activeDevices: 0,
+          inactiveDevices: 0,
+          pendingDevices: 0,
+          syncRate: 0,
+        },
+        degraded: false,
+        layerError: null,
       };
     }
 
@@ -58,9 +61,10 @@ const getDevices = async (cooperativeId) => {
         ? (Date.now() - new Date(lastTx.timestamp_server)) / 36e5 
         : null;
       
+      const kenyaDayStart = parseKenyaDate(getKenyaDateString());
       const todayTx = await Transaction.countDocuments({
         device_id: device.uuid,
-        timestamp_server: { $gte: new Date(new Date().setHours(0, 0, 0, 0)) }
+        timestamp_server: { $gte: kenyaDayStart },
       });
 
       let healthScore = 100;
@@ -132,7 +136,7 @@ const getDevices = async (cooperativeId) => {
     return result;
   } catch (error) {
     logger.error('Devices error', { error: error.message, coopId: cooperativeId });
-    return getDefaultDevices();
+    return { ...getDefaultDevices(), degraded: true, layerError: error.message };
   }
 };
 
