@@ -68,7 +68,7 @@ const fetchFinancialData = async (year, month, cooperativeId, farmerIds = []) =>
     {
       $match: {
         cooperativeId: coopId,
-        timestamp: { $gte: startDate, $lt: nextPeriodStart || new Date(endDate.getTime() + 1) }
+        timestamp: { $gte: startDate, $lte: endDate }
       }
     },
     {
@@ -210,7 +210,7 @@ const getFeedRevenueByProduct = async (coopId, startDate, endDate) => {
     {
       $match: {
         cooperativeId: coopId,
-        timestamp: { $gte: startDate, $lt: nextPeriodStart || new Date(endDate.getTime() + 1) },
+        timestamp: { $gte: startDate, $lte: endDate },
         type: { $in: ['FEED_DEBIT', 'FEED_CASH_SALE'] }
       }
     },
@@ -283,7 +283,7 @@ const getFarmerLedgerSummaries = async (farmerObjectIds, startDate, endDate, coo
       $match: {
         cooperativeId: coopId,
         farmerId: { $in: farmerObjectIds },
-        timestamp: { $gte: startDate, $lt: nextPeriodStart || new Date(endDate.getTime() + 1) }
+        timestamp: { $gte: startDate, $lte: endDate }
       }
     },
     {
