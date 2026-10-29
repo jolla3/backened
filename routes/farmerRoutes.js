@@ -14,6 +14,10 @@ const {
 } = require('../controllers/farmerController');
 
 const deductionRoutes = require('./deductionRoutes');
+const {
+  listFarmerMilkEntries,
+  correctFarmerMilkEntry,
+} = require('../controllers/milkController');
 
 // Farmer CRUD
 router.post('/', createFarmer);
@@ -29,6 +33,10 @@ router.put('/:id', updateFarmer);
 router.delete('/:id', deleteFarmer);
 router.put('/:id/balance', updateBalance);
 router.get('/:id/history', getFarmerHistory);
+
+// Milk correction (farmer-scoped — no receipt lookup in UI)
+router.get('/:id/milk-entries', listFarmerMilkEntries);
+router.post('/:id/milk-corrections', correctFarmerMilkEntry);
 
 // Nested deduction route
 // → POST /api/farmers/:farmerId/deductions

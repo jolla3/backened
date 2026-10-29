@@ -122,3 +122,73 @@ module.exports = {
   getMonthlySummary,
   addManualMilkEntry
 };
+const milkCorrectionService = require('../services/milkCorrectionService');
+
+/**
+ * GET /api/farmers/:id/milk-entries
+ * or GET /api/milk/farmer/:farmerId/entries
+ */
+const listFarmerMilkEntries = async (req, res) => {
+  try {
+    const cooperativeId = req.user.cooperativeId;
+    const farmerId = req.params.id || req.params.farmerId;
+    const { limit, startDate, endDate } = req.query;
+
+    const result = await milkCorrectionService.listFarmerMilkEntries({
+      farmerId,
+      cooperativeId,
+      limit,
+      startDate: startDate || null,
+      endDate: endDate || null,
+    });
+    res.json({ success: true, ...result });
+  } catch (error) {
+    logger.error('List farmer milk entries failed', {
+      error: error.message,
+      coopId: req.user?.cooperativeId,
+    });
+    res.status(400).json({ success: false, error: error.message });
+  }
+};
+
+/**
+ * POST /api/farmers/:id/milk-corrections
+ * Body: { transactionId, litres, collectionDate?, collectionShift?, reason?, resendSms? }
+ */
+const correctFarmerMilkEntry = async (req, res) => {
+  try {
+    const cooperativeId = req.user.cooperativeId;
+    const userId = req.user.id;
+    const farmerId = req.params.id || req.params.farmerId;
+    const {
+      transactionId,
+      litres,
+      collectionDate,
+      collectionShift,
+      reason,
+      resendSms,
+    } = req.body;
+
+    const result = await milkCorrectionService.correctMilkEntry({
+      farmerId,
+      cooperativeId,
+      userId,
+      transactionId,
+      litres,
+      collectionDate: collectionDate || null,
+      collectionShift: collectionShift || null,
+      reason: reason || '',
+      resendSms: Boolean(resendSms),
+    });
+    res.json(result);
+  } catch (error) {
+    logger.error('Correct milk entry failed', {
+      error: error.message,
+      coopId: req.user?.cooperativeId,
+    });
+    res.status(400).json({ success: false, error: error.message });
+  }
+};
+
+module.exports.listFarmerMilkEntries = listFarmerMilkEntries;
+module.exports.correctFarmerMilkEntry = correctFarmerMilkEntry;

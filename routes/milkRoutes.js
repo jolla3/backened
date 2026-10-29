@@ -5,7 +5,9 @@ const { authMiddleware } = require('../middlewares/authMiddleware');
 const {
   getDailyTotal,
   getMonthlySummary,
-  addManualMilkEntry
+  addManualMilkEntry,
+  listFarmerMilkEntries,
+  correctFarmerMilkEntry,
 } = require('../controllers/milkController');
 
 // All routes require authentication
@@ -17,5 +19,8 @@ router.get('/monthly-summary', getMonthlySummary);
 
 // ✅ NEW: Manual milk entry (admin / back-office)
 router.post('/manual', addManualMilkEntry);
+
+router.get('/farmer/:farmerId/entries', listFarmerMilkEntries);
+router.post('/farmer/:farmerId/corrections', correctFarmerMilkEntry);
 
 module.exports = router;
